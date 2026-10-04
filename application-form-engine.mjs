@@ -15,6 +15,7 @@ import {
   preferredDeclineOption,
   stableFieldIdentity,
 } from './application-form-policy.mjs';
+import { validateNarrativeProvenanceRecord } from './application-evidence.mjs';
 
 const MAX_FIELD_ATTEMPTS = 2;
 
@@ -232,6 +233,13 @@ function answerForField(field, semantics, profile, snapshot, artifacts, context)
       if (containsUnresolvedPlaceholder(artifacts.coverLetterTextContent)) {
         throw new Error('Bound cover letter contains an unresolved placeholder');
       }
+      const provenance = artifacts.coverLetterTextProvenance;
+      if (!provenance) throw new Error('Bound cover letter text has no factual provenance');
+      validateNarrativeProvenanceRecord(profile, provenance, {
+        candidateId: cleanFormText(context?.candidate?.candidate_id || context?.candidate?.candidateId),
+        normalizedQuestion: provenance.normalizedQuestion,
+        answer: artifacts.coverLetterTextContent,
+      });
       return { value: artifacts.coverLetterTextContent, answerRecord: null };
     }
     const record = generateCustomNarrativeAnswer(profile, {

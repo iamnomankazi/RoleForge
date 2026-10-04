@@ -101,6 +101,7 @@ export function createArtifactRecord({
   sourceCvVariant = null,
   createdAt = null,
   sourceArtifacts = null,
+  narrativeProvenance = null,
 }) {
   if (!['cv', 'cover_letter', 'cover_letter_text', 'combined_document'].includes(artifactType)) {
     throw new Error(`Unsupported artifact type: ${artifactType}`);
@@ -133,6 +134,11 @@ export function createArtifactRecord({
     sourceCvVariant: artifactType === 'cv' ? (sourceCvVariant || null) : null,
     createdAt: timestamp,
   };
+  if (narrativeProvenance != null) {
+    if (!['cover_letter', 'cover_letter_text'].includes(artifactType)) throw new Error('Only cover-letter artifacts may contain narrative provenance');
+    validateArtifactNarrativeProvenance(narrativeProvenance);
+    record.narrativeProvenance = JSON.parse(JSON.stringify(narrativeProvenance));
+  }
   if (artifactType === 'combined_document') {
     if (!Array.isArray(sourceArtifacts) || sourceArtifacts.length !== 2) throw new Error('Combined document requires exactly two ordered source artifacts');
     record.sourceArtifacts = sourceArtifacts.map((item) => ({ artifactType: item.artifactType, sha256: item.sha256, size: item.size }));
@@ -143,7 +149,7 @@ export function createArtifactRecord({
 export function validateArtifactRecord(record, { root, expectedType = null } = {}) {
   if (!record || typeof record !== 'object' || Array.isArray(record)) throw new Error('Artifact record must be an object');
   const allowed = new Set([
-    'artifactType', 'intendedFilename', 'resolvedPath', 'sha256', 'size', 'sourceCvVariant', 'createdAt', 'sourceArtifacts',
+    'artifactType', 'intendedFilename', 'resolvedPath', 'sha256', 'size', 'sourceCvVariant', 'createdAt', 'sourceArtifacts', 'narrativeProvenance',
   ]);
   for (const key of Object.keys(record)) {
     if (!allowed.has(key)) throw new Error(`Unknown critical artifact field: ${key}`);
@@ -164,6 +170,10 @@ export function validateArtifactRecord(record, { root, expectedType = null } = {
       }
     }
   } else if (record.sourceArtifacts != null) throw new Error('Only combined documents may contain source artifact bindings');
+  if (record.narrativeProvenance != null) {
+    if (!['cover_letter', 'cover_letter_text'].includes(record.artifactType)) throw new Error('Only cover-letter artifacts may contain narrative provenance');
+    validateArtifactNarrativeProvenance(record.narrativeProvenance);
+  }
   validateReadableFilename(record.intendedFilename);
   if (!isAbsolute(record.resolvedPath)) throw new Error('Artifact resolved path must be absolute');
   const outputRoot = realpathSync(resolve(root, 'output'));
@@ -177,4 +187,23 @@ export function validateArtifactRecord(record, { root, expectedType = null } = {
     throw new Error(`Artifact hash or size mismatch: ${record.intendedFilename}`);
   }
   return record;
+}
+
+function validateArtifactNarrativeProvenance(record) {
+  if (!record || record.schemaVersion !== 1 || !['generated', 'reused'].includes(record.wording)
+      || typeof record.candidateId !== 'string' || !record.candidateId
+      || typeof record.normalizedQuestion !== 'string' || !record.normalizedQuestion
+      || typeof record.templateId !== 'string' || !record.templateId
+      || !/^sha256:[a-f0-9]{64}$/.test(record.answerHash)
+      || !Array.isArray(record.factualSources) || record.factualSources.length === 0) {
+    throw new Error('Cover-letter narrative provenance is invalid');
+  }
+  for (const source of record.factualSources) {
+    if (source?.sourceClass !== 'factual' || !['cv', 'structured_profile'].includes(source.sourceType)
+        || !/^sha256:[a-f0-9]{64}$/.test(source.sourceHash)
+        || !/^sha256:[a-f0-9]{64}$/.test(source.evidenceHash)
+        || !Number.isInteger(source.sourceSize) || !source.locator || !source.evidenceIdentity) {
+      throw new Error('Cover-letter factual source binding is invalid');
+    }
+  }
 }

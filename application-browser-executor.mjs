@@ -91,6 +91,7 @@ export async function prepareFormPassWithEvidence(page, browserContext, contract
     const artifacts = {
       ...contract.candidate.artifacts,
       coverLetterTextContent: readFileSync(contract.candidate.artifacts.coverLetterText.resolvedPath, 'utf8'),
+      coverLetterTextProvenance: contract.candidate.artifacts.coverLetterText.narrativeProvenance || null,
     };
     preparation = await prepareOperationalApplicationForm(page, profile, artifacts, {
       context: buildCandidateFormContext(contract),
@@ -1014,6 +1015,7 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
         const artifacts = {
           ...contract.candidate.artifacts,
           coverLetterTextContent: readFileSync(contract.candidate.artifacts.coverLetterText.resolvedPath, 'utf8'),
+          coverLetterTextProvenance: contract.candidate.artifacts.coverLetterText.narrativeProvenance || null,
         };
         const preparation = await prepareFormPassWithEvidence(applicationPage, context, contract, root, {
           resumeMode: 'initial', previousEvidence: null,

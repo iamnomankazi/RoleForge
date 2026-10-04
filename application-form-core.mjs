@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { answerBankMatch, groundedFieldValue } from './application-profile.mjs';
+import { groundedFieldValue } from './application-profile.mjs';
+import { validateNarrativeProvenanceRecord } from './application-evidence.mjs';
 
 const FINAL_WORDS = /\b(submit|send|complete application|finish|confirm application|finali[sz]e)\b/i;
 const LOGIN_WORDS = /\b(sign in|log in|create account|verify email|one[- ]time code|mfa|two[- ]factor)\b/i;
@@ -180,8 +181,18 @@ export function buildFormPlan(snapshot, profile, artifacts) {
       continue;
     }
     let value;
-    if (semantic === 'cover_letter_text') value = artifacts.coverLetterTextContent || null;
-    else if (semantic === 'free_text') value = answerBankMatch(profile, field.label);
+    if (semantic === 'cover_letter_text' && artifacts.coverLetterTextContent && artifacts.coverLetterTextProvenance) {
+      try {
+        validateNarrativeProvenanceRecord(profile, artifacts.coverLetterTextProvenance, {
+          candidateId: artifacts.coverLetterTextProvenance.candidateId,
+          normalizedQuestion: artifacts.coverLetterTextProvenance.normalizedQuestion,
+          answer: artifacts.coverLetterTextContent,
+        });
+        value = artifacts.coverLetterTextContent;
+      } catch {
+        value = null;
+      }
+    } else if (semantic === 'free_text') value = null;
     else if (['phone_country', 'country', 'sponsorship', 'work_authorization', 'relocation'].includes(semantic)) value = dropdownValue(semantic, profile);
     else value = groundedFieldValue(profile, semantic);
 

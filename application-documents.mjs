@@ -22,9 +22,15 @@ import {
   ROOT,
 } from './application-batch.mjs';
 import { loadApplicationProfile, selectApprovedCv } from './application-profile.mjs';
+import { generateCustomNarrativeAnswer, normalizeFormQuestion } from './application-form-policy.mjs';
+import {
+  createNarrativeProvenanceRecord,
+  revalidateFactualEvidence,
+  validateNarrativeProvenanceRecord,
+} from './application-evidence.mjs';
 import { mergeApplicationPdfs } from './application-pdf.mjs';
 
-export const APPLICATION_DOCUMENT_PLAN_SCHEMA_VERSION = 1;
+export const APPLICATION_DOCUMENT_PLAN_SCHEMA_VERSION = 2;
 
 function clean(value) {
   return String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
@@ -67,12 +73,6 @@ function resolveJdEvidence(root, sourceCandidate, jdFile) {
   return { kind: 'jd_file', path: real, text, ...hashFile(real) };
 }
 
-function answer(profile, heading) {
-  const value = profile.answers.get(heading.toLowerCase());
-  if (!value) throw new Error(`Canonical answer evidence is missing: ${heading}`);
-  return value.replace(/\[tool\]|\[real project\]|\[related skill\]/g, '').trim();
-}
-
 function jdRequirements(jdText, limit = 4) {
   const known = [
     'Python', 'SQL', 'PostgreSQL', 'ETL', 'data pipelines', 'Django', 'REST APIs', 'React', 'Next.js',
@@ -84,22 +84,20 @@ function jdRequirements(jdText, limit = 4) {
 
 export function buildGroundedCoverLetter(profile, candidate, jdText, cvSelection, now = new Date()) {
   const requirements = jdRequirements(jdText);
-  const evidenceByVariant = {
-    data_engineering: ['SQL/data experience', 'Data warehouse project', 'Python experience'],
-    ai_ml: ['ML experience', 'Deepfake thesis', 'Python experience'],
-    software_backend: ['Backend/API experience', 'Saki project', 'Odin Store project'],
-    master: ['Tell us about yourself', 'Python experience', 'SQL/data experience'],
-  };
-  const evidence = evidenceByVariant[cvSelection.variant].map((heading) => ({ heading, text: answer(profile, heading) }));
   const requirementText = requirements.length
     ? requirements.join(', ')
     : 'the practical responsibilities described in the job description';
+  const narrative = generateCustomNarrativeAnswer(profile, {
+    question: `Why are you a good fit for this ${candidate.title} role?`,
+    candidate,
+    jdText,
+  });
+  const factualEvidence = revalidateFactualEvidence(profile, narrative.factualSources);
   const paragraphs = [
-    `I am applying for the ${candidate.title} role at ${candidate.company}. The position calls for ${requirementText}, which maps closely to the work I can demonstrate through my studies, internship, and technical projects. I am early in my career, and I am looking for a team where careful implementation and a willingness to learn matter as much as a long list of job titles.`,
-    answer(profile, 'Tell us about yourself'),
-    ...evidence.map((item) => item.text),
-    `What I would bring to ${candidate.company} is a practical way of working: understand the requirement, make the data or feature reliable, validate edge cases, and explain the result clearly. When a tool in the role is new to me, I do not present adjacent experience as direct production use. I connect the underlying concepts to work I have already completed, then learn the specific tool with a concrete deliverable in view.`,
-    `I would welcome an interview to discuss the ${candidate.title} role and show the projects behind these examples. I can contribute on grounded technical tasks from the start while continuing to build depth with feedback from the team. Thank you for considering my application.`,
+    `I am applying for the ${candidate.title} role at ${candidate.company}.`,
+    narrative.answer,
+    `The job description emphasizes ${requirementText}. I would welcome an interview to discuss the role and the factual examples above.`,
+    'Thank you for considering my application.',
   ].map((paragraph) => paragraph.replace(/—/g, ',')).filter(Boolean);
   const body = paragraphs.join('\n\n');
   const banned = profile.raw.narrative?.banned_phrases || [];
@@ -107,13 +105,17 @@ export function buildGroundedCoverLetter(profile, candidate, jdText, cvSelection
     if (body.toLowerCase().includes(String(phrase).toLowerCase())) throw new Error(`Cover letter contains banned phrase: ${phrase}`);
   }
   if (body.includes('—')) throw new Error('Cover letter may not contain em dashes');
-  const numericClaims = body.match(/\b\d[\d,.+%-]*\b/g) || [];
-  const approvedEvidence = `${profile.cvText}\n${profile.articleDigestText}\n${profile.answerBankText}`;
-  for (const claim of numericClaims) {
-    if (!approvedEvidence.includes(claim)) throw new Error(`Cover letter numeric claim is not grounded: ${claim}`);
-  }
+  const provenance = createNarrativeProvenanceRecord({
+    candidateId: candidate.candidate_id,
+    normalizedQuestion: normalizeFormQuestion('cover letter document'),
+    answer: body,
+    wording: 'generated',
+    templateId: 'cover-letter-v1',
+    factualEvidence,
+  });
   return {
     text: body,
+    provenance,
     payload: {
       candidate: {
         name: profile.candidate.full_name,
@@ -130,14 +132,13 @@ export function buildGroundedCoverLetter(profile, candidate, jdText, cvSelection
         greeting: 'Dear Hiring Team,',
         opening: paragraphs[0],
         profile_intro: paragraphs[1],
-        achievements: evidence.map((item) => ({ lead: item.heading, impact: item.text })),
+        achievements: factualEvidence.map((item) => ({ lead: item.evidenceIdentity, impact: item.text })),
         problems_section: paragraphs.at(-2),
         closing: paragraphs.at(-1),
       },
       audit: {
-        schemaVersion: 1,
-        candidateId: candidate.candidate_id,
-        evidenceRefs: evidence.map((item) => `output/application-answer-bank.md#${item.heading.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`),
+        schemaVersion: 2,
+        narrativeProvenance: provenance,
         wordCount: body.split(/\s+/).filter(Boolean).length,
         requirements,
       },
@@ -178,6 +179,7 @@ export function createDocumentPlan({ manifestPath, candidateId, jdFile = null, r
       textPath: join(documentsDir, coverTextFilename),
       payload: cover.payload,
       text: cover.text,
+      provenance: cover.provenance,
     },
   };
   plan.planHash = sha256Canonical(plan);
@@ -205,6 +207,11 @@ function validatePlanFresh(plan, manifestPath, root) {
     if (currentJd.sha256 !== plan.jd.sha256 || currentJd.size !== plan.jd.size) throw new Error('JD changed after planning');
   }
   const profile = loadApplicationProfile(root);
+  validateNarrativeProvenanceRecord(profile, plan.coverLetter.provenance, {
+    candidateId: plan.candidateId,
+    normalizedQuestion: plan.coverLetter.provenance?.normalizedQuestion,
+    answer: plan.coverLetter.text,
+  });
   if (profile.approvedCvs[plan.cv.variant] !== realpathSync(plan.cv.path)) {
     throw new Error('Document plan CV is not the exact approved variant path');
   }
@@ -250,8 +257,8 @@ export async function prepareAndBindDocuments({
   if (rendered.pageCount !== 1) throw new Error(`Cover letter must render to exactly one page; rendered ${rendered.pageCount}`);
   const records = bindCandidateArtifacts(manifestPath, candidateId, [
     { artifactType: 'cv', filePath: plan.cv.path, sourceCvVariant: plan.cv.variant },
-    { artifactType: 'cover_letter', filePath: plan.coverLetter.pdfPath },
-    { artifactType: 'cover_letter_text', filePath: plan.coverLetter.textPath },
+    { artifactType: 'cover_letter', filePath: plan.coverLetter.pdfPath, narrativeProvenance: plan.coverLetter.provenance },
+    { artifactType: 'cover_letter_text', filePath: plan.coverLetter.textPath, narrativeProvenance: plan.coverLetter.provenance },
   ], { root, replace });
   return { planHash: plan.planHash, records };
 }

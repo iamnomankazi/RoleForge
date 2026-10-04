@@ -1,4 +1,10 @@
 import { createHash } from 'node:crypto';
+import {
+  createNarrativeProvenanceRecord,
+  revalidateFactualEvidence,
+  resolveConfiguredNarrativeEvidence,
+  validateNarrativeProvenanceRecord,
+} from './application-evidence.mjs';
 
 const PLACEHOLDER_PATTERN = /(?:\[(?:tool|real project|related skill|[A-Z][A-Z0-9 _-]{1,40})\]|\{\{[^}]+\}\}|<[^>]*placeholder[^>]*>|\bTODO\b|\bTBD\b|template instructions?)/i;
 
@@ -125,32 +131,22 @@ export function stableFieldIdentity(field, semantics = classifyFieldSemantics(fi
   return `field:${createHash('sha256').update(basis).digest('hex')}`;
 }
 
-function exactSavedQuestionMatch(question, heading) {
-  const normalizedQuestion = normalizeFormQuestion(question);
-  const normalizedHeading = normalizeFormQuestion(heading);
-  if (normalizedQuestion === normalizedHeading) return true;
-  const machineAlias = normalizedHeading.replace(/\b(?:this|the|a|an|us|your)\b/g, ' ').replace(/\s+/g, ' ').trim();
-  return Boolean(machineAlias && normalizedQuestion === `${normalizedHeading} ${machineAlias}`);
-}
-
-function exactSavedAnswer(profile, question, candidateId) {
+function exactSavedAnswer(profile, question, candidateId, candidate) {
   const normalized = normalizeFormQuestion(question);
   const prior = Array.isArray(profile?.priorApprovedAnswers) ? profile.priorApprovedAnswers : [];
   const priorMatch = prior.find((row) => row.candidateId === candidateId
     && row.normalizedQuestion === normalized
     && row.answer
     && !containsUnresolvedPlaceholder(row.answer));
-  if (priorMatch) return { answer: priorMatch.answer, evidenceRefs: priorMatch.evidenceRefs || [], reused: true };
-  for (const [key, value] of profile?.answers || []) {
-    if (exactSavedQuestionMatch(question, key) && value && !containsUnresolvedPlaceholder(value)) {
-      return {
-        answer: value,
-        evidenceRefs: [`output/application-answer-bank.md#${normalizeFormQuestion(key).replace(/\s+/g, '-')}`],
-        reused: true,
-      };
-    }
-  }
-  return null;
+  if (!priorMatch) return null;
+  const factualEvidence = validateNarrativeProvenanceRecord(profile, priorMatch, {
+    candidateId,
+    normalizedQuestion: normalized,
+    answer: priorMatch.answer,
+  });
+  const expected = composeRoleFitNarrative(candidate, factualEvidence.map((item) => item.text), priorMatch.templateId);
+  if (cleanFormText(priorMatch.answer) !== expected) throw new Error('Prior narrative answer no longer passes deterministic claim validation');
+  return { answer: priorMatch.answer, factualEvidence, templateId: priorMatch.templateId, reused: true };
 }
 
 function requestedNarrativeTopics(question, jdText) {
@@ -191,35 +187,34 @@ function fitSentences(sentences, maxLength) {
       continue;
     }
     if (accepted.length) break;
-    const clipped = sentence.slice(0, Math.max(0, maxLength - 1));
-    const boundary = clipped.lastIndexOf(' ');
-    return `${clipped.slice(0, boundary > 40 ? boundary : clipped.length).replace(/[,:; -]+$/, '')}.`.slice(0, maxLength);
+    throw new Error(`No complete factual sentence fits the field limit ${maxLength}`);
   }
   return accepted.join(' ');
 }
 
-export function validateGroundedNarrative(answer, profile, evidenceRefs = []) {
+function roleFitOpening(candidate = {}) {
+  const role = cleanFormText(candidate.title);
+  const company = cleanFormText(candidate.company);
+  if (!role && !company) return null;
+  return `For the ${role || 'role'}${company ? ` at ${company}` : ''}, my strongest fit is practical work that connects reliable implementation with clear validation.`;
+}
+
+function composeRoleFitNarrative(candidate, factualSentences, templateId = 'role-fit-v1') {
+  const opening = templateId === 'role-fit-evidence-only-v1' ? null : roleFitOpening(candidate);
+  return [opening, ...factualSentences.map(cleanFormText)].filter(Boolean).join(' ');
+}
+
+export function validateGroundedNarrative(answer, profile, factualEvidence = [], { candidate = {}, templateId = 'role-fit-v1' } = {}) {
   const text = cleanFormText(answer);
   if (!text) throw new Error('Generated narrative answer is empty');
   if (containsUnresolvedPlaceholder(text)) throw new Error('Generated narrative answer contains an unresolved placeholder');
-  if (!Array.isArray(evidenceRefs) || evidenceRefs.length === 0) {
-    throw new Error('Generated narrative answer has no evidence references');
-  }
-  const approvedCorpus = [
-    profile?.cvText,
-    profile?.articleDigestText,
-    profile?.answerBankText,
-    profile?.profileModeText,
-    JSON.stringify(profile?.formRules?.narrative_evidence || []),
-  ].filter(Boolean).join('\n').toLowerCase();
-  for (const claim of text.match(/\b\d[\d,.+%-]*[a-z]*\b/gi) || []) {
-    if (!approvedCorpus.includes(claim.toLowerCase())) {
-      throw new Error(`Generated narrative contains unsupported numeric claim: ${claim}`);
-    }
-  }
+  const current = revalidateFactualEvidence(profile, factualEvidence);
   if (/\b(?:certified|certification|production owner|owned production|\d+\+? years? of professional experience)\b/i.test(text)) {
     throw new Error('Generated narrative contains an unsupported professional claim');
   }
+  if (!['role-fit-v1', 'role-fit-evidence-only-v1'].includes(templateId)) throw new Error(`Unsupported narrative generation template: ${templateId}`);
+  const expected = composeRoleFitNarrative(candidate, current.map((item) => item.text), templateId);
+  if (text !== expected) throw new Error('Generated narrative contains wording not established by factual evidence or the approved neutral template');
   return text;
 }
 
@@ -230,50 +225,42 @@ export function generateCustomNarrativeAnswer(profile, {
   maxLength = null,
 } = {}) {
   const candidateId = cleanFormText(candidate.candidate_id || candidate.candidateId);
-  const saved = exactSavedAnswer(profile, question, candidateId);
+  const normalizedQuestion = normalizeFormQuestion(question);
+  if (!candidateId) throw new Error('Automatic narrative generation requires an exact candidate ID');
+  if (!normalizedQuestion) throw new Error('Automatic narrative generation requires an exact normalized question');
+  const saved = exactSavedAnswer(profile, question, candidateId, candidate);
   if (saved) {
-    const answer = fitSentences([cleanFormText(saved.answer)], Number(maxLength) || null);
+    const answer = cleanFormText(saved.answer);
+    if (Number(maxLength) > 0 && answer.length > Number(maxLength)) throw new Error(`Prior narrative answer exceeds field limit ${maxLength}`);
+    const templateId = saved.templateId;
+    const validated = validateGroundedNarrative(answer, profile, saved.factualEvidence, { candidate, templateId });
+    const record = createNarrativeProvenanceRecord({
+      candidateId, normalizedQuestion, answer: validated, wording: 'reused', templateId, factualEvidence: saved.factualEvidence,
+    });
     return {
-      answer: validateGroundedNarrative(answer, profile, saved.evidenceRefs),
-      normalizedQuestion: normalizeFormQuestion(question),
-      evidenceRefs: saved.evidenceRefs,
-      answerHash: hashFormValue(answer),
-      candidateId,
-      reused: true,
+      ...record, answer: validated, reused: true,
     };
   }
-  const evidence = Array.isArray(profile?.formRules?.narrative_evidence)
-    ? profile.formRules.narrative_evidence
-    : [];
   const requested = requestedNarrativeTopics(question, `${candidate.title || ''}\n${jdText}`);
-  const selected = evidence.filter((entry) => (entry.topics || []).some((topic) => requested.has(normalizeFormQuestion(topic).replace(/\s+/g, '_'))));
-  if (!selected.length) {
-    throw new Error(`Missing evidence for requested narrative topics: ${[...requested].join(', ')}`);
+  const selected = resolveConfiguredNarrativeEvidence(profile, requested);
+  const sentences = [roleFitOpening(candidate), ...selected.map((entry) => entry.text)].filter(Boolean);
+  let templateId = 'role-fit-v1';
+  let answer = fitSentences(sentences, Number(maxLength) || null);
+  let included = selected.filter((entry) => answer.includes(cleanFormText(entry.text)));
+  if (!included.length && Number(maxLength) > 0) {
+    templateId = 'role-fit-evidence-only-v1';
+    answer = fitSentences(selected.map((entry) => entry.text), Number(maxLength));
+    included = selected.filter((entry) => answer.includes(cleanFormText(entry.text)));
   }
-  const role = cleanFormText(candidate.title);
-  const company = cleanFormText(candidate.company);
-  const sentences = [];
-  if (role || company) {
-    sentences.push(`For the ${role || 'role'}${company ? ` at ${company}` : ''}, my strongest fit is practical work that connects reliable implementation with clear validation.`);
-  }
-  for (const entry of selected) {
-    const text = cleanFormText(entry.text);
-    if (text && !sentences.includes(text)) sentences.push(text);
-  }
-  const answer = fitSentences(sentences, Number(maxLength) || null);
-  const evidenceRefs = selected.flatMap((entry) => entry.evidence_refs || entry.evidenceRefs || []);
-  const validated = validateGroundedNarrative(answer, profile, evidenceRefs);
+  if (!included.length) throw new Error('Generated narrative could not include a complete factual evidence sentence');
+  const validated = validateGroundedNarrative(answer, profile, included, { candidate, templateId });
   if (Number(maxLength) > 0 && validated.length > Number(maxLength)) {
     throw new Error(`Generated narrative exceeds field limit ${maxLength}`);
   }
-  return {
-    answer: validated,
-    normalizedQuestion: normalizeFormQuestion(question),
-    evidenceRefs: [...new Set(evidenceRefs)],
-    answerHash: hashFormValue(validated),
-    candidateId,
-    reused: false,
-  };
+  const record = createNarrativeProvenanceRecord({
+    candidateId, normalizedQuestion, answer: validated, wording: 'generated', templateId, factualEvidence: included,
+  });
+  return { ...record, answer: validated, reused: false };
 }
 
 function formRules(profile) {
@@ -379,9 +366,7 @@ export function canonicalFieldValue(profile, semantics, {
   if (category === 'salary') return profile?.compensation?.target_range || null;
   if (category === 'availability') return profile?.currentStatus?.availability?.start || null;
   if (category === 'relocation') {
-    for (const [key, value] of profile?.answers || []) {
-      if (normalizeFormQuestion(key) === 'relocation') return value;
-    }
+    return cleanFormText(profile?.formRules?.relocation?.value) || null;
   }
   return null;
 }

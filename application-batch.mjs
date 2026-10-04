@@ -1304,6 +1304,7 @@ export function bindCandidateArtifacts(manifestPath, candidateId, bindings, {
         filePath: binding.filePath,
         sourceCvVariant: binding.sourceCvVariant || loaded.candidate.recommendedCvVariant,
         createdAt: binding.createdAt || null,
+        narrativeProvenance: binding.narrativeProvenance || null,
       }),
     }));
     if (new Set(records.map((item) => item.key)).size !== records.length) throw new Error('Duplicate artifact type in one binding transaction');
