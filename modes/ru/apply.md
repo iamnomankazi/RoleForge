@@ -2,6 +2,9 @@
 
 Интерактивный режим для заполнения формы отклика в Chrome. Читает экран, загружает контекст вакансии, генерирует персонализированные ответы.
 
+<!-- APPLICATION_BATCH_AUTHORITY_V1 -->
+Browser application work requires an immutable batch manifest and one exact candidate ID. Legacy queues and arbitrary URLs are draft-only, never execution authority.
+
 ## Требования
 
 - **Лучше с Playwright**: Кандидат видит браузер, Claude взаимодействует со страницей.
@@ -89,6 +92,6 @@
 ## Шаг 6 — После отклика (опционально)
 
 Если кандидат подтвердил отправку:
-1. Обновить статус в `data/applications.md` с "Evaluated" на "Applied"
+1. Record a user-confirmed manual submission only with `node application-submission.mjs preview ...`, then `confirm` with the exact digest. Never call `set-status.mjs Applied` directly.
 2. Обновить секцию G отчёта финальными ответами
 3. Предложить: `/career-ops contacto` для LinkedIn outreach

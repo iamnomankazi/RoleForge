@@ -83,8 +83,11 @@ export function classifyLiveness({ status = 0, finalUrl = '', bodyText = '', app
   if (botChallenge) {
     return { result: 'uncertain', code: 'bot_challenge', reason: `anti-bot challenge: ${botChallenge.source}` };
   }
-  if (status === 403 || status === 503) {
-    return { result: 'uncertain', code: 'access_blocked', reason: `HTTP ${status} (access blocked, likely anti-bot)` };
+  if (status === 403) {
+    return { result: 'uncertain', code: 'access_blocked', reason: 'Liveness unverified due to access restriction (HTTP 403)' };
+  }
+  if (status === 503) {
+    return { result: 'uncertain', code: 'access_blocked', reason: 'HTTP 503 (access blocked, likely anti-bot)' };
   }
 
   const expiredUrl = firstMatch(EXPIRED_URL_PATTERNS, finalUrl);

@@ -556,7 +556,10 @@ async function cmdScan() {
       const matched = jobs.filter(j => titleMatches(j.title));
       console.log(`${jobs.length} listings, ${matched.length} matched`);
       for (const j of matched) {
-        found.push({ url: j.absolute_url ?? c.api, company: c.name, role: j.title, location: j.location?.name ?? '' });
+        // Skip postings without a public URL — falling back to the API
+        // endpoint would write an unusable link into the pipeline.
+        if (!j.absolute_url) continue;
+        found.push({ url: j.absolute_url, company: c.name, role: j.title, location: j.location?.name ?? '' });
       }
     } catch (e) {
       console.log(`ERROR: ${e.message}`);
@@ -720,7 +723,7 @@ const [,, command, ...args] = invokedDirectly ? process.argv : [];
 const ctx = invokedDirectly ? loadContext() : null;
 
 // Load free models list before running any AI command (skip when a model is pinned)
-if (invokedDirectly && ['evaluate', 'eval', 'pipeline', 'apply', 'models'].includes(command) && !process.env.CAREER_OPS_MODEL) {
+if (invokedDirectly && ['evaluate', 'eval', 'pipeline', 'apply-draft', 'models'].includes(command) && !process.env.CAREER_OPS_MODEL) {
   await loadFreeModels();
 }
 
@@ -738,8 +741,8 @@ if (invokedDirectly) switch (command) {
     await cmdPipeline(ctx);
     break;
 
-  case 'apply':
-    if (!args[0]) { console.error('Usage: node openrouter-runner.mjs apply <report_num|report_path>'); break; }
+  case 'apply-draft':
+    if (!args[0]) { console.error('Usage: node openrouter-runner.mjs apply-draft <report_num|report_path>'); break; }
     await cmdApply(args[0], ctx);
     break;
 
@@ -757,7 +760,7 @@ COMMANDS:
   node openrouter-runner.mjs evaluate <url>    → Evaluate a listing by URL
   node openrouter-runner.mjs evaluate          → Paste a job description interactively
   node openrouter-runner.mjs pipeline          → Batch-evaluate all pending entries in pipeline.md
-  node openrouter-runner.mjs apply <report_no> → Generate application form answers from a report
+  node openrouter-runner.mjs apply-draft <report_no> → Generate draft-only application answers from a report
   node openrouter-runner.mjs models            → List available free models from OpenRouter
 
 SETUP:

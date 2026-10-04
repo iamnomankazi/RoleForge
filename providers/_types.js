@@ -35,6 +35,9 @@
  *                                   'invalid_url', 'suspicious_domain').
  * @property {'high'|'medium'|'low'} [trustLevel] Classification derived from
  *                                                 trustScore.
+ * @property {string} [sourceId] Stable source identifier when the provider exposes one.
+ * @property {string} [sourceQuery] Primary query that discovered the job.
+ * @property {string[]} [sourceQueries] All queries that discovered the job.
  */
 
 /**
@@ -61,6 +64,14 @@
  * @property {string}             [api]            JSON API URL; used directly by greenhouse/ashby providers.
  * @property {string}             [provider]       Explicit provider id — bypasses detect().
  * @property {('http')}           [transport]      Default: 'http'. Reserved for future transports.
+ * @property {number}             [max_pages]      Provider-specific pagination cap (avature, workday).
+ * @property {number}             [max_jobs]       Provider-specific raw-job cap (for example, Himalayas browse).
+ * @property {string[]|object[]}  [search_queries] Provider-specific targeted retrieval queries.
+ * @property {number}             [search_max_pages] Provider-specific targeted-search page cap.
+ * @property {number}             [search_max_jobs] Provider-specific targeted raw-job cap.
+ * @property {string}             [offset_param]   avature only: pins the pagination query key and disables the
+ *                                                 provider's jobOffset→offset self-heal. Rarely needed — an
+ *                                                 escape hatch for a tenant the auto-switch can't resolve.
  */
 
 /**
@@ -91,6 +102,17 @@
  * @property {('http')} transport
  * @property {(url: string, opts?: FetchOptions) => Promise<string>}  fetchText
  * @property {(url: string, opts?: FetchOptions) => Promise<unknown>} fetchJson
+ * @property {number} [maxPages] Optional pagination hint. When set (verify-portals.mjs's
+ *                              health probe passes 1), a paginating provider SHOULD stop
+ *                              after this many pages — the probe only needs the first page
+ *                              to tell a live board from a broken one, and must not walk an
+ *                              entire careers site. Providers that ignore it stay correct:
+ *                              the probe caps their requests defensively via the context's
+ *                              own fetch functions.
+ * @property {(ms: number) => Promise<void>} [sleep] Optional cross-provider pacing hook used by
+ *                              paginating providers (avature, workday) to throttle between page
+ *                              requests. May be absent — providers fall back to a native
+ *                              `setTimeout`-based delay.
  */
 
 /**

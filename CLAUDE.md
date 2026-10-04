@@ -27,7 +27,7 @@ There are two layers. Read `DATA_CONTRACT.md` for the full list.
 
 ## Source-of-Truth Boundary (CRITICAL)
 
-User-facing content (CV, cover letters, form answers, recruiter outreach, application form responses) is generated **exclusively** from these files plus statements the user makes directly in the current conversation:
+User-facing content (CV, cover letters, application emails, form answers, recruiter outreach, application form responses) is generated **exclusively** from these files plus statements the user makes directly in the current conversation:
 
 - `cv.md`
 - `article-digest.md`
@@ -102,8 +102,14 @@ AI-powered job search automation built on Claude Code: pipeline tracking, offer 
 | `article-digest.md` | Compact proof points from portfolio (optional) |
 | `interview-prep/story-bank.md` | Accumulated STAR+R stories across evaluations |
 | `interview-prep/{company}-{role}.md` | Company-specific interview intel reports |
-| `analyze-patterns.mjs` | Pattern analysis script (JSON output) |
+| `analyze-patterns.mjs` | Pattern analysis script (JSON output). Includes ATS channel analysis (per-vendor advance rate; motivated by Bommasani et al., Algorithmic Monocultures in Hiring, FAccT 2026). |
+| `stats.mjs` | Lifetime pipeline stats aggregator (JSON or `--summary`) — tracker roll-up, canonical `ever*` funnel, lifetime scan totals, portal coverage, follow-up compliance, scan-run trends |
+| `data/scan-runs.tsv` | Per-run scan counters (appended by `scan.mjs`, read by `stats.mjs`) |
 | `followup-cadence.mjs` | Follow-up cadence calculator (JSON output) |
+| `followup-seed.mjs` | Seeds `data/follow-ups.md` with a pinned first follow-up date when a row turns Applied (JSON output) |
+| `set-status.mjs` | Canonical CLI to update a tracker row: `node set-status.mjs <report#\|company> <State> [--note]` — strict states.yml validation, shared tracker lock, atomic write |
+| `salary-gap.mjs` | Desired/advertised/actual compensation gap analyzer — folds report `advertised_comp` + `data/salary-observations.tsv` (JSON or `--summary`) |
+| `data/salary-observations.tsv` | Append-only salary observation log (user layer) |
 | `data/follow-ups.md` | Follow-up history tracker |
 | `scan.mjs` | Zero-token portal scanner — hits Greenhouse/Ashby/Lever APIs directly, zero LLM cost |
 | `check-liveness.mjs` | Job posting liveness checker |
@@ -129,6 +135,7 @@ You can invoke the command center or any of its modes directly within your CLI:
 * `pdf` — Generate ATS-optimized CV PDF
 * `latex` — Export CV as LaTeX/Overleaf .tex
 * `cover` — Generate cover letter
+* `email` — Draft formal application email only; never sends, submits, or clicks
 * `interview-prep` — Generate interview preparation guide
 * `interview` — Onboarding/on-demand interview
 * `contacto` — Generate LinkedIn outreach message
@@ -137,6 +144,8 @@ You can invoke the command center or any of its modes directly within your CLI:
 * `project` — Evaluate portfolio project idea
 * `batch` — Run parallel batch evaluations
 * `patterns` — Analyze rejection patterns
+* `offer-prep` — Read a received offer/contract with the candidate: clause walk + lawyer questions (not legal advice)
+* `titles` — Suggest adjacent job titles from your CV to broaden the search
 * `followup` — Update and calculate follow-ups
 * `update` — Update system files
 
@@ -150,13 +159,9 @@ All `modes/*` files and prompt contexts are shared across Claude Code, OpenCode,
 node doctor.mjs --json
 ```
 
-Output: `{"onboardingNeeded": <bool>, "missing": [...], "warnings": [...]}`, where `missing` lists whichever of `cv.md`, `config/profile.yml`, `modes/_profile.md`, `portals.yml` are absent. `warnings` is reserved for non-blocking setup signals.
+Output: `{"onboardingNeeded": <bool>, "missing": [...], "warnings": [...], "autoCopied": [...]}`, where `missing` lists whichever of `cv.md`, `config/profile.yml`, `modes/_profile.md`, `portals.yml` are absent. `warnings` is reserved for non-blocking setup signals, and `autoCopied` lists user customization files (`modes/_profile.md` or `modes/_custom.md`) that `doctor.mjs` automatically copied from their `.template.md` equivalents during the check.
 
-If `modes/_profile.md` is missing, copy from `modes/_profile.template.md` silently. This is the user's customization file — it will never be overwritten by updates.
-
-If `modes/_custom.md` is missing, copy from `modes/_custom.template.md` silently — it holds the user's house rules / custom workflows / automations and is likewise never overwritten by updates.
-
-**If, after that, `onboardingNeeded` is still true (any of `cv.md` / `config/profile.yml` / `portals.yml` is missing), enter onboarding mode.** Do NOT proceed with evaluations, scans, or any other mode until the basics are in place. Guide the user step by step:
+**If `onboardingNeeded` is true (any of `cv.md` / `config/profile.yml` / `modes/_profile.md` / `portals.yml` is missing), enter onboarding mode.** Do NOT proceed with evaluations, scans, or any other mode until the basics are in place. Guide the user step by step:
 
 #### Step 1: CV (required)
 If `cv.md` is missing, ask:
@@ -250,10 +255,11 @@ Default modes are in `modes/` (English). Language-specific modes live in `modes/
 | German | `modes/de/` | DACH (Germany, Austria, Switzerland) |
 | French | `modes/fr/` | France, Belgium, Switzerland, Luxembourg, Quebec |
 | Japanese | `modes/ja/` | Japan |
+| Hindi | `modes/hi/` | India |
 
 **When to use a `{lang}` mode** — if any holds: the user says "use {lang} modes"; `config/profile.yml` sets `language.modes_dir: modes/{lang}`; or you detect a {lang} JD (then suggest switching). Read from `modes/{lang}/` instead of `modes/`.
 
-**When NOT to:** if the user applies to English-language roles — even at French, German, or Japanese companies — use the default English modes.
+**When NOT to:** if the user applies to English-language roles — even at French, German, Japanese, or Indian companies — use the default English modes.
 
 ### Skill Modes
 
@@ -263,9 +269,13 @@ Default modes are in `modes/` (English). Language-specific modes live in `modes/
 | Asks to evaluate offer | `oferta` |
 | Asks to compare offers | `ofertas` |
 | Wants LinkedIn outreach | `contacto` |
+| Wants a formal application email | `email` — draft-only; never sends, submits, or clicks anything |
 | Asks for company research | `deep` |
 | Preps for interview at specific company | `interview-prep` |
 | Wants interactive profile/CV onboarding | `interview` |
+| Wants a time-blocked prep plan for an upcoming interview | `interview/plan` |
+| Wants to run practice interview questions with feedback | `interview/practice` |
+| Wants to debrief after a real interview and close gaps | `interview/debrief` |
 | Wants to generate CV/PDF | `pdf` |
 | Evaluates a course/cert | `training` |
 | Evaluates portfolio project | `project` |
@@ -274,7 +284,9 @@ Default modes are in `modes/` (English). Language-specific modes live in `modes/
 | Searches for new offers | `scan` |
 | Processes pending URLs | `pipeline` |
 | Batch processes offers | `batch` |
-| Asks about rejection patterns or wants to improve targeting | `patterns` |
+| Asks about rejection patterns, wants to improve targeting, or wants to match interview answers to best-fit roles | `patterns` |
+| Receives an offer/contract and wants help understanding it before signing | `offer-prep` — clause walk with neutral tags + lawyer question list; describes, never judges; no verdicts, no online research; optional draft-only negotiation reply email from the "Items to raise" list |
+| Wants to broaden the search with adjacent job titles suggested from the CV | `titles` |
 | Asks about follow-ups or application cadence | `followup` |
 
 ### CV Source of Truth
@@ -356,12 +368,14 @@ Write one TSV file per evaluation to `batch/tracker-additions/{num}-{company-slu
 
 **Note:** In applications.md, score comes BEFORE status. The merge script handles this column swap automatically.
 
+**Optional Via field (#1596):** when the application goes through an agency/recruiter, append a **tagged** extra field `via={Agency}` (e.g. `via=Hays`) after notes — never a positional slot; the tag is mandatory. A single untagged extra field keeps its legacy meaning (location). Unknown end employer → write `?` as company (locale-invariant structural marker — never the word "Confidential") plus a distinguishing descriptor in notes. `merge-tracker.mjs` rejects ambiguous extras loudly, and `--migrate-via` adds the Via column to an existing tracker.
+
 **Report link normalization:** The TSV always carries a **root-relative** `[num](reports/...)` link. `merge-tracker.mjs` rewrites it so the link is relative to the tracker file's own directory before writing it into the tracker — `../reports/...` when the tracker is at `data/applications.md`, or `reports/...` at the root layout. This keeps links clickable from the tracker (markdown links resolve relative to the file that contains them). Normalization is idempotent. To fix links in an existing tracker, run `node merge-tracker.mjs --migrate` (see #760).
 
 ### Pipeline Integrity
 
 1. **NEVER edit applications.md to ADD new entries** -- Write TSV in `batch/tracker-additions/` and `merge-tracker.mjs` handles the merge.
-2. **YES you can edit applications.md to UPDATE status/notes of existing entries.**
+2. **UPDATE status/notes of existing entries via `node set-status.mjs <report#|company> <State> [--note]`** — the canonical (locked, validated, atomic) write path. Do not hand-edit the table.
 3. All reports MUST include `**URL:**` in the header (between Score and PDF). Include `**Legitimacy:** {tier}` (see Block G in `modes/oferta.md`).
 4. All statuses MUST be canonical (see `templates/states.yml`).
 5. Health check: `node verify-pipeline.mjs`

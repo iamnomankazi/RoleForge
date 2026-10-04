@@ -1,5 +1,13 @@
 # Mode: batch — Mass Processing of Jobs
 
+<!-- APPLICATION_BATCH_AUTHORITY_V1 -->
+
+Batch evaluation never grants application authority. Any later browser work
+must use an immutable application-batch manifest and one exact candidate ID;
+never promote by rank, first-N, global queue, or hard-coded targets.
+Standard and worker-merge scans both produce the same immutable canonical run;
+`output/apply-queue.csv` remains a non-authoritative review artifact.
+
 Two usage modes: **conductor --chrome** (navigates portals in real time) or **standalone** (script for URLs already collected).
 
 ## Architecture
@@ -41,7 +49,7 @@ batch/
 4. **For each pending URL**:
    a. Chrome: click on the job → read JD text from the DOM
    b. Save JD to `/tmp/batch-jd-{id}.txt`
-   c. Calculate next sequential REPORT_NUM
+   c. Reserve the next REPORT_NUM atomically: `node reserve-report-num.mjs` (release with `--release {num}` after the worker writes the report; stale sentinels are GC'd automatically)
    d. Execute via Bash:
 
       ```bash
@@ -62,6 +70,34 @@ During a conductor run, the operator has two primary live interfaces to monitor:
 2. **The agent CLI conversation:** Follow the agent's turn-by-turn narration in the shell.
 
 The individual worker tasks spawn headlessly in the background and write their stdout/stderr logs to `batch/logs/{report_num}-{id}.log`, which can be inspected on demand.
+
+### Manual multi-agent fan-out
+
+Orchestrating N parallel evaluators by hand (multiple agent windows / subagents, outside `batch-runner.sh`)? Reserve the whole range FIRST, then hand each worker its own number — never let workers compute `max+1` themselves:
+
+```bash
+node reserve-report-num.mjs --count 8
+# stdout: 042-049  → worker 1 gets 042, worker 2 gets 043, ...
+```
+
+Each number is backed by a sentinel file in `reports/`, so concurrent reservations from other windows cannot collide. After all reports are written, release leftovers in one call:
+
+```bash
+node reserve-report-num.mjs --release 042-049
+```
+
+For **parallel discovery scans** (before evaluation), do not reserve report
+numbers and do not let workers write to `data/pipeline.md` or the canonical apply
+queue. Give every worker a separate JSON output path, then merge once with
+`node merge-scan-results.mjs --run-id {unique-run-id} <worker-files...>`. Review
+the merged candidates deterministically and verify liveness before promoting a
+small set into evaluation. This keeps discovery parallel while all mutable
+pipeline writes remain single-writer operations.
+
+**Two things to know:**
+
+- **4-hour protection window.** Sentinels older than 4h are garbage-collected (`verify-pipeline.mjs` triggers this). Reserve the range immediately before spawning workers, not at the start of a long session. Once a worker writes its real report, that slot is permanently safe — only slow or unstarted slots are at risk after 4h.
+- **Gaps are normal.** If a reservation collides and restarts, skipped numbers (e.g. `006`) are never reused. Report numbers are opaque IDs; a gap is not corruption.
 
 ## Mode B: Standalone script
 

@@ -2,6 +2,9 @@
 
 当候选人在 Chrome 浏览器中填写职位投递表单时，此实时助手能读取当前屏幕内容、调取该职位的历史评估报告，并为表单中的每一个开放性或选择性问题生成个性化的高质量回答草稿。
 
+<!-- APPLICATION_BATCH_AUTHORITY_V1 -->
+Browser application work requires an immutable batch manifest and one exact candidate ID. Legacy queues and arbitrary URLs are draft-only, never execution authority.
+
 ## 运行要求
 
 - **首选使用 Playwright 显式模式**：在此模式下，候选人能直观看到浏览器窗口，且 AI 助手能够直接与表单页面进行元素交互和状态提取。
@@ -106,7 +109,7 @@
 ## 步骤 6 — 投递后动作
 
 当候选人确认已经成功点击“提交申请/投递”后，执行以下清理与建档工作：
-1. 将 `data/applications.md` 中该职位的状态从 `Evaluated` 修改更新为 `Applied`。
+1. Record a user-confirmed manual submission only with `node application-submission.mjs preview ...`, then `confirm` with the exact digest. Never call `set-status.mjs Applied` directly.
 2. 将最终实际提交的表单回答归档并更新至该报告的维度 H 模块中，以便后续面试对照。
 3. 推荐下一步行动：引导候选人使用 `/career-ops contacto` 指令生成 LinkedIn 招聘负责人直达勾兑话术。
 

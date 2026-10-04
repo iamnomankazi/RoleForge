@@ -430,6 +430,33 @@
       'Yu Gothic', 'YuGothic', 'Noto Sans CJK JP', 'Noto Sans JP',
       Meiryo, 'MS PGothic', sans-serif;
   }
+
+  /* Keep the resume variant visually aligned with the approved CV system. */
+  body { font-family: Georgia, 'Times New Roman', serif; font-size: 10.5px; line-height: 1.32; color: #111; }
+  .page { max-width: 210mm; padding: 0; }
+  .header { text-align: center; margin-bottom: 13px; }
+  .header h1 { font-family: Georgia, 'Times New Roman', serif; font-size: 26px; letter-spacing: 0; color: #111; margin-bottom: 4px; }
+  .header-gradient { height: 0; margin: 0; background: none; }
+  .contact-row { justify-content: center; gap: 0 7px; font-family: Georgia, 'Times New Roman', serif; font-size: 9.5px; color: #111; }
+  .contact-row a { color: #0563c1; }
+  .contact-row a[href^="tel:"] { color: #111; }
+  .contact-row .separator { color: #111; }
+  .section { margin-bottom: 8px; }
+  .section-title { font-family: Georgia, 'Times New Roman', serif; font-size: 14px; letter-spacing: 0; color: #111; border-bottom: 1px solid #5b9bd5; padding-bottom: 2px; margin-bottom: 4px; }
+  .summary-text, .skill-item, .skill-category, .job-role, .job li, .project-desc, .project-tech, .edu-title, .edu-org, .edu-year, .edu-desc { font-family: Georgia, 'Times New Roman', serif; font-size: 10.5px; line-height: 1.32; color: #111; }
+  .skills-grid { display: block; }
+  .skill-item { margin: 0 0 2px; }
+  .skill-category, .job-company, .project-title, .edu-title { font-weight: 700; }
+  .job-company, .project-title, .edu-org { font-family: Georgia, 'Times New Roman', serif; color: #111; }
+  .job { margin-bottom: 6px; }
+  .job-header { display: block; margin-bottom: 1px; }
+  .job-period { font-family: Georgia, 'Times New Roman', serif; color: #111; font-size: 10.5px; }
+  .job ul { padding-left: 16px; margin-top: 1px; }
+  .job li { margin-bottom: 1px; }
+  .project { margin-bottom: 5px; }
+  .project-desc { margin-top: 1px; }
+  .project-badge, .competencies-grid { display: none; }
+  .cv-photo { display: none; }
 </style>
 </head>
 <body>
@@ -453,21 +480,25 @@
     </div>
   </div>
 
-  <!-- PROFESSIONAL SUMMARY -->
+  <!-- PROFILE -->
   <div class="section avoid-break">
-    <div class="section-title">{{SECTION_SUMMARY}}</div>
+    <div class="section-title">{{SECTION_PROFILE}}</div>
     <div class="summary-text">{{SUMMARY_TEXT}}</div>
   </div>
 
-  <!-- CORE COMPETENCIES -->
+  <!-- TECHNICAL SKILLS -->
   <div class="section">
-    <div class="section-title">{{SECTION_COMPETENCIES}}</div>
-    <div class="competencies-grid">
-      {{COMPETENCIES}}
-    </div>
+    <div class="section-title">{{SECTION_SKILLS}}</div>
+    {{SKILLS}}
   </div>
 
-  <!-- WORK EXPERIENCE -->
+  <!-- EDUCATION -->
+  <div class="section avoid-break">
+    <div class="section-title">{{SECTION_EDUCATION}}</div>
+    {{EDUCATION}}
+  </div>
+
+  <!-- EXPERIENCE -->
   <div class="section">
     <div class="section-title">{{SECTION_EXPERIENCE}}</div>
     {{EXPERIENCE}}
@@ -479,16 +510,10 @@
     {{PROJECTS}}
   </div>
 
-  <!-- EDUCATION -->
+  <!-- LANGUAGES -->
   <div class="section avoid-break">
-    <div class="section-title">{{SECTION_EDUCATION}}</div>
-    {{EDUCATION}}
-  </div>
-
-  <!-- SKILLS -->
-  <div class="section avoid-break">
-    <div class="section-title">{{SECTION_SKILLS}}</div>
-    {{SKILLS}}
+    <div class="section-title">{{SECTION_LANGUAGES}}</div>
+    <div class="summary-text">{{LANGUAGES}}</div>
   </div>
 
 </div>

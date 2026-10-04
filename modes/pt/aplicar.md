@@ -2,6 +2,9 @@
 
 Modo interativo para quando o candidato está preenchendo um formulário de candidatura no Chrome. Lê o que está na tela, carrega o contexto da avaliação prévia da vaga e gera respostas personalizadas para cada pergunta do formulário.
 
+<!-- APPLICATION_BATCH_AUTHORITY_V1 -->
+Browser application work requires an immutable batch manifest and one exact candidate ID. Legacy queues and arbitrary URLs are draft-only, never execution authority.
+
 ## Requisitos
 
 - **Melhor com Playwright visível**: No modo visível, o candidato vê o navegador e Claude pode interagir com a página.
@@ -102,7 +105,7 @@ Notas:
 ## Passo 6 -- Pós-candidatura (opcional)
 
 Se o candidato confirmar que enviou a candidatura:
-1. Atualizar status em `applications.md` de "Evaluated" para "Applied"
+1. Record a user-confirmed manual submission only with `node application-submission.mjs preview ...`, then `confirm` with the exact digest. Never call `set-status.mjs Applied` directly.
 2. Atualizar Bloco G do report com as respostas finais
 3. Sugerir próximo passo: `/career-ops contacto` para LinkedIn outreach
 

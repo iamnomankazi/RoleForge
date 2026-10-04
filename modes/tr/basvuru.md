@@ -2,6 +2,9 @@
 
 Aday bir başvuru formunu doldururken çalışan etkileşimli mod. Ekrandakileri okur, önceki ilan raporunu yükler ve formun her alanı için kişiselleştirilmiş yanıtlar üretir.
 
+<!-- APPLICATION_BATCH_AUTHORITY_V1 -->
+Browser application work requires an immutable batch manifest and one exact candidate ID. Legacy queues and arbitrary URLs are draft-only, never execution authority.
+
 ## Gereksinimler
 
 - **Playwright varsa (tercih edilen):** Claude tarayıcıyla etkileşime geçebilir, formu doğrudan okuyabilir.
@@ -103,7 +106,7 @@ Notlar:
 ## Adım 6 — Başvuru Sonrası (isteğe bağlı)
 
 Aday başvuruyu gönderdiğini onaylarsa:
-1. `applications.md`'de durumu `Evaluated`'dan `Applied`'a güncelle
+1. Record a user-confirmed manual submission only with `node application-submission.mjs preview ...`, then `confirm` with the exact digest. Never call `set-status.mjs Applied` directly.
 2. Blok G'yi final yanıtlarla güncelle
 3. Sonraki adımı öner: İşe alım sorumlusuna LinkedIn erişimi için `/career-ops contacto`
 

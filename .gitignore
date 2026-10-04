@@ -71,6 +71,10 @@ reports/*-RESERVED.md
 # OpenRouter runner — generated data (personal, never commit)
 data/model-blacklist.json
 
+# Offer-prep data: personal offers, contracts, promise notes, and draft replies.
+data/offers/*
+!data/offers/.gitkeep
+
 # OS
 .DS_Store
 *.mov

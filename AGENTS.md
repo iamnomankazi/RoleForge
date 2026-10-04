@@ -24,7 +24,7 @@ There are two layers. Read `DATA_CONTRACT.md` for the full list.
 
 ## Source-of-Truth Boundary (CRITICAL)
 
-User-facing content (CV, cover letters, form answers, recruiter outreach, application form responses) is generated **exclusively** from these files plus statements the user makes directly in the current conversation:
+User-facing content (CV, cover letters, application emails, form answers, recruiter outreach, application form responses) is generated **exclusively** from these files plus statements the user makes directly in the current conversation:
 
 - `cv.md`
 - `article-digest.md`
@@ -105,9 +105,17 @@ AI-powered, CLI-agnostic job search automation: pipeline tracking, offer evaluat
 | `article-digest.md` | Compact proof points from portfolio (optional) |
 | `interview-prep/story-bank.md` | Accumulated STAR+R stories across evaluations |
 | `interview-prep/{company}-{role}.md` | Company-specific interview intel reports |
-| `analyze-patterns.mjs` | Pattern analysis script (JSON output) |
+| `analyze-patterns.mjs` | Pattern analysis script (JSON output). Includes ATS channel analysis (per-vendor advance rate; motivated by Bommasani et al., Algorithmic Monocultures in Hiring, FAccT 2026). |
+| `stats.mjs` | Lifetime pipeline stats aggregator (JSON or `--summary`) — tracker roll-up, canonical `ever*` funnel, lifetime scan totals, portal coverage, follow-up compliance, scan-run trends |
+| `data/scan-runs.tsv` | Per-run scan counters (appended by `scan.mjs`, read by `stats.mjs`) |
 | `followup-cadence.mjs` | Follow-up cadence calculator (JSON output) |
+| `followup-seed.mjs` | Seeds `data/follow-ups.md` with a pinned first follow-up date when a row turns Applied (JSON output) |
+| `set-status.mjs` | Canonical CLI to update a tracker row: `node set-status.mjs <report#\|company> <State> [--note]` — strict states.yml validation, shared tracker lock, atomic write |
+| `invite-match.mjs` | Fuzzy-matches a pasted interview-invite email (company name, date, req ID) against `data/applications.md`, ranking candidates when a company has multiple tracker entries (JSON or `--summary` table output) |
 | `detect-reposts.mjs` | Repost detector — flags roles re-listed 2+ times in 90 days from scan-history.tsv (JSON or `--summary` table output) |
+| `process-quality.mjs` | Recruiting-process friction aggregator — parses `[process-friction]` tags candidates add to `data/active-interviews.md` Notes and reports per-company friction rate (JSON or `--summary` table output) |
+| `salary-gap.mjs` | Desired/advertised/actual compensation gap analyzer — folds report `advertised_comp` + `data/salary-observations.tsv` (JSON or `--summary`) |
+| `data/salary-observations.tsv` | Append-only salary observation log (user layer) |
 | `data/follow-ups.md` | Follow-up history tracker |
 | `scan.mjs` | Zero-token portal scanner — hits Greenhouse/Ashby/Lever APIs directly, zero LLM cost |
 | `check-liveness.mjs` | Job posting liveness checker |
@@ -126,10 +134,9 @@ Some users enable plugins (external integrations). If an enabled plugin ships a 
 node doctor.mjs --json
 ```
 
-Output: `{"onboardingNeeded": <bool>, "missing": [...], "warnings": [...]}`, where `missing` lists whichever of `cv.md`, `config/profile.yml`, `modes/_profile.md`, `portals.yml` are absent. `warnings` is reserved for non-blocking setup signals.
+Output: `{"onboardingNeeded": <bool>, "missing": [...], "warnings": [...], "autoCopied": [...]}`, where `missing` lists whichever of `cv.md`, `config/profile.yml`, `modes/_profile.md`, `portals.yml` are absent. `warnings` is reserved for non-blocking setup signals, and `autoCopied` lists user customization files (`modes/_profile.md` or `modes/_custom.md`) that `doctor.mjs` automatically copied from their `.template.md` equivalents during the check.
 
-- If `modes/_profile.md` is in `missing`, copy it silently from `modes/_profile.template.md` (the user's customization file — never overwritten by updates). It's then resolved.
-- **If, after that, `onboardingNeeded` is still true (any of `cv.md` / `config/profile.yml` / `portals.yml` is missing), enter onboarding mode.** Do NOT proceed with evaluations, scans, or any other mode until the basics are in place. Guide the user step by step:
+- **If `onboardingNeeded` is true (any of `cv.md` / `config/profile.yml` / `modes/_profile.md` / `portals.yml` is missing), enter onboarding mode.** Do NOT proceed with evaluations, scans, or any other mode until the basics are in place. Guide the user step by step:
 
 #### Step 0: Free Tier Check
 
@@ -231,6 +238,7 @@ Default modes are in `modes/` (English). Additional language-specific modes are 
 - **Arabic (Middle East / Arab market):** `modes/ar/` — native Arabic translations with Arab region-specific vocabulary (مكافأة نهاية الخدمة, التأمينات الاجتماعية, راتب إجمالي/صافي, فترة التجربة, فترة الإخطار, البدلات, etc.). Includes `_shared.md`, `fursah.md` (evaluation), `takdeem.md` (apply), `pipeline.md`.
 - **Japanese (Japan market):** `modes/ja/` — native Japanese translations with Japan-specific vocabulary (正社員, 業務委託, 賞与, 退職金, みなし残業, 年俸制, 36協定, 通勤手当, 住宅手当, etc.). Includes `_shared.md`, `kyujin.md` (evaluation), `oubo.md` (apply), `pipeline.md`.
 - **Turkish (Turkey market):** `modes/tr/` — native Turkish translations with Turkey-specific vocabulary (SGK, kıdem tazminatı, ihbar süresi, brüt/net maaş, AGİ, BES, yemek kartı, yol yardımı, TÜFE zammı, etc.). Includes `_shared.md`, `is-ilani.md` (evaluation), `basvuru.md` (apply), `pipeline.md`.
+- **Hindi (India market):** `modes/hi/` — native Hindi (Devanagari) translations with India-specific vocabulary (CTC vs. in-hand salary, PF/EPF, Gratuity, Notice period/buyout, Bond clause, ESOPs, HRA/LTA, moonlighting policy, Labour Codes 2020, etc.). Includes `_shared.md`, `naukri.md` (evaluation), `aavedan.md` (apply), `pipeline.md`.
 
 **When to use German modes:** If the user is targeting German-language job postings, lives in DACH, or asks for German output. Either:
 1. User says "use German modes" → read from `modes/de/` instead of `modes/`
@@ -257,7 +265,12 @@ Default modes are in `modes/` (English). Additional language-specific modes are 
 2. User sets `language.modes_dir: modes/tr` in `config/profile.yml` → always use Turkish modes
 3. You detect a Turkish JD → suggest switching to Turkish modes
 
-**When NOT to:** If the user applies to English-language roles, even at French, German, Arabic, Japanese, or Turkish companies, use the default English modes — *unless* the user has explicitly requested another mode in this conversation, or `language.modes_dir` is set in `config/profile.yml` (the explicit user preference always wins over JD-language detection).
+**When to use Hindi modes:** If the user is targeting Indian job postings, lives in India, or asks for Hindi output. Either:
+1. User says "use Hindi modes" → read from `modes/hi/` instead of `modes/`
+2. User sets `language.modes_dir: modes/hi` in `config/profile.yml` → always use Hindi modes
+3. You detect a Hindi JD → suggest switching to Hindi modes
+
+**When NOT to:** If the user applies to English-language roles, even at French, German, Arabic, Japanese, Turkish, or Indian companies, use the default English modes — *unless* the user has explicitly requested another mode in this conversation, or `language.modes_dir` is set in `config/profile.yml` (the explicit user preference always wins over JD-language detection).
 
 ### Skill Modes
 
@@ -266,9 +279,14 @@ Default modes are in `modes/` (English). Additional language-specific modes are 
 | Pastes JD or URL | auto-pipeline (evaluate + report + PDF + tracker) |
 | Asks to evaluate offer | `oferta` |
 | Asks to compare offers | `ofertas` |
-| Wants LinkedIn outreach | `contacto` |
-| Asks for company research | `deep` |
+| Wants LinkedIn outreach | `contacto` — identifies hiring manager, recruiter, or team peers via web search; drafts a ≤300-char message tailored to the contact type (recruiter / hiring manager / peer / interviewer) |
+| Wants a formal application email | `email` — draft-only subject, body, attachment checklist, and contact block from a report or JD; never sends, submits, or clicks anything |
+| Asks for company research | `deep` — generates a structured 6-axis research prompt covering AI strategy, recent moves, engineering culture, likely challenges, competitors, and the candidate's angle given their profile |
 | Preps for interview at specific company | `interview-prep` |
+| Wants a time-blocked prep plan for an upcoming interview | `interview/plan` |
+| Wants to run practice interview questions with feedback | `interview/practice` |
+| Wants to debrief after a real interview and close gaps | `interview/debrief` |
+| Wants to check if a company is safe to join (red-flag analysis) | `interview-redflag` |
 | Wants to generate CV/PDF | `pdf` |
 | Evaluates a course/cert | `training` |
 | Evaluates portfolio project | `project` |
@@ -277,9 +295,13 @@ Default modes are in `modes/` (English). Additional language-specific modes are 
 | Searches for new offers | `scan` |
 | Processes pending URLs | `pipeline` |
 | Batch processes offers | `batch` |
-| Asks about rejection patterns or wants to improve targeting | `patterns` |
+| Asks about rejection patterns, wants to improve targeting, or wants to match interview answers to best-fit roles | `patterns` |
+| Receives an offer/contract and wants help understanding it before signing | `offer-prep` — clause walk with neutral tags + lawyer question list; describes, never judges; no verdicts, no online research; optional draft-only negotiation reply email from the "Items to raise" list |
+| Wants to broaden the search with adjacent job titles suggested from the CV | `titles` |
 | Asks about follow-ups or application cadence | `followup` |
+| Wants to classify application replies and review updates | `reply-watch` — classifies candidate replies, matches them to applications, and suggests tracker updates |
 | Wants to update the system | `update` |
+| Wants to queue a request for later / check the inbox between sessions | `agent-inbox` — append-only checklist the agent drains at the start of the next session; nothing auto-submits |
 
 ### CV Source of Truth
 
@@ -290,6 +312,70 @@ Default modes are in `modes/` (English). Additional language-specific modes are 
 ---
 
 ## Ethical Use -- CRITICAL
+
+### Application authority -- CRITICAL
+
+Any browser application work is authorized only by an immutable
+`output/application-batches/<batch-id>/manifest.json` plus one exact
+`candidate_id`. Never use `output/apply-queue.csv`, rank/first-N selection,
+hard-coded target lists, an active tab, or an arbitrary URL as a fallback.
+Legacy queues enter this path only through `legacy-queue-importer.mjs` with an
+explicit source run and explicit row/URL/ID selectors. Automated-form
+submissions may be recorded as `Applied` only through
+`application-submission.mjs` after the batch candidate is `form_prepared` and
+the user supplies evidence of their manual final submission. Agents never click
+the final Submit, Send, or Apply control.
+
+For up to six independently confirmed one-candidate batches,
+`application-shared-browser.mjs` may own one new visible Chromium
+process/context and one task-created tab per exact candidate. It must verify
+every batch before launch, call the locked canonical executor sequentially,
+keep candidate pages/evidence/state isolated, continue after a local candidate
+failure, and leave the browser open until the user closes it. It never accepts
+queue rows, URLs, multi-candidate batches, interactive login-resume authority,
+submission authority, or tracker authority. A previously `blocked`,
+`review_required`, or `actual_form_reached` exact candidate may use the same
+shared page only through the canonical preparation-resume contract and fresh
+liveness, identity, destination, and form revalidation.
+
+From `listing_verified`, a visible listing-page Apply CTA may be activated only
+when DOM context proves it is an application-entry action: no candidate form
+has been reached, no candidate fields are present, it is not a submit control
+or POST-associated control, and its predicted/resulting destination verifies
+against the exact company or a known ATS. One additional click is allowed only
+on a verified ATS intermediate page, with a two-hop ceiling and loop detection.
+After candidate fields establish the actual form, Apply/Submit/Send/Complete
+controls are final-action candidates and remain unreachable.
+
+When the user explicitly says they independently applied to a role, their
+statement is authoritative for the tracker. Use
+`manual-application-confirmation.mjs` with `--user-confirmed`, `--company`,
+`--role`, and optional `--date YYYY-MM-DD`. No batch, candidate, URL, browser
+evidence, form state, or submission proof is required. Infer the company and
+role from the current conversation when unambiguous; ask only when multiple
+roles could reasonably match. The command updates an existing exact
+company+role row or creates it when absent, prevents duplicates, records
+`Source: user-confirmed manual submission`, and defaults the date to today.
+This tracker-only exception must never be used to attest to an automated
+submission or bypass the automated-form protections above.
+
+Phase 4 standard scans and worker merges both write the versioned canonical
+immutable scan-run contract before any legacy pipeline/history output. Document
+preparation requires the exact batch candidate and immutable JD evidence,
+selects an approved CV, and binds a separate readable cover-letter PDF/text
+pair by hash. Only the exact-candidate locked executor may write application
+progress states. `form_prepared` requires stored whole-form review evidence,
+verified dropdown commitments and uploads, and proof that the semantic final
+action was detected but not activated; no generic state-attestation command
+exists.
+
+Intentional cancellation uses `application-abandon.mjs` with an exact manifest,
+an exact candidate ID (or explicit whole-batch flag), and a human reason. It
+records terminal `abandoned` audit evidence and conservatively releases only
+that batch's inactive persistent claims; it never changes the tracker. A
+verified form with exactly one explicit combined-application-document field may
+bind a losslessly merged CV-plus-cover PDF, which invalidates preflight before
+the executor may resume and upload it.
 
 **This system is designed for quality, not quantity.** The goal is to help the user find and apply to roles where there is a genuine match -- not to spam companies with mass applications.
 
@@ -340,6 +426,8 @@ When spawning headless workers for batch processing, use the appropriate command
 | Antigravity CLI | `agy -p "prompt"` |
 | Grok Build CLI | `grok -p "prompt"` |
 
+**Parallel fan-outs — reserve report numbers first.** When orchestrating N parallel evaluators (headless workers, subagents, or multiple agent windows), reserve the report-number range before spawning: `node reserve-report-num.mjs --count N` prints e.g. `042-049`; hand each worker its own number. Each slot claim is individually atomic; the contiguous range is an ergonomic allocation, not an all-or-nothing transaction — on collision the partially claimed slots are released and the reservation restarts past the collision. Release with `node reserve-report-num.mjs --release 042-049` when done (stale sentinels are GC'd after 4h, so reserve right before spawning; collision restarts leave permanent — harmless — gaps in the sequence). Never let parallel workers compute `max+1` themselves — that is the #749 race.
+
 ## Stack and Conventions
 
 - Node.js (mjs modules), Playwright (PDF + scraping), YAML (config), HTML/CSS (template), Markdown (data), Canva MCP (optional visual CV)
@@ -372,12 +460,14 @@ Write one TSV file per evaluation to `batch/tracker-additions/{num}-{company-slu
 
 **Note:** In applications.md, score comes BEFORE status. The merge script handles this column swap automatically.
 
+**Optional Via field (#1596):** when the application goes through an agency/recruiter, append a **tagged** extra field `via={Agency}` (e.g. `via=Hays`) after notes — never a positional slot; the tag is mandatory. A single untagged extra field keeps its legacy meaning (location). Unknown end employer → write `?` as company (locale-invariant structural marker — never the word "Confidential") plus a distinguishing descriptor in notes. `merge-tracker.mjs` rejects ambiguous extras loudly, and `--migrate-via` adds the Via column to an existing tracker.
+
 **Report link normalization:** The TSV always carries a **root-relative** `[num](reports/...)` link. `merge-tracker.mjs` rewrites it so the link is relative to the tracker file's own directory before writing it into the tracker — `../reports/...` when the tracker is at `data/applications.md`, or `reports/...` at the root layout. This keeps links clickable from the tracker (markdown links resolve relative to the file that contains them). Normalization is idempotent. To fix links in an existing tracker, run `node merge-tracker.mjs --migrate` (see #760).
 
 ### Pipeline Integrity
 
 1. **NEVER edit applications.md to ADD new entries** -- Write TSV in `batch/tracker-additions/` and `merge-tracker.mjs` handles the merge.
-2. **YES you can edit applications.md to UPDATE status/notes of existing entries.**
+2. **UPDATE status/notes of existing entries via `node set-status.mjs <report#|company> <State> [--note]`** — the canonical (locked, validated, atomic) write path. Do not hand-edit the table.
 3. All reports MUST include `**URL:**` in the header (between Score and PDF). Include `**Legitimacy:** {tier}` (see Block G in `modes/oferta.md`).
 4. All statuses MUST be canonical (see `templates/states.yml`).
 5. Health check: `node verify-pipeline.mjs`

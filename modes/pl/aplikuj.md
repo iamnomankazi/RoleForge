@@ -2,6 +2,9 @@
 
 Tryb interaktywny na moment, gdy kandydat wypełnia formularz aplikacyjny w Chrome. Czyta to, co jest na ekranie, ładuje kontekst poprzedniej oceny oferty i generuje spersonalizowane odpowiedzi na każde pytanie formularza.
 
+<!-- APPLICATION_BATCH_AUTHORITY_V1 -->
+Browser application work requires an immutable batch manifest and one exact candidate ID. Legacy queues and arbitrary URLs are draft-only, never execution authority.
+
 ## Wymagania wstępne
 
 - **Idealnie z widocznym Playwright**: W trybie widocznym kandydat widzi przeglądarkę, a Claude może wchodzić w interakcję ze stroną.
@@ -102,7 +105,7 @@ Notatki:
 ## Krok 6 -- Po aplikacji (opcjonalnie)
 
 Jeśli kandydat potwierdzi, że aplikacja została wysłana:
-1. Zaktualizuj status w `applications.md` z "Evaluated" na "Applied"
+1. Record a user-confirmed manual submission only with `node application-submission.mjs preview ...`, then `confirm` with the exact digest. Never call `set-status.mjs Applied` directly.
 2. Zaktualizuj Blok G reportu finalnymi odpowiedziami
 3. Zasugeruj następny krok: `/career-ops contacto` dla LinkedIn outreach do hiring managera
 

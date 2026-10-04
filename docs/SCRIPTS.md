@@ -15,14 +15,19 @@ All scripts live in the project root as `.mjs` modules and are exposed via `npm 
 | `npm run build:latex` | `build-cv-latex.mjs` | Build .tex from structured JSON payload |
 | `npm run sync-check` | `cv-sync-check.mjs` | Validate CV/profile consistency |
 | `npm run patterns` | `analyze-patterns.mjs` | Analyze tracker outcomes and report patterns |
+| `npm run add` | `add-entry.mjs` | Dedup + insert a `/career-ops add` entry into cv.md / article-digest.md |
 | `npm run update:check` | `update-system.mjs check` | Check for upstream updates |
 | `npm run update` | `update-system.mjs apply` | Apply upstream update |
 | `npm run rollback` | `update-system.mjs rollback` | Rollback last update |
 | `npm run liveness` | `check-liveness.mjs` | Test if job URLs are still active |
+| `npm run extract` | `browser-extract.mjs` | Headless read-only page extractor (opt-in `scan.extractor: cli`) — compact JSON for scan/JD |
 | `npm run scan` | `scan.mjs` | Zero-token portal scanner |
+| `npm run scan:merge` | `merge-scan-results.mjs` | Merge parallel JSON scan outputs into an immutable review run |
 | `npm run scan:full` | `scan-ats-full.mjs` | Reverse ATS discovery scanner |
 | `npm run validate:portals` | `validate-portals.mjs` | Validate portals.yml shape before scanning |
 | `npm run tracker` | `tracker.mjs` | SQLite derived index over applications.md — sync/query/history/export |
+| `npm run find` | `find.mjs` | Resolve a report#/tracker#/company query to its full pipeline identity |
+| `npm run invite-match` | `invite-match.mjs` | Fuzzy-match a pasted interview-invite email against `data/applications.md` |
 
 ---
 
@@ -40,7 +45,7 @@ npm run doctor
 
 ## verify
 
-Health check for pipeline data integrity. Validates `data/applications.md` against seven rules: canonical statuses (per `templates/states.yml`), no duplicate company+role pairs, all report links point to existing files, scores match `X.XX/5` / `N/A` / `DUP`, rows have proper pipe-delimited format, no pending TSVs in `batch/tracker-additions/`, and no markdown bold in scores.
+Health check for pipeline data integrity. Validates `data/applications.md` against nine rules: canonical statuses (per `templates/states.yml`), no duplicate company+role pairs, all report links point to existing files, scores match `X.XX/5` / `N/A` / `DUP`, rows have proper pipe-delimited format, no pending TSVs in `batch/tracker-additions/`, no markdown bold in scores, no two `reports/*.md` files covering the same company+role, and no orphan reports without a tracker row (#1425). The report checks are warning-level: duplicate reports can be legitimate (re-evaluation after a JD change), so they never fail the run.
 
 ```bash
 npm run verify
@@ -166,6 +171,28 @@ node analyze-patterns.mjs --self-test
 
 ---
 
+## salary-gap
+
+Folds compensation observations into per-application desired/advertised/actual values and gap aggregates. Sources: `reports/*.md` Machine Summary `advertised_comp` (advertised, source `jd` — historical reports backfill automatically), `data/salary-observations.tsv` (desired/actual, append-only), and `config/profile.yml` `compensation.target_range` (desired default). Fold precedence: highest trust tier wins, then latest date (`actual`: contract > offer-letter > recruiter-verbal > user). Aggregates group by (company, role) and per currency — no FX conversion. Unparseable amounts, orphaned tracker numbers, sample sizes, and staleness are always reported.
+
+```bash
+node salary-gap.mjs             # JSON
+node salary-gap.mjs --summary   # table + data-quality section
+node salary-gap.mjs --self-test
+```
+
+Observation line format (TSV, one per line, `#`-prefixed lines are comments):
+
+```text
+{tracker#}\t{YYYY-MM-DD}\t{desired|advertised|actual}\t{amount}\t{currency}\t{source}\t{note}
+```
+
+Amounts: number + optional k/K suffix, ranges allowed ("80-90k"), annual gross unless noted. Sources: jd | profile | user | recruiter-verbal | offer-letter | contract.
+
+**Exit codes:** `0` always (missing sources produce an explanatory empty result), `1` self-test failure.
+
+---
+
 ## update:check
 
 Checks whether a newer version of career-ops is available upstream. Outputs JSON to stdout:
@@ -229,7 +256,123 @@ Each URL gets a verdict: `active`, `expired`, or `uncertain` with a reason.
 
 ## scan
 
-Zero-token portal scanner. Runs configured local parsers for SSR/static career pages and hits ATS APIs (Greenhouse, Ashby, Lever) directly — no LLM tokens consumed. Reads `portals.yml` for target companies, outputs matching listings to stdout, and optionally appends to `data/pipeline.md`.
+Zero-token portal scanner. Runs configured local parsers for SSR/static career pages and hits ATS APIs (Greenhouse, Ashby, Lever) directly — no LLM tokens consumed. Reads `portals.yml`, writes one immutable canonical run under `output/scan-runs/<run-id>/`, then updates legacy pipeline/history compatibility outputs. Supply `--run-id <safe-id>` when an external workflow needs a predetermined identity; otherwise a collision-safe ID is generated. `--dry-run` writes nothing.
+
+### Merging parallel discovery outputs
+
+Parallel scan workers should write separate JSON files and must not write directly
+to `output/apply-queue.csv` or `data/pipeline.md`. Merge their outputs after all
+workers finish:
+
+```bash
+node merge-scan-results.mjs --dry-run output/worker-a.json output/worker-b.json
+node merge-scan-results.mjs --run-id 2026-07-10-evening output/worker-a.json output/worker-b.json
+```
+
+The merger accepts a top-level array or an object containing `offers`, `jobs`,
+`results`, or `candidates`. It tolerates UTF-8 BOMs, normalizes tracking URLs,
+deduplicates exact URLs and ATS requisition IDs, and retains source provenance.
+Distinct ATS requisitions with the same company and title remain separate.
+Newly merged runs assign a deterministic, versioned `candidate_id`: ATS
+provider + tenant + requisition identity is preferred, with a canonical listing
+URL digest as fallback. Tracking parameters do not affect identity. Every
+candidate and review row also carries its immutable `run_id`; original and
+resolved URLs remain explicit aliases.
+The optional discovery-review fields `matchBucket`, `matchReason`,
+`recommendedCvVariant`, `sourceWorker`, and `notes` are preserved in every
+merged output. If duplicate sources disagree and either reports a confirmed
+blocker, the merged candidate remains `Blocked` for safe human review.
+Human review files are ordered by match bucket, target geography, freshness,
+then company/title so the first rows are the practical review priority.
+
+Each run writes an immutable directory under `output/scan-runs/{run-id}/`:
+
+- `manifest.json` — schema/run identity, candidate-ID version, input counts, duplicate count, invalid-row count
+- `candidates.json` — normalized candidates with `run_id`, `candidate_id`, URL aliases, and provenance
+- `candidates.tsv` — compact review table keyed by `run_id` + `candidate_id`
+- `review.csv` — editable review sheet keyed by `run_id` + `candidate_id`
+- `review.md` — human-readable review table displaying the exact candidate ID
+
+Reusing a run ID fails instead of overwriting prior work. These files are
+discovery artifacts, not an application queue. Apply deterministic title,
+location, work-authorization, experience, and hard-blocker triage next; then run
+liveness checks only on survivors. Browser extraction, evaluation, CV work, and
+company research come after that gate.
+
+Create application batches with exact candidate IDs whenever available:
+
+```bash
+node application-batch.mjs create --source-run <run-id> --candidate-id <id> [--candidate-id <id> ...]
+node application-documents.mjs plan --manifest <manifest> --candidate-id <id> [--jd-file <exact-local-JD>]
+node application-documents.mjs prepare --manifest <manifest> --candidate-id <id> --plan <plan.json> --confirm-plan <plan-hash>
+node application-batch.mjs preflight --manifest <manifest>
+node application-batch.mjs preflight --manifest <manifest> --confirm-batch <batch-id>
+node application-browser-executor.mjs --manifest <manifest> --candidate-id <id>
+node application-browser-executor.mjs --manifest <manifest> --candidate-id <id> --resume-login
+node application-browser-executor.mjs --manifest <manifest> --candidate-id <id> --resume-preparation
+node application-shared-browser.mjs --batch-id <exact-single-candidate-batch> [--batch-id <next-batch> ...]
+```
+
+The shared-browser command accepts one to six independently confirmed
+one-candidate batches, verifies all of them before launch, creates one visible
+tab per exact candidate, and invokes the canonical executor sequentially. It
+leaves successful, review-required, login-required, and blocked tabs open until
+the user closes the shared task browser. It never owns submission or tracker
+authority. Exact blocked/review-required preparation resumes may run in their
+candidate-bound shared tab; interactive login resume stays on the standalone
+executor.
+
+The batch records raw SHA-256 hashes of the source run manifest and candidate
+file plus a canonical application-scope hash. Artifact replacement is an
+explicit state change that invalidates prior confirmation. Phase 1 scan runs
+without candidate IDs are accepted read-only and receive clearly marked
+derived legacy IDs inside the new batch; their historical files are not edited.
+
+`output/apply-queue.csv` is a legacy review artifact, never browser authority.
+The migration bridge requires an explicit queue path, immutable source run, and
+exact row, URL, or candidate-ID selectors:
+
+```bash
+node legacy-queue-importer.mjs --queue-file <exact.csv> --source-run <run-id> --batch-id <batch-id> --row <csv-row> [--row <csv-row> ...]
+```
+
+There is no default queue, rank, first-N, or hard-coded target fallback. The
+manifest retains the queue path/hash and selected rows; mutable state remains
+`legacy_unverified` until fresh liveness and identity checks.
+
+After the user manually completes the final submission, record it separately:
+
+```bash
+node application-submission.mjs preview --manifest <manifest> --candidate-id <id> --tracker data/applications.md --tracker-row <#> --evidence "<user-observed submission evidence>"
+node application-submission.mjs confirm <same exact arguments> --confirm-digest <preview-digest>
+```
+
+The candidate must already be `form_prepared`. Confirmation is digest-bound,
+idempotent, and delegates to `set-status.mjs`. Direct automated-workflow Applied
+writes are gated; incoming Applied tracker additions are downgraded. No command
+clicks the final browser control.
+
+When the user explicitly reports that they independently submitted an
+application, record that authoritative tracker-only confirmation separately:
+
+```bash
+node manual-application-confirmation.mjs --user-confirmed --company "<company>" --role "<role>" [--date YYYY-MM-DD]
+```
+
+This command needs no batch, candidate ID, URL, browser evidence, or application
+date. It updates the exact company+role entry or creates it, uses today when no
+date is supplied, prevents duplicates, and records
+`Source: user-confirmed manual submission`. It does not change application-batch
+state or bypass the automated submission proof path.
+
+Phase 4 progress states are `not_opened`, `listing_verified`,
+`actual_form_reached`, `form_inspected`, `fields_filled`, `files_uploaded`,
+`review_required`, `login_required`, `blocked`, `closed`, and `form_prepared`.
+Only the exact-candidate executor may write progress states. It stores form
+fingerprints, filled-field hashes, committed options, exact uploaded filenames,
+unresolved fields, validation errors, user gates, and evidence that the
+semantic final action was detected but not activated. `form_prepared` is not an
+operator-attestable state.
 
 `scan_history.recheck_after_days` in `portals.yml` lets old `added` URLs become eligible for recheck after the configured number of days. If absent, scan-history dedup keeps the historical behavior and dedups forever. Permanent invalid statuses such as blocked host and malformed URL remain permanent.
 
@@ -261,13 +404,13 @@ Reverse ATS discovery scanner. Where `scan.mjs` scans the companies you track in
 Postings without a usable publish date are skipped — a reverse scan is only useful for fresh postings. New matches are appended to `data/pipeline.md` and `data/scan-history.tsv` in the same format as `scan.mjs`.
 
 ```bash
-npm run scan:full                              # all ATS directories, last 3 days
-node scan-ats-full.mjs --since 7               # postings from the last 7 days
-node scan-ats-full.mjs --ats greenhouse,workday # subset of sources
-node scan-ats-full.mjs --limit 200             # max companies per ATS
-node scan-ats-full.mjs --dry-run               # preview without writing
-node scan-ats-full.mjs --liveness              # Playwright-verify matches first
-node scan-ats-full.mjs --md-out notes/scans    # also write a dated markdown digest
+npm run scan:full -- --run-id <immutable-run-id> # all ATS directories, last 3 days
+node scan-ats-full.mjs --run-id <id> --since 7
+node scan-ats-full.mjs --run-id <id> --ats greenhouse,workday
+node scan-ats-full.mjs --run-id <id> --limit 200
+node scan-ats-full.mjs --run-id <id> --dry-run
+node scan-ats-full.mjs --run-id <id> --liveness
+node scan-ats-full.mjs --run-id <id> --md-out notes/scans
 ```
 
 **Exit codes:** `0` scan completed, `1` configuration error (no portals.yml, unknown `--ats` source) or fatal scan error.
@@ -299,3 +442,91 @@ node tracker.mjs export --out repaired.md # write to a file (existing file backe
 `export` is the inverse of `sync` (round-trip `md → db → md` is lossless for clean input — enforced by `test-all.mjs`). It writes to stdout by default and never touches `applications.md` unless you explicitly pass it as `--out`. Phase 2 of #918 (DB becomes source of truth, markdown becomes a rendered view) is a separate, explicit per-user opt-in — not part of this script yet.
 
 **Exit codes:** `0` success, `1` validation error, missing prerequisites (Node < 22.5, no `applications.md` to index), or corruption found by `sync --check`.
+
+---
+
+## find
+
+Resolves a report number, tracker number, or company/role fragment to its full pipeline identity: company, role, tracker#, report#, canonical status, PDF path (from `data/pdf-index.tsv`), and report path. "Apply to #13" is ambiguous — report numbers and tracker row numbers diverge — and answering it used to require opening three files; this does it in one read-only lookup.
+
+Zero dependencies, strictly read-only. Numeric queries match **both** the tracker # column and the report number from the Report link (`012` and `12` are the same number), so collisions between the two numbering schemes surface as multiple rows instead of a silent wrong pick. Text queries match company/role by case-insensitive substring, with the shared fuzzy matcher (`role-matcher.mjs`) as fallback for multi-word phrases.
+
+```bash
+node find.mjs 13                # report# OR tracker# 13 — shows both if they differ
+node find.mjs acme              # company fragment
+node find.mjs "data engineer"   # role phrase (fuzzy via role-matcher)
+node find.mjs acme --json       # machine-readable output
+```
+
+Multiple matches print as a table; zero matches print a clean message.
+
+**Exit codes:** `0` at least one match, `1` no match, missing query, or no `applications.md`.
+
+---
+
+## stats.mjs
+
+Aggregates lifetime pipeline stats into one JSON report. Stats include tracker, scanner, portals, follow-ups and runs. Reads from data/applications.md, data/scan-history.tsv, portals.yml, data/follow-ups.md and data/scan-runs.tsv. If a file doesn't exist yet, the section turns into null.
+
+```bash
+node stats.mjs --summary             # returns human-readable table
+node stats.mjs                       # returns json
+```
+On a fresh clone, with no data yet, the JSON format is as follows:
+
+```
+{
+  "metadata": {
+    "generatedAt": "2026-07-07",
+    "sources": {
+      "tracker": false,
+      "scanHistory": false,
+      "followups": false,
+      "portals": false,
+      "scanRuns": false
+    }
+  },
+  "tracker": null,
+  "funnel": null,
+  "scan": null,
+  "portals": null,
+  "followups": null,
+  "runs": null
+}
+```
+
+With --summary it returns:
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Pipeline Stats — 2026-07-07
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Tracker:    — no data (data/applications.md missing)
+Scanner:    — no data (data/scan-history.tsv missing)
+Portals:    — no data (portals.yml missing)
+Follow-ups: — no data (data/follow-ups.md missing)
+Runs:       — no data (data/scan-runs.tsv missing; created by the next scan)
+```
+
+---
+
+## data/scan-runs.tsv
+
+`scan.mjs` appends one row to this file after each non-dry scan run, recording how many companies/boards it checked, how many postings it found vs. filtered out vs. flagged as duplicates vs. added, and how many errors occurred. `--dry-run` scans never write to this file. Stats appended include:
+
+* `timestamp` — ISO timestamp of the scan
+* `status` — always `completed` for now
+* `companies` — number of companies scanned this run
+* `boards` — number of job boards scanned this run
+* `found` — total postings found
+* `filtered_title` — filtered out by title mismatch
+* `filtered_tier` — filtered out by tier
+* `filtered_location` — filtered out by location
+* `filtered_salary` — filtered out by salary
+* `filtered_content` — filtered out by content
+* `filtered_cooldown` — skipped because you recently applied to the same company + role and are still in the waiting period
+* `dupes` — duplicate postings skipped
+* `new_added` — new postings actually added to the pipeline
+* `errors` — number of errors during the run
+
+As the project is in continuous development, to parse for a stat we recommend doing it by column header instead of position.

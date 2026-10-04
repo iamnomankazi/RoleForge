@@ -14,16 +14,21 @@
  */
 
 import { readFileSync, existsSync, mkdirSync } from "fs";
-import { dirname, resolve, basename, join } from "path";
+import { dirname, resolve, basename, join, relative, isAbsolute } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { parseArgs } from "util";
 
 const OUTPUT_ROOT = resolve("output");
 
 function safeOutputPath(raw) {
-  // Derive a sanitized filename from raw string (strip path separators and dots)
-  const filename = basename(raw).replace(/[^a-zA-Z0-9._-]/g, "-").replace(/\.{2,}/g, "-");
-  return join(OUTPUT_ROOT, filename);
+  const absolute = resolve(raw);
+  const rel = relative(OUTPUT_ROOT, absolute);
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw new Error('Cover-letter output must stay inside output/');
+  const filename = basename(absolute);
+  if (filename.includes('_') || /%20/i.test(filename) || !/\.pdf$/i.test(filename)) {
+    throw new Error('Cover-letter filename must be a readable PDF filename using normal spaces');
+  }
+  return absolute;
 }
 
 function _require(obj, keys, context) {
@@ -181,14 +186,15 @@ Usage:
   }
 
   if (!payload.output_path) {
-    const company = (payload.letter?.company || "company").toLowerCase().replace(/[^a-z0-9]+/g, "-");
-    const role    = (payload.letter?.role_title || "role").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 30);
-    payload.output_path = join(OUTPUT_ROOT, `${company}-${role}-cover.pdf`);
+    const company = (payload.letter?.company || "Company").replace(/[^a-zA-Z0-9]+/g, " ").trim();
+    const role    = (payload.letter?.role_title || "Role").replace(/[^a-zA-Z0-9]+/g, " ").trim().slice(0, 60);
+    payload.output_path = join(OUTPUT_ROOT, `${company} ${role} Cover Letter.pdf`);
   } else {
     payload.output_path = safeOutputPath(payload.output_path);
   }
 
   if (!existsSync(OUTPUT_ROOT)) mkdirSync(OUTPUT_ROOT, { recursive: true });
+  mkdirSync(dirname(resolve(payload.output_path)), { recursive: true });
 
   // Imported lazily so buildHtml can be used (and tested) without Playwright.
   const { renderHtmlToPdf } = await import("./generate-pdf.mjs");

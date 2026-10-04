@@ -1,5 +1,31 @@
 # Mode: pdf — ATS-Optimized PDF Generation
 
+## Approved CV systems (profile-driven override)
+
+Before applying the generic workflow below, read `config/profile.yml` and
+`modes/_profile.md`. When `cv.approved_system.enabled` is true, the profile's
+approved master and role PDFs are the factual and visual source of truth.
+
+1. Read the approved master PDF plus the three role PDFs listed in the profile.
+2. Classify the JD as data engineering, AI/ML, software/backend, or a genuine
+   hybrid. Choose one explicit outcome: **reuse unchanged**, **light edit**, or
+   **tailored hybrid**.
+3. Reuse the closest approved role PDF unchanged whenever it already presents the
+   right evidence. This is the default and does not require HTML/PDF generation.
+4. Create a light edit only when a summary/skill/project/bullet reorder provides
+   meaningful JD-specific value. Create a hybrid only when the JD materially spans
+   two role CVs. Use verified material from the approved master only.
+5. Tailored output must preserve the approved system's one-page A4 layout:
+   centered serif header/contact line, thin blue section rules, black serif body,
+   and Profile -> Technical Skills -> Education -> Experience -> Projects -> Languages.
+   Use `cv.approved_system.layout_template`, never a generic redesign.
+6. Save new tailored files under `cv.approved_system.tailored_output_dir`; never
+   overwrite an approved PDF or an existing role variant. Render and visually
+   compare each newly generated PDF against the master before handing it off.
+
+The profile's source and layout rules override any conflicting generic advice in
+this mode. Keywords may be reformulated but never fabricated.
+
 ## Full pipeline
 
 1. Read `cv.md` as the source of truth
@@ -11,7 +37,8 @@
    - Rest of the world → `a4`
 6. Detect role archetype → adapt framing
 7. Build an internal recruiter-side risk map from the JD using `modes/heuristics/recruiter-side.md`: likely doubts, matching evidence, and which document section should address each doubt
-8. Rewrite Professional Summary by injecting JD keywords + exit narrative bridge ("Built and sold a business. Now applying systems thinking to [JD domain].")
+8. Rewrite the profile summary only with verified JD-relevant evidence. Do not add
+   an exit narrative, business-sale claim, or any other unsupported framing.
 9. Select top 3-4 most relevant projects for the job
 10. Reorder experience bullets by JD relevance and by the risk map: strongest matching evidence first
 11. Build competency grid from JD requirements (6-8 keyword phrases)
@@ -43,14 +70,8 @@
 
 ## PDF Design
 
-- **Fonts**: Space Grotesk (headings, 600-700) + DM Sans (body, 400-500)
-- **Fonts self-hosted**: `fonts/`
-- **Header**: name in Space Grotesk 24px bold + gradient line `linear-gradient(to right, hsl(187,74%,32%), hsl(270,70%,45%))` 2px + contact row
-- **Section headers**: Space Grotesk 13px, uppercase, letter-spacing 0.05em, color cyan primary
-- **Body**: DM Sans 11px, line-height 1.5
-- **Company names**: accent purple color `hsl(270,70%,45%)`
-- **Margins**: 0.6in
-- **Background**: pure white
+When no approved CV system is configured, use the generic ATS-safe template.
+When one is configured, follow its profile-defined visual source of truth instead.
 
 ## Section order (optimized "6-second recruiter scan")
 
@@ -73,7 +94,23 @@ Examples of legitimate reformulation:
 
 ## Template HTML
 
+**Before generating: read `modes/_custom.md` (if it exists) and apply its formatting/content house rules to every CV in this session — including every item of a batch.** Rules recorded there (date formats, section-order preferences, content to always/never include) are persistent user instructions, not suggestions; if the user corrects the same thing twice in conversation, write it into `modes/_custom.md` so it stops drifting.
+
 Use the template in `cv-template.html`. Replace the `{{...}}` placeholders with personalized content:
+
+When an approved CV system is configured, use this table instead of the legacy
+generic competency/certification placeholders below. Keep the approved section
+order exactly as shown and omit photos unless the user explicitly requests one.
+
+| Approved placeholder | Content |
+|----------------------|---------|
+| `{{SECTION_PROFILE}}` | `Profile` |
+| `{{SUMMARY_TEXT}}` | Verified, JD-relevant profile summary |
+| `{{SECTION_SKILLS}}` / `{{SKILLS}}` | `Technical Skills` plus compact labeled skill lines |
+| `{{SECTION_EDUCATION}}` / `{{EDUCATION}}` | Approved education lines |
+| `{{SECTION_EXPERIENCE}}` / `{{EXPERIENCE}}` | Verified experience bullets |
+| `{{SECTION_PROJECTS}}` / `{{PROJECTS}}` | Most relevant approved projects |
+| `{{SECTION_LANGUAGES}}` / `{{LANGUAGES}}` | Approved language line |
 
 | Placeholder | Content |
 |-------------|-----------|

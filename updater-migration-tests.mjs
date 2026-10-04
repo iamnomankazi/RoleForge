@@ -46,12 +46,14 @@ const userPaths = extractArray('USER_PATHS');
 const bootstrapPaths = extractArray('BOOTSTRAP_PATHS');
 
 const requiredSystemPaths = [
+  'modes/email.md',
   'modes/followup.md',
   'modes/interview.md',
   'modes/interview-prep.md',
   'modes/patterns.md',
   'modes/update.md',
   'modes/ar/',
+  'modes/hi/',
   'modes/tr/',
   'modes/ua/',
   'batch/README.md',
@@ -66,6 +68,7 @@ const requiredSystemPaths = [
   'updater-migration-tests.mjs',
   'README.ar.md',
   'README.de.md',
+  'README.hi.md',
   'README.ja.md',
   'README.ua.md',
   'CHANGELOG.md',
@@ -169,7 +172,13 @@ for (const userPath of ['cv.md', 'config/profile.yml', 'modes/_profile.md', 'por
   else fail(`USER_PATHS missing ${userPath}`);
 }
 
-const allowedSystemUserOverlap = new Set(['writing-samples/README.md']);
+const allowedSystemUserOverlap = new Set([
+  'writing-samples/README.md',
+  // System-owned scaffold inside the user-layer interview-prep/ dir (#1242):
+  // the updater ships these two, but never the real session files alongside them.
+  'interview-prep/sessions/.gitkeep',
+  'interview-prep/sessions/README.md',
+]);
 let hasSystemUserCollision = false;
 for (const systemPath of systemPaths) {
   const overlapsUserPath = userPaths.some((userPath) => {

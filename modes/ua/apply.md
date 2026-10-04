@@ -2,6 +2,9 @@
 
 Інтерактивний режим для заповнення форми відгуку в Chrome. Читає екран, завантажує контекст вакансії, генерує персоналізовані відповіді.
 
+<!-- APPLICATION_BATCH_AUTHORITY_V1 -->
+Browser application work requires an immutable batch manifest and one exact candidate ID. Legacy queues and arbitrary URLs are draft-only, never execution authority.
+
 ## Вимоги
 
 - **Краще з Playwright**: Кандидат бачить браузер, Claude взаємодіє зі сторінкою.
@@ -106,6 +109,6 @@
 
 Якщо кандидат підтвердив відправку:
 
-1. Оновити статус у `data/applications.md` з "Evaluated" на "Applied"
+1. Record a user-confirmed manual submission only with `node application-submission.mjs preview ...`, then `confirm` with the exact digest. Never call `set-status.mjs Applied` directly.
 2. Оновити секцію G звіту фінальними відповідями
 3. Запропонувати: `/career-ops contacto` для LinkedIn outreach

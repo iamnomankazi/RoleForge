@@ -4,6 +4,9 @@
 
 ---
 
+<!-- APPLICATION_BATCH_AUTHORITY_V1 -->
+Browser application work requires an immutable batch manifest and one exact candidate ID. Legacy queues and arbitrary URLs are draft-only, never execution authority.
+
 ## المتطلبات الأساسية
 
 - **يفضل تشغيل Playwright في الوضع المرئي (Visible Mode):** يتيح هذا الوضع للمرشح رؤية المتصفح ويسمح للوكيل الذكي (Claude/Gemini) بالتفاعل وقراءة الصفحة مباشرة.
@@ -110,6 +113,6 @@
 ## الخطوة 6 — ما بعد إرسال الطلب (Post-apply)
 
 عندما يؤكد المرشح قيامه بإرسال طلب التقديم بنجاح:
-1. قم بتحديث حالة طلب التوظيف في ملف التتبع `applications.md` من "Evaluated" إلى "Applied".
+1. Record a user-confirmed manual submission only with `node application-submission.mjs preview ...`, then `confirm` with the exact digest. Never call `set-status.mjs Applied` directly.
 2. قم بحفظ الإجابات النهائية المعتمدة والملقاة في القسم H من تقرير الوظيفة للرجوع إليها لاحقاً عند التحضير للمقابلات.
 3. اقترح على المرشح الخطوة الذكية التالية مباشرة: تشغيل الأمر `/career-ops contacto` لصياغة رسالة احترافية وموجهة للتواصل مع مسؤولي التوظيف في الشركة عبر LinkedIn.

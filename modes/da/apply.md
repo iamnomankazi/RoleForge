@@ -2,6 +2,9 @@
 
 Interaktiv mode til det øjeblik, hvor kandidaten udfylder en ansøgningsformular i Chrome. Den læser, hvad der er på skærmen, indlæser konteksten fra opslagets tidligere evaluering og genererer personaliserede svar til hvert spørgsmål i formularen.
 
+<!-- APPLICATION_BATCH_AUTHORITY_V1 -->
+Browser application work requires an immutable batch manifest and one exact candidate ID. Legacy queues and arbitrary URLs are draft-only, never execution authority.
+
 ## Forudsætninger
 
 - **Bedst med Playwright synlig**: I synlig tilstand ser kandidaten browseren, og Claude kan interagere med siden.
@@ -102,7 +105,7 @@ Noter:
 ## Trin 6 -- Efter ansøgningen (valgfrit)
 
 Hvis kandidaten bekræfter, at ansøgningen er sendt:
-1. Opdatér status i `applications.md` fra "Evaluated" til "Applied"
+1. Record a user-confirmed manual submission only with `node application-submission.mjs preview ...`, then `confirm` with the exact digest. Never call `set-status.mjs Applied` directly.
 2. Opdatér report'ens Blok G med de endelige svar
 3. Foreslå næste trin: `/career-ops contacto` til LinkedIn-outreach mod den ansættende leder
 

@@ -4,6 +4,9 @@
 
 候補者が Chrome で応募フォームを入力しているときの interactive mode。画面上の内容を読み、事前評価済みの求人 context を読み込み、フォームの各質問に personalized responses を生成する。
 
+<!-- APPLICATION_BATCH_AUTHORITY_V1 -->
+Browser application work requires an immutable batch manifest and one exact candidate ID. Legacy queues and arbitrary URLs are draft-only, never execution authority.
+
 ## Requirements
 
 - **Best with Playwright in visible mode:** visible mode では、候補者が browser を見られ、Claude が page と interact できる。
@@ -134,7 +137,7 @@ Notes:
 ## Step 8 -- Post-apply (optional)
 
 候補者が application を submitted したと確認した場合：
-1. `applications.md` の status を "Evaluated" から "Applied" に update
+1. Record a user-confirmed manual submission only with `node application-submission.mjs preview ...`, then `confirm` with the exact digest. Never call `set-status.mjs Applied` directly.
 2. Report の Section G を final responses で update
 3. Next step として LinkedIn outreach 用の `/career-ops contacto` を提案
 
