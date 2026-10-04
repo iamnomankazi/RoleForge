@@ -56,10 +56,14 @@ const EXIT_NOT_FOUND = 2;
 const EXIT_AMBIGUOUS = 3;
 const EXIT_LOCK_TIMEOUT = 4;
 
-const USAGE = `Usage: node set-status.mjs <report#|company> <state> [--note "..."] [--role "..."] [--dry-run] [--json]
+const USAGE = `Usage: node set-status.mjs <row#|company> <state> [--note "..."] [--role "..."] [--dry-run] [--json]
+       node set-status.mjs --row N <state> [...]
+       node set-status.mjs --report N <state> [...]
 
-  <report#|company>  Row selector: tracker # (exact) or company name (normalized match)
+  <row#|company>     Legacy selector: tracker # or company name
   <state>            Canonical state from templates/states.yml (aliases accepted)
+  --row N            Select an exact tracker row ID
+  --report N         Select the row linking an exact report ID
   --note "..."       Append to the Notes cell ("; "-separated, idempotent)
   --role "..."       Disambiguate when several rows share the company (fuzzy match)
   --dry-run          Resolve and validate, but write nothing
@@ -74,12 +78,13 @@ const rawArgs = process.argv.slice(2);
 const positional = [];
 const flags = {
   note: null, role: null, dryRun: false, json: false,
+  row: null, report: null,
   applicationManifest: null, candidateId: null, submissionEvent: null,
 };
 
 for (let i = 0; i < rawArgs.length; i++) {
   const a = rawArgs[i];
-  if (['--note', '--role', '--application-manifest', '--candidate-id', '--submission-event'].includes(a)) {
+  if (['--note', '--role', '--row', '--report', '--application-manifest', '--candidate-id', '--submission-event'].includes(a)) {
     // Never consume a following flag as the value: "--note --dry-run" would
     // silently disable dry-run and turn a preview into a real write.
     const value = rawArgs[i + 1];
@@ -89,11 +94,16 @@ for (let i = 0; i < rawArgs.length; i++) {
     const key = {
       '--note': 'note',
       '--role': 'role',
+      '--row': 'row',
+      '--report': 'report',
       '--application-manifest': 'applicationManifest',
       '--candidate-id': 'candidateId',
       '--submission-event': 'submissionEvent',
     }[a];
     if (flags[key] != null) failUsage(`Duplicate option: ${a}`);
+    if ((a === '--row' || a === '--report') && !/^\d+$/.test(value)) {
+      failUsage(`${a} expects a positive integer, got "${value}"`);
+    }
     flags[key] = value;
     i++;
   }
@@ -103,11 +113,19 @@ for (let i = 0; i < rawArgs.length; i++) {
   else { positional.push(a); }
 }
 
-if (positional.length !== 2) {
-  failUsage(positional.length === 0 ? null : `Expected 2 arguments (selector, state), got ${positional.length}`);
+if (flags.row !== null && flags.report !== null) {
+  failUsage('--row and --report are mutually exclusive');
+}
+const explicitSelector = flags.row !== null || flags.report !== null;
+if ((explicitSelector && positional.length !== 1) || (!explicitSelector && positional.length !== 2)) {
+  failUsage(explicitSelector
+    ? `With ${flags.row !== null ? '--row' : '--report'}, provide only the state`
+    : (positional.length === 0 ? null : `Expected 2 arguments (selector, state), got ${positional.length}`));
 }
 
-const [selector, stateInput] = positional;
+const selector = explicitSelector ? null : positional[0];
+const stateInput = explicitSelector ? positional[0] : positional[1];
+const isBareNumericSelector = selector !== null && /^\d+$/.test(selector);
 
 /**
  * Emit a structured error and exit.
@@ -180,13 +198,36 @@ if (!existsSync(APPS_FILE)) {
  * @returns {object} The single matched row. Exits the process on 0 or 2+ matches.
  */
 function resolveRow(rows) {
-  if (/^\d+$/.test(selector)) {
-    const num = parseInt(selector, 10);
-    const row = rows.find(r => r.num === num);
-    if (!row) {
-      failWith(EXIT_NOT_FOUND, 'not-found', `No tracker row with #${num}`);
+  const narrow = (matches, notFound, ambiguous) => {
+    if (matches.length > 1 && flags.role) {
+      const narrowed = matches.filter((row) => roleFuzzyMatch(row.role, flags.role)
+        || String(row.role).trim().toLowerCase() === String(flags.role).trim().toLowerCase());
+      if (narrowed.length === 1) return narrowed[0];
     }
-    return row;
+    if (matches.length === 0) failWith(EXIT_NOT_FOUND, 'not-found', notFound);
+    if (matches.length > 1) {
+      const candidates = matches.map((row) => ({ num: row.num, company: row.company, role: row.role }));
+      failWith(EXIT_AMBIGUOUS, 'ambiguous', `${ambiguous}\n${candidates.map((row) => `#${row.num}\t${row.company}\t${row.role}`).join('\n')}`, { candidates });
+    }
+    return matches[0];
+  };
+
+  if (flags.report !== null) {
+    const report = Number(flags.report);
+    return narrow(
+      rows.filter((row) => extractTrackerReportNumbers(row.report).includes(report)),
+      `No tracker row links report #${report}`,
+      `Report #${report} is linked by multiple tracker rows; pass --role to disambiguate:`,
+    );
+  }
+
+  if (flags.row !== null || isBareNumericSelector) {
+    const num = Number(flags.row ?? selector);
+    return narrow(
+      rows.filter((row) => row.num === num),
+      `No tracker row with #${num}`,
+      `Tracker #${num} is duplicated; pass --role to disambiguate:`,
+    );
   }
 
   const key = normalizeCompany(selector);
@@ -209,6 +250,14 @@ function resolveRow(rows) {
       { candidates });
   }
   return matches[0];
+}
+
+function extractTrackerReportNumbers(report) {
+  const values = new Set();
+  const text = String(report ?? '');
+  for (const match of text.matchAll(/\[(\d+)\]/g)) values.add(Number(match[1]));
+  for (const match of text.matchAll(/(?:^|[\\/])(\d{1,9})(?:[-_.]|$)/g)) values.add(Number(match[1]));
+  return [...values];
 }
 
 // ── locked read-modify-write ─────────────────────────────────────
@@ -260,6 +309,26 @@ if (rows.length === 0) {
 }
 
 const target = resolveRow(rows);
+if (isBareNumericSelector) {
+  const reportNumbers = extractTrackerReportNumbers(target.report);
+  const number = Number(selector);
+  if (reportNumbers.some((report) => report !== number)) {
+    failWith(EXIT_AMBIGUOUS, 'report-number-mismatch',
+      `Tracker #${number} links report ${reportNumbers.map((report) => `#${report}`).join(', ')}; use --row ${number} or --report N`);
+  }
+  if (reportNumbers.length === 0) {
+    const linkers = rows.filter((row) => row !== target && extractTrackerReportNumbers(row.report).includes(number));
+    if (linkers.length > 0) {
+      failWith(EXIT_AMBIGUOUS, 'report-number-ambiguous',
+        `"${number}" names a report-less tracker row and report #${number}; use --row ${number} or --report ${number}`,
+        { linkedBy: linkers.map((row) => ({ num: row.num, company: row.company, role: row.role })) });
+    }
+  }
+}
+if (flags.role && !(roleFuzzyMatch(target.role, flags.role)
+    || String(target.role).trim().toLowerCase() === String(flags.role).trim().toLowerCase())) {
+  failWith(EXIT_NOT_FOUND, 'role-mismatch', `Selected row role "${target.role}" does not match --role "${flags.role}"`);
+}
 const oldStatus = target.status;
 const note = flags.note != null ? cell(flags.note) : null;
 
@@ -268,7 +337,8 @@ if (newStatus === 'Applied') {
     failWith(EXIT_USAGE, 'applied-confirmation-required',
       'Applied status requires an application-batch submission confirmation; use application-submission.mjs');
   }
-  if (!/^\d+$/.test(selector) || Number(selector) !== target.num) {
+  const exactRowSelector = flags.row !== null ? Number(flags.row) : (isBareNumericSelector ? Number(selector) : null);
+  if (exactRowSelector !== target.num) {
     failWith(EXIT_USAGE, 'exact-tracker-row-required', 'Applied status requires the exact numeric tracker row selector');
   }
   try {

@@ -13,6 +13,7 @@ import { join, dirname, basename, resolve, relative, isAbsolute, sep } from 'pat
 import { createHash, randomUUID } from 'crypto';
 import { tmpdir } from 'os';
 import yaml from 'js-yaml';
+import { normalizeTextKey } from './tracker-parse.mjs';
 
 /**
  * Rebuild a markdown table row from the cells produced by `line.split('|')`.
@@ -47,7 +48,7 @@ export function rebuildRow(parts) {
  * @returns {string} Lowercase alphanumeric company key.
  */
 export function normalizeCompany(name) {
-  return name.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return normalizeTextKey(name);
 }
 
 /**

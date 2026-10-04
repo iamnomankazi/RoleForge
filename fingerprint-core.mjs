@@ -19,6 +19,7 @@
  */
 
 import { createHash } from 'crypto';
+import { normalizeTextKey } from './tracker-parse.mjs';
 
 /** Descriptions shorter than this (after normalization) carry too little
  * signal to distinguish real matches from boilerplate — skip them. */
@@ -104,7 +105,7 @@ export function similarity(a, b) {
 /** Company key for "different employer" checks — same normalization family as
  * the tracker tooling (lowercase alphanumerics). */
 function companyKey(name) {
-  return String(name ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  return normalizeTextKey(name);
 }
 
 /**

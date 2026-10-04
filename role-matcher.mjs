@@ -69,6 +69,7 @@ export function roleTokens(role) {
   const text = typeof role === 'string' ? role : String(role ?? '');
   return text
     .toLowerCase()
+    .replace(/\b([a-z0-9]{1,3})\/([a-z0-9]{1,3})\b/g, '$1$2')
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
     .filter(w => (w.length > 3 || SHORT_SPECIALTY.has(w)) && !ROLE_STOPWORDS.has(w));

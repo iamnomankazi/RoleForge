@@ -56,7 +56,22 @@ export const SCORE_CELL_RE = /^\d+(?:\.\d+)?\/5$/;
 /** @param {string} v @returns {boolean} whether the cell reads as a score. */
 export function looksLikeScoreCell(v) {
   const t = String(v ?? '').replace(/\*\*/g, '').trim();
-  return SCORE_CELL_RE.test(t) || t === 'N/A' || t === 'DUP';
+  return SCORE_CELL_RE.test(t) || t === 'N/A' || t === 'DUP' || t === '—' || t === '-';
+}
+
+/** A structural Markdown separator row, not merely a data row containing dashes. */
+export const SEPARATOR_ROW_RE = /^\|(?:\s*:?-{3,}:?\s*\|)+\s*$/;
+
+export function isSeparatorRow(line) {
+  return typeof line === 'string' && SEPARATOR_ROW_RE.test(line.trim());
+}
+
+/** Unicode-preserving identity key shared by tracker, scanner, and fingerprint consumers. */
+export function normalizeTextKey(value) {
+  return String(value ?? '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}]/gu, '');
 }
 
 /**
@@ -93,7 +108,6 @@ export function detectColumns(lines) {
   for (const line of lines) {
     if (!line.startsWith('|')) continue;
     const cells = line.split('|').map(s => s.trim().toLowerCase());
-    if (!cells.includes('company') || !cells.includes('role')) continue;
     const map = {};
     cells.forEach((c, i) => { if (HEADER_ALIASES[c] != null) map[HEADER_ALIASES[c]] = i; });
     if (['num', 'company', 'role', 'score', 'status'].every(k => map[k] != null)) return map;

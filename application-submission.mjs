@@ -161,7 +161,7 @@ export function confirmManualSubmission(options = {}) {
     const note = `[submission-event:${preview.eventId}] User confirmed manual final submission; batch=${preview.envelope.batchId}; candidate=${preview.candidate.candidate_id}`;
     const result = spawnSync(process.execPath, [
       resolve(ROOT, 'set-status.mjs'),
-      String(preview.trackerRow),
+      '--row', String(preview.trackerRow),
       'Applied',
       '--note', note,
       '--application-manifest', preview.manifestPath,

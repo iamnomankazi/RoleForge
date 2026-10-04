@@ -10,11 +10,11 @@
  * Run: node career-ops/dedup-tracker.mjs [--dry-run]
  */
 
-import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, copyFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { rebuildRow } from './tracker-utils.mjs';
-import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
+import { rebuildRow, normalizeCompany, trackerLockDirFor, acquireTrackerLock, writeFileAtomic } from './tracker-utils.mjs';
+import { resolveColumns, parseTrackerRow, normalizeVia } from './tracker-parse.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 // Support both layouts: data/applications.md (boilerplate) and applications.md
@@ -42,6 +42,9 @@ const STATUS_RANK = {
   'responded': 4,
   'interview': 5,
   'offer': 6,
+  'hired': 7,
+  'accepted': 7,
+  'accept': 7,
   // Spanish aliases — kept for backwards compat with existing tracker data
   'no_aplicar': 0,
   'no aplicar': 0,
@@ -54,26 +57,9 @@ const STATUS_RANK = {
   'respondido': 4,
   'entrevista': 5,
   'oferta': 6,
+  'contratado': 7,
+  'contratada': 7,
 };
-
-/**
- * Normalize a company name into the grouping key used by deduplication.
- *
- * The tracker may contain punctuation, parenthetical branding, or spacing
- * differences for the same employer. This function removes those presentation
- * differences while keeping the alphanumeric company identity that determines
- * which rows are safe to compare for duplicate roles.
- *
- * @param {string} name - Company name from an applications.md row.
- * @returns {string} Lowercase company key used for same-company grouping.
- */
-function normalizeCompany(name) {
-  return name.toLowerCase()
-    .replace(/[()]/g, '')
-    .replace(/\s+/g, ' ')
-    .replace(/[^a-z0-9 ]/g, '')
-    .trim();
-}
 
 /**
  * Normalize tracker status text before ranking or comparing it.
@@ -149,10 +135,10 @@ function extractReportNum(reportStr) {
  * @returns {boolean} True when both rows represent the same report identity.
  */
 function sameReportIdentity(a, b) {
-  if (a.num === b.num) return true;
   const reportA = extractReportNum(a.report);
   const reportB = extractReportNum(b.report);
-  return reportA !== null && reportA === reportB;
+  if (reportA !== null && reportA === reportB) return true;
+  return a.num === b.num && normalizeRole(a.role) === normalizeRole(b.role);
 }
 
 /**
@@ -266,6 +252,16 @@ if (!existsSync(APPS_FILE)) {
   console.log('No applications.md found. Nothing to dedup.');
   process.exit(0);
 }
+let trackerLock = null;
+if (!DRY_RUN) {
+  try {
+    trackerLock = await acquireTrackerLock(trackerLockDirFor(APPS_FILE), { tracker: APPS_FILE });
+    process.once('exit', () => trackerLock?.release());
+  } catch (error) {
+    console.error(`Cannot acquire tracker lock: ${error.message}`);
+    process.exit(1);
+  }
+}
 const content = readFileSync(APPS_FILE, 'utf-8');
 const lines = content.split('\n');
 // Header-aware column map (tolerates an inserted Location column, etc.).
@@ -293,7 +289,7 @@ const BLIND_KEY = ' blind-via:';
 const groups = new Map();
 for (const entry of entries) {
   const key = String(entry.company).trim() === '?'
-    ? BLIND_KEY + normalizeCompany(entry.via || '')
+    ? BLIND_KEY + normalizeVia(entry.via || '')
     : normalizeCompany(entry.company);
   if (!groups.has(key)) groups.set(key, []);
   groups.get(key).push(entry);
@@ -363,6 +359,25 @@ for (const [company, companyEntries] of groups) {
       }
     }
 
+    let mergedNotes = String(keeper.notes || '').trim();
+    const originalNotes = mergedNotes;
+    for (let k = 1; k < cluster.length; k++) {
+      const duplicateNotes = String(cluster[k].notes || '').trim();
+      if (duplicateNotes && !['N/A', '❌', 'pending', '-', '—'].includes(duplicateNotes)
+          && !mergedNotes.split('; ').includes(duplicateNotes)) {
+        mergedNotes = mergedNotes && !['N/A', '-', '—'].includes(mergedNotes)
+          ? `${mergedNotes}; ${duplicateNotes}`
+          : duplicateNotes;
+      }
+    }
+    if (mergedNotes !== originalNotes && keeper.lineIdx !== undefined && COLMAP.notes != null) {
+      const parts = lines[keeper.lineIdx].split('|').map((value) => value.trim());
+      parts[COLMAP.notes] = mergedNotes;
+      lines[keeper.lineIdx] = rebuildRow(parts);
+      keeper.notes = mergedNotes;
+      console.log(`  📝 #${keeper.num}: notes merged`);
+    }
+
     // Remove duplicates
     for (let k = 1; k < cluster.length; k++) {
       const dup = cluster[k];
@@ -386,10 +401,11 @@ console.log(`\n📊 ${removed} duplicates removed`);
 
 if (!DRY_RUN && removed > 0) {
   copyFileSync(APPS_FILE, APPS_FILE + '.bak');
-  writeFileSync(APPS_FILE, lines.join('\n'));
+  writeFileAtomic(APPS_FILE, lines.join('\n'));
   console.log('✅ Written to applications.md (backup: applications.md.bak)');
 } else if (DRY_RUN) {
   console.log('(dry-run — no changes written)');
 } else {
   console.log('✅ No duplicates found');
 }
+trackerLock?.release();

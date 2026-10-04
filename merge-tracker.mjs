@@ -20,7 +20,7 @@ import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
 import { normalizeReportLink as normalizeLink } from './tracker-links.mjs';
 import { roleFuzzyMatch } from './role-matcher.mjs';
-import { LEGACY_COLMAP, detectColumns, resolveScoreStatus, normalizeVia } from './tracker-parse.mjs';
+import { LEGACY_COLMAP, detectColumns, resolveScoreStatus, normalizeVia, SEPARATOR_ROW_RE } from './tracker-parse.mjs';
 import { resolveTrackerPath, trackerLockDirFor, acquireTrackerLock, writeFileAtomic, normalizeCompany, cell } from './tracker-utils.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
@@ -98,7 +98,7 @@ try {
 }
 
 // Canonical states and aliases
-const CANONICAL_STATES = ['Evaluated', 'Applied', 'Responded', 'Interview', 'Offer', 'Rejected', 'Discarded', 'SKIP'];
+const CANONICAL_STATES = ['Evaluated', 'Applied', 'Responded', 'Interview', 'Offer', 'Rejected', 'Discarded', 'SKIP', 'Hired'];
 
 /**
  * Convert raw addition status text into one canonical tracker state.
@@ -127,6 +127,7 @@ function validateStatus(status) {
     'respondido': 'Responded',
     'entrevista': 'Interview',
     'oferta': 'Offer',
+    'contratado': 'Hired', 'contratada': 'Hired', 'accepted': 'Hired', 'accept': 'Hired',
     'rechazado': 'Rejected', 'rechazada': 'Rejected',
     'descartado': 'Discarded', 'descartada': 'Discarded', 'cerrada': 'Discarded', 'cancelada': 'Discarded',
     'no aplicar': 'SKIP', 'no_aplicar': 'SKIP', 'skip': 'SKIP', 'monitor': 'SKIP',
@@ -190,6 +191,27 @@ function extractReqNumber(notes) {
   return m ? m[1].toUpperCase() : null;
 }
 
+function companiesMatch(a, b) {
+  const key = normalizeCompany(String(a));
+  if (key !== normalizeCompany(String(b))) return false;
+  return key !== '' || String(a).trim() === String(b).trim();
+}
+
+function mergeNotes(existingNotes, addition, oldScore, newScore) {
+  const previousRaw = String(existingNotes ?? '').trim();
+  const previous = ['—', '-', 'N/A'].includes(previousRaw)
+    ? ''
+    : previousRaw.replace(/\s*\.\s*$/, '');
+  const incoming = String(addition.notes ?? '').trim();
+  const marker = `Re-eval ${addition.date} (${oldScore}→${newScore})`;
+  const clause = (value) => value.replace(/\.+$/, '').trim();
+  const incomingClause = clause(incoming);
+  const repeated = incoming !== '' && previous.split(/\.\s+/).map(clause)
+    .some((value) => value === incomingClause || value.endsWith(`: ${incomingClause}`));
+  const tail = incoming && !repeated ? `${marker}: ${incoming}` : marker;
+  return previous ? `${previous}. ${tail}` : tail;
+}
+
 /**
  * Parse a score cell into a numeric value for score-upgrade decisions.
  *
@@ -228,6 +250,18 @@ function buildRow(o) {
   if (COLMAP.location != null) cells.push(cell(o.location) || '—');
   cells.push(o.score, o.status, o.pdf, o.report, cell(o.notes));
   return `| ${cells.join(' | ')} |`;
+}
+
+function buildHeaderRows() {
+  const labels = ['#', 'Date', 'Company'];
+  if (COLMAP.via != null) labels.push('Via');
+  labels.push('Role');
+  if (COLMAP.location != null) labels.push('Location');
+  labels.push('Score', 'Status', 'PDF', 'Report', 'Notes');
+  return {
+    header: `| ${labels.join(' | ')} |`,
+    separator: `|${labels.map((label) => '-'.repeat(Math.max(3, label.length + 2))).join('|')}|`,
+  };
 }
 
 /**
@@ -476,14 +510,14 @@ const existingApps = [];
 let maxNum = 0;
 
 for (const line of appLines) {
-  if (line.startsWith('|') && !line.includes('---') && !line.includes('Empresa')) {
-    const app = parseAppLine(line);
-    if (app) {
-      existingApps.push(app);
-      if (app.num > maxNum) maxNum = app.num;
-    }
+  if (!line.startsWith('|')) continue;
+  const app = parseAppLine(line);
+  if (app) {
+    existingApps.push(app);
+    if (app.num > maxNum) maxNum = app.num;
   }
 }
+const usedNumbers = new Set(existingApps.map((app) => app.num));
 
 console.log(`📊 Existing: ${existingApps.length} entries, max #${maxNum}`);
 
@@ -512,11 +546,26 @@ let added = 0;
 let updated = 0;
 let skipped = 0;
 const newLines = [];
+const failedAdditions = [];
+
+function replaceTrackerLine(oldLine, updatedLine) {
+  const appIdx = appLines.indexOf(oldLine);
+  if (appIdx >= 0) {
+    appLines[appIdx] = updatedLine;
+    return true;
+  }
+  const pendingIdx = newLines.indexOf(oldLine);
+  if (pendingIdx >= 0) {
+    newLines[pendingIdx] = updatedLine;
+    return true;
+  }
+  return false;
+}
 
 for (const file of tsvFiles) {
   const content = readFileSync(join(ADDITIONS_DIR, file), 'utf-8').trim();
   const addition = parseTsvContent(content, file);
-  if (!addition) { skipped++; continue; }
+  if (!addition) { skipped++; failedAdditions.push(file); continue; }
 
   // A via= tag can only be stored if the tracker has a Via column — warn
   // instead of dropping the channel silently (#1596). Clear the value too:
@@ -538,6 +587,7 @@ for (const file of tsvFiles) {
   // 2. Company + role fuzzy match
   const reportNum = extractReportNum(addition.report);
   let duplicate = null;
+  let reportNumMatched = false;
 
   if (reportNum) {
     // Report-number match must also confirm company (#912). Report-file
@@ -545,11 +595,11 @@ for (const file of tsvFiles) {
     // appearing for two different companies is sequence drift, not a duplicate.
     // Without the company guard, a NewCo TSV with report [1] silently overwrites
     // the existing tracker row [1] belonging to an unrelated company.
-    const normCompany = normalizeCompany(addition.company);
     duplicate = existingApps.find(app => {
       const existingReportNum = extractReportNum(app.report);
-      return existingReportNum === reportNum && normalizeCompany(app.company) === normCompany;
+      return existingReportNum === reportNum && companiesMatch(app.company, addition.company);
     });
+    if (duplicate) reportNumMatched = true;
   }
 
   if (!duplicate) {
@@ -559,18 +609,17 @@ for (const file of tsvFiles) {
     // 067 while the tracker was already at #69). A bare num collision across
     // *different* companies is that drift, not a duplicate — matching on num
     // alone silently merges a brand-new role into an unrelated existing row.
-    const normCompany = normalizeCompany(addition.company);
     duplicate = existingApps.find(app =>
-      app.num === addition.num && normalizeCompany(app.company) === normCompany
+      app.num === addition.num && companiesMatch(app.company, addition.company)
+      && (!app.addedThisRun || roleFuzzyMatch(addition.role, app.role))
     );
   }
 
   if (!duplicate) {
     // Company + role fuzzy match
-    const normCompany = normalizeCompany(addition.company);
     const additionReqNum = extractReqNumber(addition.notes);
     duplicate = existingApps.find(app => {
-      if (normalizeCompany(app.company) !== normCompany) return false;
+      if (!companiesMatch(app.company, addition.company)) return false;
       if (!roleFuzzyMatch(addition.role, app.role)) return false;
       // Cross-channel guard (#1596): unknown-employer rows (`?`) all normalize
       // to the same empty company key, but the same role via two DIFFERENT
@@ -600,27 +649,39 @@ for (const file of tsvFiles) {
 
     if (newScore > oldScore) {
       console.log(`🔄 Update: #${duplicate.num} ${addition.company} — ${addition.role} (${oldScore}→${newScore})`);
-      const lineIdx = appLines.indexOf(duplicate.raw);
-      if (lineIdx >= 0) {
-        const updatedLine = buildRow({
-          num: duplicate.num, date: addition.date, company: addition.company, role: addition.role,
+      const updatedLine = buildRow({
+          num: duplicate.num, date: addition.date, company: addition.company,
+          role: reportNumMatched ? addition.role : duplicate.role,
           via: addition.via || duplicate.via || '—',
           location: addition.location || duplicate.location || '—',
           score: addition.score, status: duplicate.status, pdf: duplicate.pdf,
           report: addition.report,
-          notes: `Re-eval ${addition.date} (${oldScore}→${newScore}). ${addition.notes}`,
+          notes: mergeNotes(duplicate.notes, addition, oldScore, newScore),
         });
-        appLines[lineIdx] = updatedLine;
+      if (replaceTrackerLine(duplicate.raw, updatedLine)) {
+        const refreshed = parseAppLine(updatedLine);
+        if (refreshed) Object.assign(duplicate, refreshed);
+        else duplicate.raw = updatedLine;
         updated++;
+      } else {
+        console.error(`❌ ${file}: tracker row #${duplicate.num} could not be located; addition was not merged`);
+        failedAdditions.push(file);
       }
     } else {
       console.log(`⏭️  Skip: ${addition.company} — ${addition.role} (existing #${duplicate.num} ${oldScore} >= new ${newScore})`);
       skipped++;
     }
   } else {
-    // New entry — use the number from the TSV
-    const entryNum = addition.num > maxNum ? addition.num : ++maxNum;
-    if (addition.num > maxNum) maxNum = addition.num;
+    // Preserve a worker's reserved number whenever it is actually free;
+    // parallel workers can finish out of order, so a lower number is valid.
+    let entryNum = addition.num;
+    if (usedNumbers.has(entryNum)) {
+      entryNum = maxNum + 1;
+      while (usedNumbers.has(entryNum)) entryNum++;
+      console.warn(`⚠️  Tracker #${addition.num} already used; assigning #${entryNum} to ${addition.company} — ${addition.role}`);
+    }
+    usedNumbers.add(entryNum);
+    if (entryNum > maxNum) maxNum = entryNum;
 
     const newLine = buildRow({
       num: entryNum, date: addition.date, company: addition.company, role: addition.role,
@@ -630,6 +691,11 @@ for (const file of tsvFiles) {
       report: addition.report, notes: addition.notes,
     });
     newLines.push(newLine);
+    const parsedNew = parseAppLine(newLine);
+    if (parsedNew) {
+      parsedNew.addedThisRun = true;
+      existingApps.push(parsedNew);
+    }
     added++;
     console.log(`➕ Add #${entryNum}: ${addition.company} — ${addition.role} (${addition.score})`);
   }
@@ -640,14 +706,19 @@ if (newLines.length > 0) {
   // Find header separator (|---|...) and insert after it
   let insertIdx = -1;
   for (let i = 0; i < appLines.length; i++) {
-    if (appLines[i].includes('---') && appLines[i].startsWith('|')) {
+    if (SEPARATOR_ROW_RE.test(appLines[i])) {
       insertIdx = i + 1;
       break;
     }
   }
-  if (insertIdx >= 0) {
-    appLines.splice(insertIdx, 0, ...newLines);
+  if (insertIdx < 0) {
+    const { header, separator } = buildHeaderRows();
+    console.error(`❌ Aborting merge: ${basename(APPS_FILE)} has no table separator row.`);
+    console.error(`   No rows were written and no TSV was archived. Expected header:\n     ${header}\n     ${separator}`);
+    trackerLock.release();
+    process.exit(1);
   }
+  appLines.splice(insertIdx, 0, ...newLines);
 }
 
 // Write back
@@ -656,15 +727,21 @@ if (!DRY_RUN) {
 
   // Move processed files to merged/
   if (!existsSync(MERGED_DIR)) mkdirSync(MERGED_DIR, { recursive: true });
-  for (const file of tsvFiles) {
+  const archivable = tsvFiles.filter((file) => !failedAdditions.includes(file));
+  for (const file of archivable) {
     renameSync(join(ADDITIONS_DIR, file), join(MERGED_DIR, file));
   }
-  console.log(`\n✅ Moved ${tsvFiles.length} TSVs to merged/`);
+  console.log(`\n✅ Moved ${archivable.length} TSVs to merged/`);
 }
 
 console.log(`\n📊 Summary: +${added} added, 🔄${updated} updated, ⏭️${skipped} skipped`);
 if (DRY_RUN) console.log('(dry-run — no changes written)');
 trackerLock.release();
+
+if (failedAdditions.length > 0) {
+  console.error(`❌ ${failedAdditions.length} addition(s) were not merged and remain pending: ${failedAdditions.join(', ')}`);
+  process.exit(1);
+}
 
 // Optional verify
 if (VERIFY && !DRY_RUN) {
