@@ -243,7 +243,7 @@ func (m appModel) View() string {
 }
 
 func main() {
-	pathFlag := flag.String("path", ".", "Path to career-ops directory")
+	pathFlag := flag.String("path", ".", "Path to RoleForge directory")
 	flag.Parse()
 
 	careerOpsPath := *pathFlag

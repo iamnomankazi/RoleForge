@@ -1,8 +1,10 @@
-# Career-Ops -- AI Job Search Pipeline
+# RoleForge -- AI Job Search Pipeline
 
 ## Origin
 
-This system was built and used by [santifer](https://santifer.io) to evaluate 740+ job offers, generate 100+ tailored CVs, and land a Head of Applied AI role. The archetypes, scoring logic, negotiation scripts, and proof point structure all reflect his specific career search in AI/automation roles.
+RoleForge is a standalone local project originally based on Career Ops. Inherited code retains the MIT license and upstream attribution; it is not claimed as newly authored work. Compatibility skill names remain `career-ops`. Automatic upstream application is disabled; use selective reviewed backports. See `UPSTREAM.md`.
+
+The upstream Career Ops system was built and used by [santifer](https://santifer.io) to evaluate 740+ job offers, generate 100+ tailored CVs, and land a Head of Applied AI role. The archetypes, scoring logic, negotiation scripts, and proof point structure all reflect his specific career search in AI/automation roles.
 
 The portfolio that goes with this system is also open source: [cv-santiago](https://github.com/santifer/cv-santiago).
 

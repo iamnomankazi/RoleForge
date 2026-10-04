@@ -1,0 +1,11 @@
+# Upstream provenance
+
+RoleForge was originally based on Career Ops by Santiago Fernández de Valderrama and the upstream contributors: https://github.com/santifer/career-ops. Inherited code remains under the MIT license in LICENSE; upstream copyright and public attribution are retained. CONTRIBUTORS.md and CITATION.cff record upstream contributions and citation metadata.
+
+The standalone history consists of a credited v1.15 import (source a090ece7eb25d5c5ab8c0bdd3d6aa21d5613e5df), one explicitly synthetic filtered July 31 checkpoint (source tree 473058e77281affc5499e8944cfa5276eedcd216), and 44 replayed source boundaries from f042dc80dee422ccb39d5aa4f0cba4b6429cc68b through c3e7ef959920017beaaccc40d5da069d308ee9bb. A separate current identity commit establishes RoleForge. Synthetic/import/replay Git objects were created during migration, with source chronology in provenance trailers. No exact intermediate July 10/13/28 code commits were recovered or invented.
+
+The July snapshot omits private/generated material and personal test fixtures. The final four replay trees normalize only the identified phone fixture in tests/application-form-hardening.test.mjs to the existing fictional fixture number, including its national-number assertions. All other replay content is exact. Public trailers preserve source names, dates, SHAs and subjects; original private emails are excluded from this repository.
+
+RoleForge currently has no configured remote or published package endpoint. This does not imply ownership or authorship of all inherited implementation. The root package maintainer identity is iamnomankazi; upstream attribution is retained separately.
+
+Compatibility identifiers intentionally retained include career-ops skill aliases, CAREER_OPS_* environment variables, cache/local-storage keys, and the Go dashboard's internal module import namespace. These resolve locally and preserve existing behavior. The inherited scaffolder and community/governance/translation documents describe upstream Career Ops; do not treat their release/install/community URLs as RoleForge endpoints. Automatic upstream application remains disabled. Use the RoleForge README and docs/SETUP.md for current setup.

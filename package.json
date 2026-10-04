@@ -1,7 +1,7 @@
 {
-  "name": "career-ops",
+  "name": "roleforge",
   "version": "1.18.0",
-  "description": "AI-powered job search pipeline — works with any AI coding CLI (Claude Code, OpenCode, Gemini, Codex, Qwen)",
+  "description": "Local AI job search workspace for role discovery, evaluation, documents, and application tracking",
   "private": true,
   "scripts": {
     "doctor": "node doctor.mjs",
@@ -67,16 +67,10 @@
     "claude-code",
     "opencode",
     "career",
-    "career-ops",
-    "careerops",
-    "automation"
+    "automation",
+    "roleforge"
   ],
-  "author": "Santiago Fernández de Valderrama <hi@santifer.io> (https://santifer.io)",
-  "homepage": "https://santifer.io",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/santifer/career-ops"
-  },
+  "author": "iamnomankazi",
   "license": "MIT",
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -84,5 +78,8 @@
     "js-yaml": "^4.1.1",
     "pdf-lib": "^1.17.1",
     "playwright": "1.61.1"
-  }
+  },
+  "contributors": [
+    "Santiago Fernández de Valderrama <hi@santifer.io> (https://santifer.io)"
+  ]
 }

@@ -1,8 +1,8 @@
 {
-  "name": "@career-ops/web",
+  "name": "@roleforge/web",
   "version": "0.3.0",
   "private": true,
-  "description": "Official web experience for career-ops — local-first.",
+  "description": "Local-first web interface for RoleForge",
   "scripts": {
     "dev": "next dev",
     "build": "next build",

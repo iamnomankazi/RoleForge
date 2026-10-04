@@ -1,11 +1,12 @@
-# career-ops web (alpha)
+# RoleForge web (alpha)
 
-An **experimental, opt-in web UI** for career-ops. It is a local-first *view* over
+An **experimental, opt-in web UI** for RoleForge. It is a local-first *view* over
 the exact same files the CLI reads and writes (`data/pipeline.md`,
 `data/applications.md`, `reports/`, `config/`): no parallel engine, no separate
 database, no server. If you never run it, nothing about your CLI workflow changes.
 
-> **Status: alpha.** Expect rough edges. Feedback →
+> **Inherited upstream context:** the following discussions describe Career Ops development. RoleForge has no configured remote support endpoint.
+> **Status: alpha.** Expect rough edges. Upstream feedback →
 > [Discussion #1142](https://github.com/santifer/career-ops/discussions/1142) ·
 > roadmap context → [Discussion #156](https://github.com/santifer/career-ops/discussions/156).
 
@@ -19,7 +20,7 @@ npm ci
 npm run dev
 ```
 
-Open http://localhost:3000. The app reads the career-ops checkout it lives in
+Open http://localhost:3000. The app reads the RoleForge checkout it lives in
 (the parent directory) — your existing CV, pipeline and reports appear as-is.
 
 ## What works today
@@ -57,4 +58,4 @@ npm run build        # production build
 ```
 
 Set `CAREER_OPS_ROOT=/path/to/checkout` in `web/.env.local` to point the app at
-a different career-ops directory (useful for testing against sample data).
+a different RoleForge directory (useful for testing against sample data).
