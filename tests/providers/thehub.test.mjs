@@ -20,8 +20,9 @@ try {
   );
   if (full && full.title === 'Staff Engineer' && full.url === 'https://thehub.io/jobs/abc123'
       && full.company === 'Light' && full.location === 'London, UK'
+      && full.sourceUrl === 'https://thehub.io/jobs'
       && full.postedAt === Date.parse('2026-06-02T06:59:54.025Z')) {
-    pass('normalizeHubJob maps title/absoluteJobUrl/company.name/location.address + publishedAt → postedAt');
+    pass('normalizeHubJob maps legacy absoluteJobUrl fields while preserving The Hub provenance');
   } else {
     fail(`normalizeHubJob full row = ${JSON.stringify(full)}`);
   }
@@ -65,9 +66,16 @@ try {
   }
 
   // fetch(): pagination by ?page=N, stop on a short page.
-  const mk = (i) => ({ title: `Role ${i}`, absoluteJobUrl: `https://thehub.io/jobs/x${i}`, company: { name: `Co ${i}` }, location: { address: 'Copenhagen, Denmark' }, publishedAt: '2026-06-02T00:00:00.000Z' });
-  const hubPage1 = { docs: Array.from({ length: 15 }, (_, i) => mk(i)), page: 1, pages: 3, total: 33, limit: 15 };
-  const hubPage2 = { docs: [mk(15), mk(16), { title: '', absoluteJobUrl: 'https://thehub.io/jobs/bad' }], page: 2, pages: 3, limit: 15 }; // short → stop; 1 drop
+  const mk = (i) => ({ id: i.toString(16).padStart(24, '0'), title: `Role ${i}`, company: { name: `Co ${i}` }, location: { address: 'Copenhagen, Denmark' } });
+  const response = (jobs, featured = []) => ({ jobs, featuredJobs: { docs: featured } });
+  const hubPage1 = response(
+    { docs: Array.from({ length: 15 }, (_, i) => mk(i)), page: 1, pages: 3, total: 33, limit: 15 },
+    [mk(99)],
+  );
+  const hubPage2 = response(
+    { docs: [mk(15), mk(16), { title: '', id: 'ffffffffffffffffffffffff' }], page: 2, pages: 3, limit: 15 },
+    [mk(99)],
+  ); // short → stop; one invalid row and repeated featured job
   const requested = [];
   const pagedFetch = async (url, opts) => {
     requested.push({ url, redirect: opts?.redirect });
@@ -77,9 +85,9 @@ try {
   const paged = await thehub.fetch({ name: 'The Hub' }, { fetchJson: pagedFetch });
 
   if (requested.length === 2
-      && requested[0].url === 'https://thehub.io/api/jobs?page=1'
-      && requested[1].url === 'https://thehub.io/api/jobs?page=2') {
-    pass('thehub.fetch() builds ?page=N URLs and stops after the short page');
+      && requested[0].url === 'https://api.thehub.io/v2/jobsandfeatured?page=1&countryCode=EU&sorting=newJobs'
+      && requested[1].url === 'https://api.thehub.io/v2/jobsandfeatured?page=2&countryCode=EU&sorting=newJobs') {
+    pass('thehub.fetch() reads the current EU/newest public endpoint and stops after a short page');
   } else {
     fail(`thehub.fetch() requested = ${JSON.stringify(requested.map(r => r.url))}`);
   }
@@ -87,12 +95,13 @@ try {
   if (requested.every(r => r.redirect === 'error')) pass('thehub.fetch() passes redirect:"error" on every page (SSRF guard)');
   else fail(`thehub.fetch() redirect opts = ${JSON.stringify(requested.map(r => r.redirect))}`);
 
-  if (paged.length === 17) pass('thehub.fetch() aggregates valid jobs across pages (15 + 2, dropping the empty-title row)');
-  else fail(`thehub.fetch() returned ${paged.length} jobs (expected 17)`);
+  if (paged.length === 18 && paged[0].sourceUrl === 'https://thehub.io/jobs') {
+    pass('thehub.fetch() aggregates ordinary/featured jobs, deduplicates, and preserves source provenance');
+  } else fail(`thehub.fetch() returned ${paged.length} jobs (expected 18)`);
 
   // Stops at the reported total pages even when every page is full.
   const fullReq = [];
-  const fullPage = (page) => ({ docs: Array.from({ length: 15 }, (_, i) => mk(page * 100 + i)), page, pages: 2, limit: 15 });
+  const fullPage = (page) => response({ docs: Array.from({ length: 15 }, (_, i) => mk(page * 100 + i)), page, pages: 2, limit: 15 });
   await thehub.fetch(
     { name: 'The Hub', max_pages: 10 },
     { fetchJson: async (url) => { const p = Number(new URL(url).searchParams.get('page')); fullReq.push(p); return fullPage(p); } },
@@ -107,9 +116,9 @@ try {
   const capReq = [];
   await thehub.fetch(
     { name: 'The Hub', max_pages: 1 },
-    { fetchJson: async (url) => { capReq.push(url); return { docs: Array.from({ length: 15 }, (_, i) => mk(i)), page: 1, pages: 67, limit: 15 }; } },
+    { fetchJson: async (url) => { capReq.push(url); return response({ docs: Array.from({ length: 15 }, (_, i) => mk(i)), page: 1, pages: 67, limit: 15 }); } },
   );
-  if (capReq.length === 1 && capReq[0] === 'https://thehub.io/api/jobs?page=1') {
+  if (capReq.length === 1 && capReq[0] === 'https://api.thehub.io/v2/jobsandfeatured?page=1&countryCode=EU&sorting=newJobs') {
     pass('thehub.fetch() honors max_pages (stops at the cap even on a full page)');
   } else {
     fail(`thehub.fetch() max_pages:1 requested ${JSON.stringify(capReq)}`);
@@ -117,7 +126,7 @@ try {
 
   // A full page with a large `pages` (so neither short-stop nor pages-stop fires)
   // lets us assert the implicit default cap and the hard cap purely on page count.
-  const fullDeepPage = (page) => ({ docs: Array.from({ length: 15 }, (_, i) => mk(page * 100 + i)), page, pages: 999, limit: 15 });
+  const fullDeepPage = (page) => response({ docs: Array.from({ length: 15 }, (_, i) => mk(page * 100 + i)), page, pages: 999, limit: 15 });
 
   // Default max_pages (no override) → exactly 3 pages.
   const defReq = [];
@@ -151,7 +160,23 @@ try {
     badThrew = /unexpected API response/.test(e.message);
   }
   if (badThrew) pass('thehub.fetch() throws on unexpected API response shape');
-  else fail('thehub.fetch() should throw when the docs array is absent');
+  else fail('thehub.fetch() should throw when jobs.docs is absent');
+
+  const empty = await thehub.fetch({ name: 'The Hub' }, {
+    fetchJson: async () => response({ docs: [], page: 1, pages: 0, total: 0, limit: 15 }),
+  });
+  if (Array.isArray(empty) && empty.length === 0) pass('thehub.fetch() treats a valid empty response as healthy empty');
+  else fail(`thehub.fetch() healthy empty = ${JSON.stringify(empty)}`);
+
+  const network = new Error('network unavailable');
+  let networkFailure;
+  try {
+    await thehub.fetch({ name: 'The Hub' }, { fetchJson: async () => { throw network; } });
+  } catch (error) {
+    networkFailure = error;
+  }
+  if (networkFailure === network && !networkFailure.kind) pass('thehub.fetch() preserves ordinary network failures');
+  else fail(`thehub network failure = ${JSON.stringify(networkFailure)}`);
 
   const gone = Object.assign(new Error('HTTP 404 Not Found'), { status: 404 });
   let classified;
@@ -160,7 +185,18 @@ try {
   } catch (error) {
     classified = error;
   }
-  if (classified?.kind === 'endpoint_gone' && classified?.providerEndpoint === 'https://thehub.io/api/jobs') {
+
+  const current = normalizeHubJob({
+    id: '6a1f77e5ba0716b1bb51c562', title: 'Current API Role',
+    company: { name: 'Tandem Health' }, location: { address: 'Munich, Germany' }, isRemote: true,
+  });
+  if (current?.url === 'https://thehub.io/jobs/6a1f77e5ba0716b1bb51c562'
+      && current.location === 'Munich, Germany, Remote') {
+    pass('normalizeHubJob builds a direct canonical posting URL from the current public API id');
+  } else {
+    fail(`normalizeHubJob current API row = ${JSON.stringify(current)}`);
+  }
+  if (classified?.kind === 'endpoint_gone' && classified?.providerEndpoint === 'https://api.thehub.io/v2/jobsandfeatured') {
     pass('thehub.fetch() marks board-wide 404/410 failures as endpoint_gone, not slug_gone');
   } else {
     fail(`thehub endpoint failure classification = ${JSON.stringify({ kind: classified?.kind, endpoint: classified?.providerEndpoint })}`);

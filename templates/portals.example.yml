@@ -606,7 +606,7 @@ search_queries:
 #
 # - name: The Hub                         # Nordic/EU startup board
 #   provider: thehub
-#   max_pages: 3          # optional page cap (15 jobs/page, default 3, max 67)
+#   max_pages: 3          # optional page cap (public EU feed, 15 jobs/page, default 3, max 67)
 #   enabled: true
 #
 # - name: Arbeitnow                       # EU/DACH-heavy board, newest-first

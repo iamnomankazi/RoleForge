@@ -4,7 +4,11 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { persistStandardScanRun } from '../scan.mjs';
-import { mergeCanonicalCandidates } from '../scan-candidate-contract.mjs';
+import {
+  buildCandidatesTsv,
+  CANDIDATE_TSV_COLUMNS,
+  mergeCanonicalCandidates,
+} from '../scan-candidate-contract.mjs';
 import { mergeCandidates } from '../merge-scan-results.mjs';
 import { createApplicationBatch } from '../application-batch.mjs';
 
@@ -26,6 +30,11 @@ test('standard scan and worker merge share stable canonical identity and immutab
     for (const file of ['manifest.json', 'candidates.json', 'candidates.tsv', 'review.csv', 'review.md']) {
       assert.ok(readFileSync(join(standard.runDir, file), 'utf8').length > 0);
     }
+    const canonicalJson = JSON.parse(readFileSync(join(standard.runDir, 'candidates.json'), 'utf8'));
+    const [tsvHeader, tsvRow] = readFileSync(join(standard.runDir, 'candidates.tsv'), 'utf8').trim().split(/\r?\n/);
+    const provenanceIndex = tsvHeader.split('\t').indexOf('provenance');
+    assert.deepEqual(canonicalJson[0].provenance, [{ input: 'standard-scan', row: 1 }]);
+    assert.equal(tsvRow.split('\t')[provenanceIndex], '[{"input":"standard-scan","row":1}]');
     const batch = createApplicationBatch({
       root,
       sourceRunId: 'standard-run',
@@ -36,6 +45,30 @@ test('standard scan and worker merge share stable canonical identity and immutab
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('candidate TSV keeps primitive arrays readable and structured values lossless', () => {
+  const candidate = {
+    source_queries: ['Python', 'SQL'],
+    salary: { currency: 'EUR', minimum: 42000 },
+    notes: '=HYPERLINK("https://example.test")',
+    provenance: [{ input: 'standard-scan', row: 4, detail: 'tab\there\nnext line' }],
+  };
+  const tsv = buildCandidatesTsv([candidate]);
+  const lines = tsv.trimEnd().split(/\r?\n/);
+  assert.equal(lines.length, 2);
+  const header = lines[0].split('\t');
+  const cells = lines[1].split('\t');
+  assert.equal(header.length, CANDIDATE_TSV_COLUMNS.length);
+  assert.equal(cells.length, CANDIDATE_TSV_COLUMNS.length);
+  assert.equal(cells[header.indexOf('source_queries')], 'Python; SQL');
+  assert.equal(cells[header.indexOf('salary')], '{"currency":"EUR","minimum":42000}');
+  assert.equal(
+    cells[header.indexOf('provenance')],
+    '[{"input":"standard-scan","row":4,"detail":"tab\\there\\nnext line"}]',
+  );
+  assert.doesNotMatch(tsv, /\[object Object\]/);
+  assert.equal(cells[header.indexOf('notes')], `'${candidate.notes}`);
 });
 
 test('different requisitions with the same company and title remain distinct', () => {

@@ -344,7 +344,12 @@ export function mergeCanonicalCandidates(inputs, {
 
 function scalar(value) {
   if (value == null) return '';
-  if (Array.isArray(value)) return value.join('; ');
+  if (Array.isArray(value)) {
+    if (value.every((entry) => entry == null || typeof entry !== 'object')) {
+      return value.map(clean).join('; ');
+    }
+    return JSON.stringify(value);
+  }
   if (typeof value === 'object') return JSON.stringify(value);
   return clean(value);
 }
