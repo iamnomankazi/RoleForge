@@ -1,19 +1,19 @@
 name: Web (alpha) Bug
-description: Report a bug in the experimental career-ops web UI (opt-in alpha)
+description: Report a bug in the experimental RoleForge web UI (opt-in alpha)
 labels: ["web-alpha", "area:web"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for trying the **experimental career-ops web UI** (opt-in alpha)! 🙏
+        Thanks for trying the **experimental RoleForge web UI** (opt-in alpha)! 🙏
         Tip: the in-app **Report a bug** button (bottom-left pill) pre-fills most of this for you.
         **Please do NOT paste your CV, profile, real application answers, or private job URLs.**
   - type: checkboxes
-    id: coc
+    id: privacy
     attributes:
-      label: Code of Conduct
+      label: Privacy and data contract
       options:
-        - label: I agree to follow the [Code of Conduct](https://github.com/santifer/career-ops/blob/main/CODE_OF_CONDUCT.md)
+        - label: I have removed private user data and followed the [Data Contract](https://github.com/iamnomankazi/RoleForge/blob/main/DATA_CONTRACT.md)
           required: true
   - type: textarea
     id: description

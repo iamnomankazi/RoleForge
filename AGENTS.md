@@ -18,7 +18,7 @@ There are two layers. Read `DATA_CONTRACT.md` for the full list.
 - `cv.md`, `config/profile.yml`, `modes/_profile.md`, `article-digest.md`, `portals.yml`
 - `data/*`, `reports/*`, `output/*`, `interview-prep/*`
 
-**System Layer (auto-updatable, DON'T put user data here):**
+**System Layer (maintained locally with selective reviewed backports, DON'T put user data here):**
 - `modes/_shared.md`, `modes/oferta.md`, all other modes
 - `AGENTS.md`, `CLAUDE.md`, `CODEX.md`, `OPENCODE.md`, `*.mjs` scripts, `dashboard/*`, `templates/*`, `batch/*`
 
@@ -39,7 +39,7 @@ User-facing content (CV, cover letters, application emails, form answers, recrui
 Anything not in this list is **out of scope for content generation**, including:
 
 - Auto-memory at `~/.claude/projects/.../memory/` — see scope clarification below
-- Any directory outside the career-ops project — for example, parent-directory repos containing the user's product code, sibling project directories, or other unrelated codebases on the same machine
+- Any directory outside the RoleForge project — for example, parent-directory repos containing the user's product code, sibling project directories, or other unrelated codebases on the same machine
 - Cross-session inferences about the user's work that have not been written into one of the in-scope files
 - Knowledge from other Claude Code projects on the same machine
 
@@ -62,27 +62,15 @@ Auto-memory **never** holds content claims about the user's work, technical acco
 
 Rules belong in files the harness reads automatically — `CLAUDE.md`, `CODEX.md`, `AGENTS.md`, `modes/*.md`, `MEMORY.md`. Do not create sidecar documentation that requires manual loading. Reinforcement-without-enforcement decays.
 
-## Update Check
+## Upstream Backports
 
-On the first message of each session, run the update checker silently:
+RoleForge preserves its standalone history and uses selective reviewed upstream
+backports. Do not run the inherited `update-system.mjs` checker or apply workflow
+automatically at session start. A request to update RoleForge means reviewing
+specific upstream changes for compatibility and the data contract before
+applying them locally. See `UPSTREAM.md` for provenance and compatibility rules.
 
-```bash
-node update-system.mjs check
-```
-
-Parse the JSON output:
-- `{"status": "update-available", "local": "1.0.0", "remote": "1.1.0", "changelog": "..."}` → tell the user:
-  > "career-ops update available (v{local} → v{remote}). Your data (CV, profile, tracker, reports) will NOT be touched. Want me to update?"
-  If yes → run `node update-system.mjs apply`. If no → run `node update-system.mjs dismiss`.
-- `{"status": "up-to-date"}` → say nothing
-- `{"status": "dismissed"}` → say nothing
-- `{"status": "offline"}` → say nothing
-- `{"status": "no-remote-version"}` → say nothing (checker reached GitHub but neither VERSION nor the latest release tag parsed as semver — treat as a silent non-failure, same as offline)
-
-The user can also say "check for updates" or "update career-ops" at any time to force a check.
-To rollback: `node update-system.mjs rollback`
-
-## What is career-ops
+## What is RoleForge
 
 AI-powered, CLI-agnostic job search automation: pipeline tracking, offer evaluation, CV generation, portal scanning, batch processing. Runs on any AI coding CLI that follows the [open agent skill standard](https://agentskills.io) (Claude Code, Codex, OpenCode, Qwen, Copilot, Kimi, Antigravity CLI, Grok Build CLI). Legacy Gemini API evaluation remains available through `gemini-eval.mjs`.
 
@@ -144,7 +132,7 @@ Output: `{"onboardingNeeded": <bool>, "missing": [...], "warnings": [...], "auto
 
 If the user mentions cost, pricing, budget, or asks about free alternatives during onboarding, proactively surface the free path:
 
-> "career-ops works fully on Antigravity CLI's free tier — no API key or paid subscription needed. See [FREE_TIER.md](docs/FREE_TIER.md) for setup (`agy auth login`, daily limits, and batch tips)."
+> "RoleForge retains the upstream Antigravity CLI setup path. See [FREE_TIER.md](docs/FREE_TIER.md) for setup (`agy auth login`, daily limits, and batch tips); verify current pricing and limits before making cost claims."
 
 If the user is already on a paid plan (Claude Max, Google AI, etc.) or does not mention cost, skip this step silently.
 
@@ -208,7 +196,7 @@ Once all files exist, confirm:
 > "You're all set! You can now:
 > - Paste a job URL to evaluate it
 > - Run the scan entrypoint for your CLI to search portals: `/career-ops scan`, `/career-ops-scan`, or ask Codex to run `scan`
-> - Open the command menu for your CLI: `/career-ops`, the CLI-specific alias, or ask Codex to show the available career-ops modes
+> - Open the command menu for your CLI: `/career-ops`, the CLI-specific alias, or ask Codex to show the available RoleForge modes
 >
 > Everything is customizable — just ask me to change anything.
 >
@@ -302,7 +290,7 @@ Default modes are in `modes/` (English). Additional language-specific modes are 
 | Wants to broaden the search with adjacent job titles suggested from the CV | `titles` |
 | Asks about follow-ups or application cadence | `followup` |
 | Wants to classify application replies and review updates | `reply-watch` — classifies candidate replies, matches them to applications, and suggests tracker updates |
-| Wants to update the system | `update` |
+| Wants to update the system | Review selective upstream backports; `update` is an inherited compatibility mode, not automatic upstream application |
 | Wants to queue a request for later / check the inbox between sessions | `agent-inbox` — append-only checklist the agent drains at the start of the next session; nothing auto-submits |
 
 ### CV Source of Truth
@@ -401,18 +389,21 @@ the executor may resume and upload it.
 
 ## CI/CD and Quality
 
-- **GitHub Actions** run on every PR: `test-all.mjs` (63+ checks), auto-labeler (risk-based: 🔴 core-architecture, ⚠️ agent-behavior, 📄 docs), welcome bot for first-time contributors
-- **Branch protection** on `main`: status checks must pass before merge. No direct pushes to main (except admin bypass).
-- **Dependabot** monitors npm, Go modules, and GitHub Actions for security updates
-- **Contributing process**: issue first → discussion → PR with linked issue → CI passes → maintainer review → merge
+- **GitHub Actions** retained locally: tests, PR labels, user-data guard, dependency review, plugin-registry validation, and web CI. Their workflow files define the triggers; not every workflow runs on every change.
+- **Checks**: run validation appropriate to the change. Do not assume branch protection or required checks are enabled; verify repository settings when relevant.
+- **Dependabot** configuration covers npm, Go modules, and GitHub Actions; automatic dependency PRs are currently disabled in `.github/dependabot.yml`.
+- **History**: preserve the standalone lineage. Use normal commits and pushes; do not rewrite published history without explicit authorization.
 
-## Community and Governance
+## Repository Ownership and Support
 
-- **Code of Conduct**: Contributor Covenant 2.1 with enforcement actions (see `CODE_OF_CONDUCT.md`)
-- **Governance**: BDFL model with contributor ladder — Participant → Contributor → Triager → Reviewer → Maintainer (see `GOVERNANCE.md`)
-- **Security**: private vulnerability reporting via email (see `SECURITY.md`)
-- **Support**: help questions go to Discord/Discussions, not issues (see `SUPPORT.md`)
-- **Discord**: https://discord.gg/8pRpHETxa4
+RoleForge is a private standalone workspace maintained by `iamnomankazi`.
+Use repository-local issues for sanitized operational diagnostics and
+`.github/SECURITY.md` for security reporting guidance. Private user data stays
+local under `DATA_CONTRACT.md`.
+
+Inherited community, governance, contribution, and support documents remain
+upstream provenance; they do not establish RoleForge support channels, a
+contributor ladder, response promises, or an upstream maintainer process.
 
 ## Headless / Batch Mode
 

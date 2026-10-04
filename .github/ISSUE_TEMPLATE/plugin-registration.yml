@@ -1,25 +1,25 @@
 name: Plugin registration
-description: Register your career-ops-plugin-<name> repo so it can be listed as an approved community plugin
+description: Register your career-ops-plugin-<name> repo so it can be listed as a reviewed RoleForge plugin
 labels: ["plugin-submission", "area:plugins"]
 body:
   - type: markdown
     attributes:
       value: |
-        > ⚠️ **Privacy first.** Never paste your CV, scan results, or other personal data — issues are **public forever**.
+        > ⚠️ **Privacy first.** Never paste your CV, scan results, or other personal data — issue content is stored on GitHub, even in this private repository.
 
-        This issue becomes your plugin's **home** (its changelog + compatibility/quarantine board). After it's filed, open a **registry PR** (the plugin template can do this for you on a release tag) to actually list it. See [docs/PLUGINS.md](https://github.com/santifer/career-ops/blob/main/docs/PLUGINS.md).
+        Use this issue to track plugin review and compatibility. To propose a registry entry, open a PR for the exact reviewed plugin commit. See [docs/PLUGINS.md](https://github.com/iamnomankazi/RoleForge/blob/main/docs/PLUGINS.md).
   - type: checkboxes
-    id: coc
+    id: privacy
     attributes:
-      label: Code of Conduct
+      label: Privacy and data contract
       options:
-        - label: I agree to follow the [Code of Conduct](https://github.com/santifer/career-ops/blob/main/CODE_OF_CONDUCT.md)
+        - label: I have removed private user data and followed the [Data Contract](https://github.com/iamnomankazi/RoleForge/blob/main/DATA_CONTRACT.md)
           required: true
   - type: input
     id: repo
     attributes:
       label: Repo URL
-      description: Must be named `career-ops-plugin-<name>` (a public GitHub repo you own).
+      description: Must be named `career-ops-plugin-<name>` for compatibility (a public GitHub repo you own).
       placeholder: https://github.com/your-user/career-ops-plugin-greenhouse
     validations:
       required: true
@@ -48,5 +48,5 @@ body:
           required: true
         - label: MIT-compatible license; no personal data in the repo
           required: true
-        - label: No commercial / hosted-service / monetization wording — career-ops is free and local-first
+        - label: No commercial / hosted-service / monetization wording — RoleForge is local-first
           required: true

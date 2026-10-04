@@ -1,11 +1,5 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Setup Help / How-to Questions
-    url: https://discord.gg/8pRpHETxa4
-    about: For setup help and general questions, ask in Discord instead of opening an issue.
-  - name: GitHub Discussions
-    url: https://github.com/santifer/career-ops/discussions
-    about: For ideas, Q&A, and community conversations.
-  - name: "📤 Sharing scan results or automation output?"
-    url: https://github.com/santifer/career-ops/blob/main/DATA_CONTRACT.md
-    about: Your scans and reports stay local (data/ + reports/). Please don't file them here — they'd be public, and they're not needed upstream. Point any scheduled run at your own fork.
+  - name: Privacy and data contract
+    url: https://github.com/iamnomankazi/RoleForge/blob/main/DATA_CONTRACT.md
+    about: Keep CVs, profiles, scans, reports, and application data local. Share only sanitized diagnostics, including in this private repository.

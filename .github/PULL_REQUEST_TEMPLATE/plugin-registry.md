@@ -1,13 +1,14 @@
 <!--
 Use this template for a PR that adds or updates ONE plugins-registry/<id>.json file.
-Select it by appending ?template=plugin-registry.md to the PR-compare URL, or
-the plugin template's release workflow opens it for you on a release tag.
+Select it by appending ?template=plugin-registry.md to the RoleForge PR-compare URL.
 ONE plugin per PR. Change ONLY that plugin's entry.
 -->
 
-## Plugin registry change
+## RoleForge plugin registry change
 
-Home issue: #____
+The `career-ops-plugin-<name>` prefix is retained for plugin compatibility.
+
+RoleForge review issue: #____
 
 Paste the registry entry (one object), pinned to the exact reviewed commit:
 
@@ -28,7 +29,7 @@ Paste the registry entry (one object), pinned to the exact reviewed commit:
 }
 ```
 
-### Maintainer review checklist
+### RoleForge owner review checklist
 
 - [ ] Naming `career-ops-plugin-<name>`; `id` == name minus the prefix
 - [ ] Minimum files present (manifest.json, index.mjs, README.md, LICENSE)
@@ -38,7 +39,7 @@ Paste the registry entry (one object), pinned to the exact reviewed commit:
 - [ ] Static audit clean: no `child_process`/`playwright`/raw sockets/global `fetch`/`eval`/bare-dependency imports (egress only via `ctx.fetch`)
 - [ ] No core-owned secrets in `requiredEnv`
 - [ ] Reads PUBLIC data or the user's OWN account only — no centralized infrastructure, no auto-submit, no blind-apply
-- [ ] No commercial / hosted-service / monetization wording (the project is free and local-first)
+- [ ] No commercial / hosted-service / monetization wording (RoleForge is local-first)
 - [ ] If it ships a skill: domain-scoped — does not instruct the agent to edit core files, change scoring, reveal secrets, or act outside its hooks
 - [ ] `sha` is pinned to the exact reviewed commit
 - [ ] CI (`plugin-registry-validate`) is green

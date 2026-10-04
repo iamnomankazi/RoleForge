@@ -1,48 +1,42 @@
-# CODEOWNERS — auto-requests maintainer review on sensitive paths.
-# Last matching pattern wins. See MAINTAINERS.md for the team + ladder.
-#
-# Scope principle: gate what CI can't catch (a bad change here passes the
-# tests silently) + the catastrophic updater + governance docs. Code that
-# test-all.mjs / Renovate / dependency-review already guard (scan.mjs,
-# generate-pdf.mjs, test-all.mjs, package.json) is intentionally NOT gated,
-# so routine contributor PRs aren't bottlenecked on a single owner. Broaden
-# this list once there is more than one code owner.
+# CODEOWNERS — RoleForge ownership for sensitive paths.
+# Last matching pattern wins. Review requirements depend on repository settings.
+# Agent instructions, data boundaries, plugin gates, and workflow changes need
+# owner review; routine implementation paths are covered by relevant checks.
 
-# Repo docs & governance
-/README*.md            @santifer
-/CONTRIBUTING.md       @santifer
-/MAINTAINERS.md        @santifer
-/ARCHITECTURE.md       @santifer
-/.github/CODEOWNERS    @santifer
+# Repository documentation
+/README*.md            @iamnomankazi
+/CONTRIBUTING.md       @iamnomankazi
+/MAINTAINERS.md        @iamnomankazi
+/ARCHITECTURE.md       @iamnomankazi
+/.github/CODEOWNERS    @iamnomankazi
 
 # Agent behavior & the multi-CLI contract (prompt layer — CI-blind)
-/CLAUDE.md             @santifer
-/AGENTS.md             @santifer
-/CODEX.md              @santifer
-/OPENCODE.md           @santifer
-/GEMINI.md             @santifer
+/CLAUDE.md             @iamnomankazi
+/AGENTS.md             @iamnomankazi
+/CODEX.md              @iamnomankazi
+/OPENCODE.md           @iamnomankazi
+/GEMINI.md             @iamnomankazi
 
 # Scoring & the system/user data contract (CI-blind; silent-danger)
-/modes/_shared.md      @santifer
-/DATA_CONTRACT.md      @santifer
+/modes/_shared.md      @iamnomankazi
+/DATA_CONTRACT.md      @iamnomankazi
 
-# The self-updater (catastrophic if wrong — touches user installs)
-/update-system.mjs     @santifer
-/updater-migration-tests.mjs  @santifer
+# Inherited updater tooling — changes require review; no automatic upstream application
+/update-system.mjs     @iamnomankazi
+/updater-migration-tests.mjs  @iamnomankazi
 
-# Plugin governance chokepoint (a bad change here ships unreviewed code to
-# every user — the registry pin, the gates, and the CI must stay single-owner).
-/plugins-registry.json         @santifer
-/validate-plugin-registry.mjs  @santifer
-/plugin-install.mjs            @santifer
-/plugin-audit.mjs              @santifer
-/plugins/_engine.mjs           @santifer
-/plugins/_lock.mjs             @santifer
-/plugins/_net.mjs              @santifer
-/plugins/_registry.mjs         @santifer
-/.github/workflows/            @santifer
-/docs/PLUGIN_REVIEW.md         @santifer
+# Plugin registry and execution boundaries
+/plugins-registry/             @iamnomankazi
+/plugins-registry.json         @iamnomankazi
+/validate-plugin-registry.mjs  @iamnomankazi
+/plugin-install.mjs            @iamnomankazi
+/plugin-audit.mjs              @iamnomankazi
+/plugins/_engine.mjs           @iamnomankazi
+/plugins/_lock.mjs             @iamnomankazi
+/plugins/_net.mjs              @iamnomankazi
+/plugins/_registry.mjs         @iamnomankazi
+/.github/workflows/            @iamnomankazi
+/docs/PLUGIN_REVIEW.md         @iamnomankazi
 
-# The experimental web UI — owned by the web track (dual-track review with the
-# core maintainer on any PR that also touches root files).
-/web/ @santifer
+# Experimental web UI
+/web/ @iamnomankazi
