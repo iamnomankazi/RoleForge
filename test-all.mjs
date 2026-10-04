@@ -4277,8 +4277,8 @@ try {
       '4\t2026-01-05\tBoldCo\tSRE\tEvaluated\t**4.7/5**\t❌\t[4](reports/004-boldco-2026-01-05.md)\tbold score\n');
 
     const mergeResult = run(NODE, ['merge-tracker.mjs'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_ADDITIONS: additionsDir } });
-    if (mergeResult === null) {
-      fail('merge-tracker.mjs crashed during column-order test');
+    if (mergeResult !== null) {
+      fail('merge-tracker.mjs accepted a batch containing an ambiguous score/status row');
     } else {
       const merged = readFileSync(tracker, 'utf-8');
       const swapRow = merged.split('\n').find(l => l.includes('SwapCo')) || '';
@@ -4293,6 +4293,11 @@ try {
         pass('undecidable score/status row is skipped, not merged (no silent swap)');
       } else {
         fail('undecidable row was merged instead of skipped');
+      }
+      if (existsSync(join(additionsDir, '003-ambigco.tsv'))) {
+        pass('undecidable score/status evidence remains pending after the non-zero merge result');
+      } else {
+        fail('undecidable score/status evidence was consumed after refusal');
       }
       const boldRow = merged.split('\n').find(l => l.includes('BoldCo')) || '';
       if (boldRow.includes('| 4.7/5 | Evaluated |') && !boldRow.includes('**')) {
