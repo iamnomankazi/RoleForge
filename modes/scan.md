@@ -31,16 +31,15 @@ Read `portals.yml` which contains:
 
 ### Experience Requirements: Retain Evidence, Review Context
 
-When `experience_policy` is enabled, numeric years alone do not create an early hard blocker. Preserve the candidate and its `experience_metadata`, then review the number together with title, seniority, responsibilities, production ownership, domain depth, technologies, work authorization, language, and geography. Do not add separate requirements together.
+When `experience_policy` is enabled, numeric years are parsed before any experience decision rather than used as raw substrings. Preserve the candidate and its `experience_metadata`, then review the number together with title, seniority, responsibilities, production ownership, domain depth, technologies, work authorization, language, and geography. Do not add separate requirements together.
 
-- Requirements at or below `normal_max_years`, including an unbounded lower threshold such as `2+ years`, remain normal-range evidence.
-- A bounded range that starts in the normal range and ends at or below `normal_range_max_years` remains normal-range evidence; wider ranges starting in the normal range are stretch evidence.
-- Required thresholds above the normal range but below `outside_min_years` are stretch evidence and should survive for credibility review.
-- Required thresholds at or above `outside_min_years` are outside-target evidence and should usually be rejected during final review when the rest of the posting agrees.
-- `preferred`, `ideally`, `nice-to-have`, `bonus`, `advantageous`, and `is a plus` language never becomes a numeric hard blocker.
+- Exact or minimum requirements at or below `normal_max_years`, including an unbounded lower threshold such as plain `2+ years`, are normal evidence.
+- A bounded range that starts at 2 and extends above 2, including 2-3, 2-4, and 2-5, is stretch evidence and remains available for credibility review. Exact 3 and `3+ years` are also stretch evidence.
+- A required exact value, lower bound, or range whose minimum is at or above `outside_min_years` is outside target and carries an explicit experience hard blocker. Thus 4+, 4-6, and 5-7 are no-go, while 2-5 and 3-5 remain stretch.
+- `preferred`, `ideally`, `nice-to-have`, `bonus`, and `is a plus` language does not create a numeric hard blocker when it directly modifies the number or supplies the current section context.
 - Explicit Senior, Staff, Lead, Principal, Engineering Manager, and equivalent senior titles remain subject to the existing seniority exclusions regardless of a low numeric threshold.
 
-The structured scanner cannot infer full role credibility from a number. A retained stretch candidate can still be Blocked later for senior-level ownership, production depth, domain specialization, sponsorship, language, geography, or another genuine mismatch. Qualitative filters such as “deep experience designing distributed systems” remain ordinary content/review signals.
+The structured scanner preserves outside-target candidates with the evidence and hard blocker attached instead of recreating a brittle substring filter. A retained normal or stretch candidate can still be Blocked later for senior-level ownership, production depth, domain specialization, sponsorship, language, geography, or another genuine mismatch. Qualitative filters such as “deep experience designing distributed systems” remain ordinary content/review signals.
 
 ## Discovery Strategy (4 Levels)
 

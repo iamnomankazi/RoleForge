@@ -71,25 +71,38 @@ test('candidate TSV keeps primitive arrays readable and structured values lossle
   assert.equal(cells[header.indexOf('notes')], `'${candidate.notes}`);
 });
 
-test('standard scan artifacts preserve structured experience review evidence', () => {
+test('standard scan artifacts preserve structured experience evidence and hard blockers', () => {
   const root = mkdtempSync(join(tmpdir(), 'career-ops-standard-experience-'));
   try {
     const experienceMetadata = {
       interpretation: 'stretch',
       numeric_hard_blocker: false,
-      requirements: [{ text: '2-5 years', minimum_years: 2, maximum_years: 5, bound: 'range', strength: 'required', interpretation: 'stretch' }],
+      requirements: [{ text: '2-5 years', minimum_years: 2, maximum_years: 5, bound: 'range', strength: 'required', interpretation: 'stretch', hard_blocker: false }],
     };
+    const outsideReason = 'required experience starts at 4 years (outside configured target)';
     const result = persistStandardScanRun({
       runId: 'experience-run', root,
-      offers: [{
-        company: 'Example', title: 'ML Engineer II', url: 'https://jobs.example.com/experience',
-        experienceMetadata,
-      }],
+      offers: [
+        {
+          company: 'Example', title: 'ML Engineer II', url: 'https://jobs.example.com/experience',
+          experienceMetadata,
+        },
+        {
+          company: 'Outside', title: 'Engineer', url: 'https://jobs.example.com/outside',
+          experienceMetadata: {
+            interpretation: 'outside', numeric_hard_blocker: true, hard_blocker_reason: outsideReason,
+            requirements: [{ text: '4+ years', minimum_years: 4, maximum_years: null, bound: 'minimum', strength: 'required', interpretation: 'outside', hard_blocker: true }],
+          },
+          hardBlockers: [outsideReason],
+        },
+      ],
     });
     const candidates = JSON.parse(readFileSync(join(result.runDir, 'candidates.json'), 'utf8'));
-    assert.deepEqual(candidates[0].experience_metadata, experienceMetadata);
+    assert.deepEqual(candidates.find(candidate => candidate.company === 'Example').experience_metadata, experienceMetadata);
+    assert.deepEqual(candidates.find(candidate => candidate.company === 'Outside').hard_blockers, [outsideReason]);
     const tsv = readFileSync(join(result.runDir, 'candidates.tsv'), 'utf8');
     assert.match(tsv, /"interpretation":"stretch"/);
+    assert.match(tsv, /required experience starts at 4 years/);
     assert.doesNotMatch(tsv, /\[object Object\]/);
   } finally {
     rmSync(root, { recursive: true, force: true });

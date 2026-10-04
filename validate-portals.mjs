@@ -164,7 +164,7 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
     if (!isObject(config.experience_policy)) {
       add(errors, 'experience_policy', 'experience_policy must be an object');
     } else {
-      const numericFields = ['normal_max_years', 'normal_range_max_years', 'outside_min_years'];
+      const numericFields = ['normal_max_years', 'outside_min_years'];
       for (const field of numericFields) {
         const value = config.experience_policy[field];
         if (value !== undefined && (!Number.isFinite(Number(value)) || Number(value) < 0)) {
@@ -174,14 +174,13 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
       if (config.experience_policy.enabled !== undefined && typeof config.experience_policy.enabled !== 'boolean') {
         add(errors, 'experience_policy.enabled', 'must be a boolean when set');
       }
-      const normal = Number(config.experience_policy.normal_max_years ?? 2);
-      const range = Number(config.experience_policy.normal_range_max_years ?? 3);
-      const outside = Number(config.experience_policy.outside_min_years ?? 4);
-      if (Number.isFinite(normal) && Number.isFinite(range) && range < normal) {
-        add(errors, 'experience_policy.normal_range_max_years', 'must be greater than or equal to normal_max_years');
+      if (config.experience_policy.normal_range_max_years !== undefined) {
+        add(errors, 'experience_policy.normal_range_max_years', 'is no longer supported; any bounded range extending above normal_max_years is stretch');
       }
-      if (Number.isFinite(range) && Number.isFinite(outside) && outside <= range) {
-        add(errors, 'experience_policy.outside_min_years', 'must be greater than normal_range_max_years');
+      const normal = Number(config.experience_policy.normal_max_years ?? 2);
+      const outside = Number(config.experience_policy.outside_min_years ?? 4);
+      if (Number.isFinite(normal) && Number.isFinite(outside) && outside <= normal) {
+        add(errors, 'experience_policy.outside_min_years', 'must be greater than normal_max_years');
       }
     }
   }

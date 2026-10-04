@@ -1459,7 +1459,16 @@ async function main() {
           continue;
         }
         const experienceMetadata = classifyExperienceRequirements(job.description, experiencePolicy);
-        if (experienceMetadata) job.experienceMetadata = experienceMetadata;
+        if (experienceMetadata) {
+          job.experienceMetadata = experienceMetadata;
+          if (experienceMetadata.numeric_hard_blocker) {
+            const existingBlockers = job.hardBlockers ?? job.hard_blockers;
+            const blockers = Array.isArray(existingBlockers)
+              ? existingBlockers
+              : (existingBlockers ? [existingBlockers] : []);
+            job.hardBlockers = [...new Set([...blockers, experienceMetadata.hard_blocker_reason])];
+          }
+        }
         if (!contentFilter(job.description, matchedTitleKeywords(job.title, config.title_filter))) {
           totalFilteredContent++;
           continue;

@@ -170,7 +170,6 @@
 # experience_policy:
 #   enabled: true
 #   normal_max_years: 2
-#   normal_range_max_years: 3
 #   outside_min_years: 4
 
 # -- Title filter --

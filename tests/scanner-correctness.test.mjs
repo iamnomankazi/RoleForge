@@ -45,7 +45,6 @@ function writePortals(file, entries, { experiencePolicy = false } = {}) {
       'experience_policy:',
       '  enabled: true',
       '  normal_max_years: 2',
-      '  normal_range_max_years: 3',
       '  outside_min_years: 4',
       'content_filter:',
       '  negative: ["2+ years", "3+ years", "4+ years", "5+ years", "embedded"]',
@@ -67,9 +66,10 @@ function standardScanFixture(entries, runId, { experiencePolicy = false } = {}) 
       if (entry.mode === 'throw') throw new Error('fictional provider unavailable');
       if (entry.mode === 'two') return [1, 2].map((id) => ({ company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/role-' + id, location: 'Helsinki, Finland' }));
       if (entry.mode === 'job') return [{ company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/Role', location: 'Helsinki, Finland' }];
-      if (entry.mode === 'experience-normal') return [{ company: entry.name, title: 'Junior Data Engineer', url: 'https://jobs.example.test/' + entry.name + '/normal', location: 'Helsinki, Finland', description: 'Python and SQL role requiring 2+ years of experience' }];
+      if (entry.mode === 'experience-normal') return [{ company: entry.name, title: 'Junior Data Engineer', url: 'https://jobs.example.test/' + entry.name + '/normal', location: 'Helsinki, Finland', description: '<ul><li>Proven experience (2+ years) in data engineering</li><li>Cloud experience, ideally GCP</li></ul>' }];
       if (entry.mode === 'experience-stretch') return [{ company: entry.name, title: 'ML Engineer II', url: 'https://jobs.example.test/' + entry.name + '/stretch', location: 'Helsinki, Finland', description: '2-5 years of industry experience with production ML and MLOps ownership' }];
       if (entry.mode === 'experience-outside') return [{ company: entry.name, title: 'Software Engineer', url: 'https://jobs.example.test/' + entry.name + '/outside', location: 'Helsinki, Finland', description: '5+ years of commercial software engineering experience' }];
+      if (entry.mode === 'experience-preferred') return [{ company: entry.name, title: 'Software Engineer', url: 'https://jobs.example.test/' + entry.name + '/preferred', location: 'Helsinki, Finland', description: '<h3>Preferred qualifications</h3><ul><li>5+ years of relevant experience</li></ul>' }];
       if (entry.mode === 'degraded') {
         const jobs = [{ company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/partial', location: 'Helsinki, Finland' }];
         Object.defineProperty(jobs, 'providerDegraded', { value: true });
@@ -181,15 +181,19 @@ test('standard scan retains configured numeric experience evidence for contextua
     { name: 'Normal', mode: 'experience-normal' },
     { name: 'Stretch', mode: 'experience-stretch' },
     { name: 'Outside', mode: 'experience-outside' },
+    { name: 'Preferred', mode: 'experience-preferred' },
   ], 'experience-policy', { experiencePolicy: true });
   try {
     assert.equal(fixture.result.status, 0, fixture.result.stderr);
     const candidates = JSON.parse(readFileSync(join(fixture.runDir, 'candidates.json'), 'utf8'));
     assert.deepEqual(
       Object.fromEntries(candidates.map(candidate => [candidate.company, candidate.experience_metadata?.interpretation])),
-      { Normal: 'normal', Stretch: 'stretch', Outside: 'outside' },
+      { Normal: 'normal', Stretch: 'stretch', Outside: 'outside', Preferred: 'preferred_only' },
     );
-    assert.ok(candidates.every(candidate => candidate.experience_metadata?.numeric_hard_blocker === false));
+    assert.equal(candidates.find(candidate => candidate.company === 'Outside').experience_metadata.numeric_hard_blocker, true);
+    assert.match(candidates.find(candidate => candidate.company === 'Outside').hard_blockers[0], /required experience starts at 5 years/);
+    assert.deepEqual(candidates.find(candidate => candidate.company === 'Preferred').hard_blockers, []);
+    assert.equal(candidates.find(candidate => candidate.company === 'Normal').experience_metadata.requirements[0].strength, 'required');
     assert.match(fixture.result.stdout, /Filtered by content:\s+0/);
   } finally {
     rmSync(fixture.dir, { recursive: true, force: true });
