@@ -1,21 +1,27 @@
 cff-version: 1.2.0
-message: "Original upstream Career Ops citation metadata, retained for inherited work. See UPSTREAM.md for RoleForge provenance."
-title: "Career-Ops: AI-Powered Job Search Pipeline"
+message: "If you use RoleForge, please cite it using these metadata."
+title: "RoleForge"
 type: software
 authors:
-  - family-names: "Fernández de Valderrama"
-    given-names: "Santiago"
-    website: "https://santifer.io"
-url: "https://santifer.io"
-repository-code: "https://github.com/santifer/career-ops"
+  - name: "iamnomankazi"
+    website: "https://github.com/iamnomankazi"
+url: "https://github.com/iamnomankazi/RoleForge"
+repository-code: "https://github.com/iamnomankazi/RoleForge"
 license: MIT
 keywords:
   - ai
   - job-search
-  - claude-code
   - career
-  - career-ops
-  - careerops
   - automation
-  - llmops
-  - go-tui
+  - ats
+  - application-tracking
+  - roleforge
+references:
+  - type: software
+    title: "Career-Ops: AI-Powered Job Search Pipeline"
+    authors:
+      - family-names: "Fernández de Valderrama"
+        given-names: "Santiago"
+        website: "https://santifer.io"
+    repository-code: "https://github.com/santifer/career-ops"
+    url: "https://github.com/santifer/career-ops"
