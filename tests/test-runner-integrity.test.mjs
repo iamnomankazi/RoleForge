@@ -4,8 +4,11 @@ import {
   validateDiscoveredTestSources,
   parseTapSummary,
   discoveredRunFailed,
+  collectChildOutput,
 } from '../test-runner-core.mjs';
 import { run } from './helpers.mjs';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 test('discovered source validation rejects child-terminating helpers', () => {
   const sources = new Map([
@@ -42,6 +45,15 @@ test('missing verdict, failed child, and cancellation all fail closed', () => {
     { files: 1, exitCode: 0 },
   );
   assert.equal(discoveredRunFailed(cancelled), true);
+});
+
+test('runner waits for TAP bytes written during child stream shutdown', async () => {
+  const fixture = fileURLToPath(new URL('./fixtures/tap-shutdown-fixture.mjs', import.meta.url));
+  const child = spawn(process.execPath, [fixture], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const result = await collectChildOutput(child);
+  const parsed = parseTapSummary(result.stdout + result.stderr, { files: 1, exitCode: result.exitCode });
+  assert.equal(parsed.complete, true);
+  assert.equal(discoveredRunFailed(parsed), false);
 });
 
 test('test helper requires executable-plus-argv commands and accepts git vectors', () => {

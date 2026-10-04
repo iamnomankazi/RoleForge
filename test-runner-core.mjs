@@ -51,3 +51,26 @@ export function discoveredRunFailed(parsed) {
     || parsed.summary.failed > 0
     || parsed.summary.cancelled > 0;
 }
+
+/** Collect complete child output and settle once, after stdio has closed. */
+export function collectChildOutput(child, { onStdout = () => {}, onStderr = () => {} } = {}) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let exitCode = null;
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.on('data', (chunk) => { stdout += chunk.toString(); onStdout(chunk); });
+    child.stderr?.on('data', (chunk) => { stderr += chunk.toString(); onStderr(chunk); });
+    child.once('exit', (code) => { exitCode = code; });
+    child.once('error', (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
+    child.once('close', (code) => {
+      if (settled) return;
+      settled = true;
+      resolve({ exitCode: code ?? exitCode ?? 1, stdout, stderr });
+    });
+  });
+}

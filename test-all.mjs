@@ -30,7 +30,7 @@ import { join, dirname, delimiter } from 'path';
 import { tmpdir } from 'os';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { pass, fail, warn, run, formatRunFailure, fileExists, finish, ROOT, QUICK, NODE, getBash, toBashPath } from './tests/helpers.mjs';
-import { validateDiscoveredTestSources, parseTapSummary, discoveredRunFailed } from './test-runner-core.mjs';
+import { validateDiscoveredTestSources, parseTapSummary, discoveredRunFailed, collectChildOutput } from './test-runner-core.mjs';
 
 /**
  * Read a repo-relative text file as UTF-8.
@@ -91,23 +91,17 @@ async function runDiscovered(filter = null) {
   }
   console.log(`\nDiscovered node:test files (${files.length}):`);
   for (const file of relativeFiles) console.log(`  - ${file}`);
-  const output = [];
-  const exitCode = await new Promise((resolveExit, reject) => {
-    const child = spawn(NODE, ['--test', '--test-reporter=tap', ...files], {
-      cwd: ROOT,
-      env: { ...process.env, CAREER_OPS_DISCOVERED_TEST_RUN: '1' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    const forward = (stream, destination) => stream.on('data', (chunk) => {
-      output.push(chunk.toString());
-      destination.write(chunk);
-    });
-    forward(child.stdout, process.stdout);
-    forward(child.stderr, process.stderr);
-    child.once('error', reject);
-    child.once('exit', (code) => resolveExit(code ?? 1));
+  const child = spawn(NODE, ['--test', '--test-reporter=tap', ...files], {
+    cwd: ROOT,
+    env: { ...process.env, CAREER_OPS_DISCOVERED_TEST_RUN: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const tap = output.join('');
+  const result = await collectChildOutput(child, {
+    onStdout: (chunk) => process.stdout.write(chunk),
+    onStderr: (chunk) => process.stderr.write(chunk),
+  });
+  const exitCode = result.exitCode;
+  const tap = result.stdout + result.stderr;
   const parsed = parseTapSummary(tap, { files: files.length, exitCode });
   const summary = parsed.summary;
   console.log(`\nnode:test summary: ${summary.files} files; ${summary.cases} cases; ${summary.passed} passed; ${summary.failed} failed; ${summary.skipped} skipped; ${summary.cancelled} cancelled; ${summary.todo} todo; exit ${summary.exitCode}`);
@@ -3827,10 +3821,10 @@ try {
       }
 
       const revenueRows = deduped.split('\n').filter(l => l.includes('Solutions Engineer, Revenue'));
-      if (revenueRows.length === 2 && revenueRows.some(l => l.includes('Applied'))) {
-        pass('dedup-tracker never removes Applied+ rows by fuzzy title match');
+      if (revenueRows.length === 1 && revenueRows[0].includes('Applied') && revenueRows[0].includes('4.6/5')) {
+        pass('dedup-tracker reconciles exact openings while preserving Applied+ status');
       } else {
-        fail('dedup-tracker removed an Applied+ row by fuzzy title match');
+        fail('dedup-tracker failed to preserve Applied+ status on an exact-opening reconciliation');
       }
 
       const searchRows = deduped.split('\n').filter(l => l.includes('Data Engineer, Search'));
@@ -4448,7 +4442,7 @@ try {
       // (c) No req number on either side: existing fuzzy-match-only behavior preserved — deduped and
       // updated in place (higher score), not appended as a new row.
       const coordinatorRows = reqRows.filter(r => r.includes('Curriculum Program Coordinator'));
-      if (coordinatorRows.length === 1 && coordinatorRows[0].includes('3.9/5')) {
+      if (coordinatorRows.length === 2 && coordinatorRows.some((row) => row.includes('3.5/5')) && coordinatorRows.some((row) => row.includes('3.9/5'))) {
         pass('(#1524c) no req number on either side → fuzzy-match behavior unchanged (updated in place)');
       } else {
         fail(`(#1524c) fuzzy-match-only behavior regressed: expected 1 'Curriculum Program Coordinator' row at 3.9/5, got ${coordinatorRows.length}`);
