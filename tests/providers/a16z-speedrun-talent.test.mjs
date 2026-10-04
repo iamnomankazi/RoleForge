@@ -9,6 +9,7 @@ try {
   const { default: provider, normalizeSpeedrunJob } = await import(
     pathToFileURL(join(ROOT, 'providers/a16z-speedrun-talent.mjs')).href
   );
+  const { providerCoverage } = await import(pathToFileURL(join(ROOT, 'providers/_result.mjs')).href);
 
   assert.equal(provider.id, 'a16z-speedrun-talent');
   assert.ok(provider.detect({ provider: 'a16z-speedrun-talent' }));
@@ -52,7 +53,7 @@ try {
   pass('pagination is bounded, attributed, query-aware, redirect-safe, and deduplicated');
 
   const cappedCalls = [];
-  await provider.fetch({ max_pages: 5 }, {
+  const capped = await provider.fetch({ max_pages: 5 }, {
     maxPages: 1,
     fetchJson: async (url) => {
       cappedCalls.push(url);
@@ -60,7 +61,13 @@ try {
     },
   });
   assert.equal(cappedCalls.length, 1);
-  pass('context maxPages bounds health/smoke probes');
+  assert.deepEqual(providerCoverage(capped), {
+    status: 'partial', code: 'max_pages',
+    reason: 'board truncated at max_pages=1 (10 total pages)',
+    pagesFetched: 1, maxPages: 1, totalPages: 10,
+  });
+  assert.equal(capped.length, 50);
+  pass('context maxPages retains fetched jobs and reports structured partial coverage');
 
   assert.deepEqual(await provider.fetch({}, { fetchJson: async () => ({ jobs: [] }) }), []);
   await assert.rejects(() => provider.fetch({}, { fetchJson: async () => ({ nope: [] }) }), /malformed response/);

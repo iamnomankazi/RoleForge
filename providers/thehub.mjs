@@ -121,7 +121,17 @@ export default {
     for (let page = 1; page <= maxPages; page++) {
       const url = `${FEED_BASE}?page=${page}`;
       // redirect:'error' prevents SSRF via server-side redirects
-      const json = await ctx.fetchJson(url, { redirect: 'error' });
+      let json;
+      try {
+        json = await ctx.fetchJson(url, { redirect: 'error' });
+      } catch (error) {
+        if (error?.status === 404 || error?.status === 410) {
+          // This is a board-wide API endpoint, not a tenant/ATS slug.
+          error.kind = 'endpoint_gone';
+          error.providerEndpoint = FEED_BASE;
+        }
+        throw error;
+      }
       if (!json || !Array.isArray(json.docs)) {
         throw new Error(
           `thehub: unexpected API response on page ${page} — expected { docs: [...] }, got keys: [${json ? Object.keys(json).join(', ') : 'null'}]`,

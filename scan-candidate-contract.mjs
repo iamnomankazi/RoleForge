@@ -92,6 +92,7 @@ export function normalizeCanonicalCandidate(row, {
     created_at: createdAt || first(row?.created_at, row?.createdAt) || null,
     provider: identity.atsProvider || first(row?.provider, source) || null,
     source,
+    source_url: first(row?.sourceUrl, row?.source_url) || null,
     source_worker: worker || null,
     source_query: queries[0] || null,
     source_queries: queries,
@@ -108,6 +109,10 @@ export function normalizeCanonicalCandidate(row, {
     ats_tenant: identity.atsTenant,
     requisition_id: identity.requisitionId,
     location: first(row?.location, row?.jobLocation) || null,
+    location_eligibility: first(row?.locationEligibility, row?.location_eligibility) || null,
+    location_eligibility_code: first(row?.locationEligibilityCode, row?.location_eligibility_code) || null,
+    location_eligibility_match: first(row?.locationEligibilityMatch, row?.location_eligibility_match) || null,
+    location_eligibility_source: first(row?.locationEligibilitySource, row?.location_eligibility_source) || null,
     remote_restriction: first(row?.remoteRestriction, row?.remote_restriction) || null,
     finland_hiring_eligibility: first(row?.finlandHiringEligibility, row?.finland_hiring_eligibility) || null,
     posted_at: first(row?.postedAt, row?.posted_at, row?.date) || null,
@@ -123,6 +128,9 @@ export function normalizeCanonicalCandidate(row, {
     cautions,
     hard_blockers: blockers,
     status: first(row?.status, 'discovered'),
+    liveness_status: first(row?.livenessStatus, row?.liveness_status, row?.liveness?.status, 'unverified'),
+    liveness_code: first(row?.livenessCode, row?.liveness_code, row?.liveness?.code) || null,
+    liveness_reason: first(row?.livenessReason, row?.liveness_reason, row?.liveness?.reason) || null,
     description: first(row?.description, row?.jobDescription, row?.job_description) || null,
     notes: first(row?.notes) || null,
     _identity_aliases: {
@@ -187,7 +195,11 @@ function priorityGroups(locationPriority) {
 }
 
 function matchesLocationGroup(value, group) {
-  return group.some((entry) => value.includes(entry.toLocaleLowerCase('en')));
+  return group.some((entry) => {
+    const keyword = entry.toLocaleLowerCase('en');
+    const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}(?=$|[^\\p{L}\\p{N}])`, 'u').test(value);
+  });
 }
 
 function locationRank(location, locationPriority = []) {
@@ -197,14 +209,24 @@ function locationRank(location, locationPriority = []) {
   if (configuredRank >= 0) return configuredRank;
   const defaultRank = DEFAULT_LOCATION_GROUPS.findIndex((group) => matchesLocationGroup(value, group));
   if (defaultRank >= 0) return configured.length + defaultRank;
-  if (/(remote|europe|eu|eea|emea)/.test(value)) return configured.length + DEFAULT_LOCATION_GROUPS.length;
+  if (/\b(?:remote|europe|eu|eea|emea)\b/.test(value)
+      || /\beuropean (?:union|economic area)\b/.test(value)) {
+    return configured.length + DEFAULT_LOCATION_GROUPS.length;
+  }
   return configured.length + DEFAULT_LOCATION_GROUPS.length + 1;
+}
+
+function candidateLocationRank(candidate, locationPriority) {
+  const resolved = candidate.location_eligibility === 'eligible'
+    ? candidate.location_eligibility_match
+    : '';
+  return locationRank(resolved || candidate.location, locationPriority);
 }
 
 function sortCandidate(a, b, locationPriority) {
   const ranks = new Map([...MATCH_BUCKETS, ''].map((bucket, index) => [bucket, index]));
   return (ranks.get(a.match_bucket) ?? 3) - (ranks.get(b.match_bucket) ?? 3)
-    || locationRank(a.location, locationPriority) - locationRank(b.location, locationPriority)
+    || candidateLocationRank(a, locationPriority) - candidateLocationRank(b, locationPriority)
     || (Date.parse(b.posted_at) || 0) - (Date.parse(a.posted_at) || 0)
     || a.company.localeCompare(b.company, 'en', { sensitivity: 'base' })
     || a.title.localeCompare(b.title, 'en', { sensitivity: 'base' })
@@ -249,12 +271,44 @@ export function mergeCanonicalCandidates(inputs, {
       existing.source_query ||= existing.source_queries[0] || null;
       existing.provenance.push(...row.provenance);
       existing.source_worker = mergeText(existing.source_worker, row.source_worker);
+      existing.source_url ||= row.source_url;
       existing.match_bucket = mergeBucket(existing, row);
       existing.match_reason = mergeText(existing.match_reason, row.match_reason);
       existing.notes = mergeText(existing.notes, row.notes);
       existing.resolved_url ||= row.resolved_url;
       existing.apply_url ||= row.apply_url;
       existing.description ||= row.description;
+      const livenessRank = { active: 0, uncertain: 1, unverified: 2 };
+      if ((livenessRank[row.liveness_status] ?? 9) < (livenessRank[existing.liveness_status] ?? 9)) {
+        existing.liveness_status = row.liveness_status;
+        existing.liveness_code = row.liveness_code;
+        existing.liveness_reason = row.liveness_reason;
+      }
+      const eligibilityRank = { eligible: 0, uncertain: 1, ineligible: 2 };
+      const evidenceRank = { location: 0, title: 1, url: 2 };
+      const evidenceKey = (candidate) => [
+        eligibilityRank[candidate.location_eligibility] ?? 9,
+        evidenceRank[candidate.location_eligibility_source] ?? 9,
+        locationRank(candidate.location_eligibility_match, locationPriority),
+        clean(candidate.location_eligibility_code).toLocaleLowerCase('en'),
+        clean(candidate.location_eligibility_match).toLocaleLowerCase('en'),
+        clean(candidate.location_eligibility_source).toLocaleLowerCase('en'),
+      ];
+      const compareKeys = (left, right) => {
+        for (let i = 0; i < left.length; i += 1) {
+          const order = typeof left[i] === 'number'
+            ? left[i] - right[i]
+            : left[i].localeCompare(right[i], 'en');
+          if (order) return order;
+        }
+        return 0;
+      };
+      if (compareKeys(evidenceKey(row), evidenceKey(existing)) < 0) {
+        existing.location_eligibility = row.location_eligibility;
+        existing.location_eligibility_code = row.location_eligibility_code;
+        existing.location_eligibility_match = row.location_eligibility_match;
+        existing.location_eligibility_source = row.location_eligibility_source;
+      }
       existing.recommended_cv_variant ||= row.recommended_cv_variant;
       existing.cautions = [...new Set([...existing.cautions, ...row.cautions])];
       existing.hard_blockers = [...new Set([...existing.hard_blockers, ...row.hard_blockers])];
@@ -311,11 +365,14 @@ function mdCell(value) {
 
 export const CANDIDATE_TSV_COLUMNS = Object.freeze([
   'schema_version', 'run_id', 'candidate_id', 'created_at', 'provider', 'source', 'source_worker',
-  'source_query', 'source_queries', 'company', 'title', 'canonical_url', 'url', 'original_url',
+  'source_url', 'source_query', 'source_queries', 'company', 'title', 'canonical_url', 'url', 'original_url',
   'resolved_url', 'apply_url', 'url_aliases', 'ats_provider', 'ats_tenant', 'requisition_id',
-  'location', 'remote_restriction', 'finland_hiring_eligibility', 'posted_at', 'expires_at',
+  'location', 'location_eligibility', 'location_eligibility_code', 'location_eligibility_match',
+  'location_eligibility_source', 'remote_restriction',
+  'finland_hiring_eligibility', 'posted_at', 'expires_at',
   'employment_type', 'seniority', 'experience_metadata', 'language_requirements', 'salary',
   'match_bucket', 'match_reason', 'recommended_cv_variant', 'cautions', 'hard_blockers', 'status',
+  'liveness_status', 'liveness_code', 'liveness_reason',
   'notes', 'provenance',
 ]);
 
@@ -329,7 +386,9 @@ export function buildCandidatesTsv(candidates) {
 export function buildReviewCsv(candidates) {
   const columns = [
     'run_id', 'candidate_id', 'review_decision', 'match_bucket', 'hard_blocker_check', 'liveness',
-    'company', 'title', 'location', 'posted_at', 'source', 'canonical_url', 'url', 'match_reason',
+    'liveness_code', 'liveness_reason', 'company', 'title', 'location', 'location_eligibility',
+    'location_eligibility_code', 'location_eligibility_match', 'location_eligibility_source',
+    'posted_at', 'source', 'source_url', 'canonical_url', 'url', 'match_reason',
     'recommended_cv_variant', 'source_query', 'source_queries', 'source_worker', 'detected_hard_blockers',
     'cautions', 'notes',
   ];
@@ -338,18 +397,24 @@ export function buildReviewCsv(candidates) {
     review_decision: 'review',
     match_bucket: row.match_bucket || 'Unclassified',
     hard_blocker_check: (row.hard_blockers || row.hardBlockers || []).length ? 'detected - verify' : 'pending',
-    liveness: 'unverified',
+    liveness: row.liveness_status || row.livenessStatus || 'unverified',
     detected_hard_blockers: row.hard_blockers || row.hardBlockers || [],
   }));
   return [columns.join(','), ...rows.map((row) => columns.map((key) => csvCell(row[key])).join(','))].join('\n') + '\n';
 }
 
 export function buildReviewMarkdown(candidates, manifest) {
+  const eligibility = (row) => [
+    row.location_eligibility,
+    row.location_eligibility_code,
+    row.location_eligibility_match,
+    row.location_eligibility_source,
+  ].filter(Boolean).join(' / ') || 'Unclassified';
   const rows = candidates.map((row, index) => (
-    `| ${index + 1} | ${mdCell(row.candidate_id)} | Review | ${mdCell(row.match_bucket || row.matchBucket || 'Unclassified')} | ${mdCell(row.company)} | [${mdCell(row.title)}](${row.url}) | ${mdCell(row.location || 'Unknown')} | Unverified | ${mdCell((row.hard_blockers || row.hardBlockers || []).length ? (row.hard_blockers || row.hardBlockers) : 'Pending review')} | ${mdCell(row.match_reason || row.matchReason)} | ${mdCell(row.recommended_cv_variant || row.recommendedCvVariant)} |`
+    `| ${index + 1} | ${mdCell(row.candidate_id)} | Review | ${mdCell(row.match_bucket || row.matchBucket || 'Unclassified')} | ${mdCell(row.company)} | [${mdCell(row.title)}](${row.url}) | ${mdCell(row.location || 'Unknown')} | ${mdCell(eligibility(row))} | ${mdCell(row.liveness_status && row.liveness_status !== 'unverified' ? `${row.liveness_status}${row.liveness_code ? ` / ${row.liveness_code}` : ''}` : 'Unverified')} | ${mdCell((row.hard_blockers || row.hardBlockers || []).length ? (row.hard_blockers || row.hardBlockers) : 'Pending review')} | ${mdCell(row.match_reason || row.matchReason)} | ${mdCell(row.recommended_cv_variant || row.recommendedCvVariant)} |`
   ));
   const runId = manifest.run_id || manifest.runId;
-  return `# Scan Review — ${runId}\n\nGenerated: ${manifest.created_at || manifest.createdAt}\n\nRun ID: ${runId}\n\nAuthority: review only. This file and output/apply-queue.csv cannot authorize browser execution.\n\n## Summary\n\n- Candidates: ${manifest.candidate_count ?? manifest.candidates}\n- Duplicates removed: ${manifest.duplicates_removed ?? manifest.duplicatesRemoved}\n- Invalid rows skipped: ${manifest.invalid_rows ?? manifest.invalidRows}\n\n## Review\n\n| # | Candidate ID | Decision | Bucket | Company | Role | Location | Liveness | Hard blockers | Match reason | CV |\n|---:|---|---|---|---|---|---|---|---|---|---|\n${rows.join('\n')}\n`;
+  return `# Scan Review — ${runId}\n\nGenerated: ${manifest.created_at || manifest.createdAt}\n\nRun ID: ${runId}\n\nAuthority: review only. This file and output/apply-queue.csv cannot authorize browser execution.\n\n## Summary\n\n- Candidates: ${manifest.candidate_count ?? manifest.candidates}\n- Duplicates removed: ${manifest.duplicates_removed ?? manifest.duplicatesRemoved}\n- Invalid rows skipped: ${manifest.invalid_rows ?? manifest.invalidRows}\n\n## Review\n\n| # | Candidate ID | Decision | Bucket | Company | Role | Location | Eligibility | Liveness | Hard blockers | Match reason | CV |\n|---:|---|---|---|---|---|---|---|---|---|---|---|\n${rows.join('\n')}\n`;
 }
 
 export function buildImmutableScanRun({

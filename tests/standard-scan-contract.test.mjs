@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { persistStandardScanRun } from '../scan.mjs';
+import { mergeCanonicalCandidates } from '../scan-candidate-contract.mjs';
 import { mergeCandidates } from '../merge-scan-results.mjs';
 import { createApplicationBatch } from '../application-batch.mjs';
 
@@ -64,4 +65,92 @@ test('a completed zero-result standard scan still has an immutable run identity'
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('location evidence and verified liveness survive canonical JSON, TSV, CSV, and Markdown artifacts', () => {
+  const root = mkdtempSync(join(tmpdir(), 'career-ops-standard-liveness-'));
+  try {
+    const result = persistStandardScanRun({
+      runId: 'liveness-run', root,
+      offers: [
+        {
+          company: 'Active Co', title: 'Engineer - Berlin', url: 'https://jobs.example.com/active',
+          location: 'United States', locationEligibility: 'eligible', locationEligibilityCode: 'target_region',
+          locationEligibilityMatch: 'Berlin', locationEligibilitySource: 'title', sourceUrl: 'https://source.example/item/1',
+          livenessStatus: 'active', livenessCode: 'apply_control_visible', livenessReason: 'visible apply control detected',
+        },
+        { company: 'Blocked Co', title: 'Engineer', url: 'https://jobs.example.com/blocked', livenessStatus: 'uncertain', livenessCode: 'bot_challenge', livenessReason: 'anti-bot challenge' },
+      ],
+    });
+    const candidates = JSON.parse(readFileSync(join(result.runDir, 'candidates.json'), 'utf8'));
+    assert.deepEqual(candidates.map((row) => [row.liveness_status, row.liveness_code]).sort(), [
+      ['active', 'apply_control_visible'],
+      ['uncertain', 'bot_challenge'],
+    ]);
+    const active = candidates.find((row) => row.company === 'Active Co');
+    assert.equal(active.schema_version, 3);
+    assert.equal(active.location, 'United States');
+    assert.deepEqual([
+      active.location_eligibility, active.location_eligibility_code,
+      active.location_eligibility_match, active.location_eligibility_source,
+    ], ['eligible', 'target_region', 'Berlin', 'title']);
+    assert.equal(active.source_url, 'https://source.example/item/1');
+    assert.match(readFileSync(join(result.runDir, 'candidates.tsv'), 'utf8'), /liveness_status\tliveness_code\tliveness_reason/);
+    assert.match(readFileSync(join(result.runDir, 'candidates.tsv'), 'utf8'), /location_eligibility_match\tlocation_eligibility_source/);
+    assert.match(readFileSync(join(result.runDir, 'review.csv'), 'utf8'), /active,apply_control_visible/);
+    assert.match(readFileSync(join(result.runDir, 'review.csv'), 'utf8'), /eligible,target_region,Berlin,title/);
+    const markdown = readFileSync(join(result.runDir, 'review.md'), 'utf8');
+    assert.match(markdown, /eligible \/ target_region \/ Berlin \/ title/);
+    assert.match(markdown, /active \/ apply_control_visible/);
+    assert.match(markdown, /uncertain \/ bot_challenge/);
+    assert.doesNotMatch(markdown, /\| Unverified \|/);
+    const tableLines = markdown.split(/\r?\n/).filter((line) => line.startsWith('|'));
+    const columnCounts = new Set(tableLines.map((line) => line.split('|').length));
+    assert.deepEqual([...columnCounts], [14]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('location evidence merges atomically and deterministically without pessimistic eligibility', () => {
+  const shared = { company: 'Acme', title: 'Engineer', url: 'https://jobs.example.com/roles/123' };
+  const titleEvidence = {
+    ...shared, location: 'United States', locationEligibility: 'eligible', locationEligibilityCode: 'target_region',
+    locationEligibilityMatch: 'Berlin', locationEligibilitySource: 'title',
+  };
+  const urlEvidence = {
+    ...shared, location: 'Remote', locationEligibility: 'eligible', locationEligibilityCode: 'target_region',
+    locationEligibilityMatch: 'Finland', locationEligibilitySource: 'url',
+  };
+  const incompatible = {
+    ...shared, location: 'US only', locationEligibility: 'ineligible', locationEligibilityCode: 'remote_restricted_elsewhere',
+    locationEligibilityMatch: 'US', locationEligibilitySource: 'location',
+  };
+  const merge = (rows) => mergeCanonicalCandidates([{ name: 'fixture.json', rows }], {
+    runId: 'merge-location', createdAt: '2026-08-09T00:00:00.000Z',
+    locationPriority: [['Finland'], ['Germany'], ['Denmark'], ['Netherlands']],
+  }).candidates[0];
+  for (const rows of [[urlEvidence, incompatible, titleEvidence], [titleEvidence, incompatible, urlEvidence]]) {
+    const candidate = merge(rows);
+    assert.deepEqual([
+      candidate.location_eligibility, candidate.location_eligibility_code,
+      candidate.location_eligibility_match, candidate.location_eligibility_source,
+    ], ['eligible', 'target_region', 'Berlin', 'title']);
+  }
+});
+
+test('resolved eligible evidence drives configured location ordering with token-safe Europe fallback', () => {
+  const rows = [
+    { company: 'Unrelated', title: 'Engineer', url: 'https://jobs.example.com/5', location: 'Neumünster', locationEligibility: 'uncertain' },
+    { company: 'Remote', title: 'Engineer', url: 'https://jobs.example.com/4', location: 'Remote', locationEligibility: 'uncertain' },
+    { company: 'Denmark', title: 'Engineer', url: 'https://jobs.example.com/3', location: 'Herning, DK', locationEligibility: 'eligible', locationEligibilityMatch: 'Denmark', locationEligibilitySource: 'location' },
+    { company: 'Berlin', title: 'Engineer - Berlin', url: 'https://jobs.example.com/2', location: 'United States', locationEligibility: 'eligible', locationEligibilityMatch: 'Berlin', locationEligibilitySource: 'title' },
+    { company: 'Finland', title: 'Engineer', url: 'https://jobs.example.com/1', location: 'Helsinki, Finland', locationEligibility: 'eligible', locationEligibilityMatch: 'Finland', locationEligibilitySource: 'location' },
+  ];
+  const result = mergeCanonicalCandidates([{ name: 'fixture.json', rows }], {
+    runId: 'sort-location', createdAt: '2026-08-09T00:00:00.000Z',
+    locationPriority: [['Finland'], ['Germany', 'Berlin'], ['Denmark'], ['Netherlands']],
+  });
+  assert.deepEqual(result.candidates.map((row) => row.company), ['Finland', 'Berlin', 'Denmark', 'Remote', 'Unrelated']);
+  assert.equal(result.candidates.find((row) => row.company === 'Berlin').location, 'United States');
 });

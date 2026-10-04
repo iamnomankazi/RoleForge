@@ -36,6 +36,7 @@ import path from 'path';
 import yaml from 'js-yaml';
 
 import { makeHttpCtx } from './providers/_http.mjs';
+import { providerCoverage } from './providers/_result.mjs';
 import { buildTrustValidator } from './providers/_trust-validator.mjs';
 import { loadProviders, resolveProvider } from './providers/_registry.mjs';
 import { mergeProviderPlugins } from './plugins/_engine.mjs';
@@ -138,16 +139,9 @@ export function matchedTitleKeywords(title, titleFilter) {
 }
 
 // ── Location filter ─────────────────────────────────────────────────
-// Optional. If `location_filter` is absent from portals.yml, all locations pass.
-// Semantics (case-insensitive substring, in this order):
-//   - Empty / whitespace-only / non-string location → pass (don't penalize
-//     missing or malformed provider data)
-//   - `always_allow` matches → pass (takes precedence over `block` — lets a
-//     multi-location string like "Remote, Belgium or France" through because
-//     the home region is an option, even though "france" is blocked)
-//   - `block` matches → reject
-//   - `allow` empty → pass (already cleared block)
-//   - `allow` non-empty → must match at least one keyword
+// Optional source-aware tri-state classifier. Structured location and title
+// are strong evidence; a job-specific URL is only a fallback for missing or
+// non-geographic metadata. Explicit geographic restrictions take precedence.
 
 // Normalize a keyword list from portals.yml: tolerates a bare string
 // (wrapped to a 1-item array), null/undefined (→ []), and non-string
@@ -164,31 +158,171 @@ function normalizeKeywordList(value) {
     .filter(Boolean);
 }
 
-export function buildLocationFilter(locationFilter) {
-  if (!locationFilter) return () => true;
-  const alwaysAllow = normalizeKeywordList(locationFilter.always_allow);
-  const allow = normalizeKeywordList(locationFilter.allow);
-  const block = normalizeKeywordList(locationFilter.block);
+const GENERIC_LOCATION_TERMS = new Set([
+  'remote', 'worldwide', 'global', 'anywhere', 'anywhere in the world', 'work from anywhere', 'emea',
+]);
+const EUROPE_WIDE_TERMS = new Set([
+  'remote europe', 'europe', 'european union', 'european economic area', 'eu', 'eea',
+]);
 
-  const escape = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const matches = (text, keyword) => {
-    if (!/^[\p{L}\p{N}]+$/u.test(keyword)) return text.includes(keyword);
-    return new RegExp(`(^|[^\\p{L}\\p{N}])${escape(keyword)}(?=$|[^\\p{L}\\p{N}])`, 'u').test(text);
+const TARGET_COUNTRY_ISO = new Map([
+  ['finland', 'fi'],
+  ['germany', 'de'],
+  ['denmark', 'dk'],
+  ['netherlands', 'nl'],
+]);
+
+function locationKeywordEntries(value) {
+  if (value == null) return [];
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .filter((entry) => typeof entry === 'string' && entry.trim())
+    .map((entry) => ({ raw: entry.trim(), normalized: entry.toLowerCase().trim() }));
+}
+
+function escapeLocationPattern(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function locationTextMatches(text, keyword) {
+  if (!text || !keyword) return false;
+  if (!/^[\p{L}\p{N}]+$/u.test(keyword)) return text.includes(keyword);
+  return new RegExp(`(^|[^\\p{L}\\p{N}])${escapeLocationPattern(keyword)}(?=$|[^\\p{L}\\p{N}])`, 'u').test(text);
+}
+
+function nonGeographicLocation(value, generic) {
+  const lower = value.toLowerCase().trim();
+  if (!lower || /^(?:unknown|unspecified|not specified|n\/?a|multiple locations)$/i.test(lower)) return true;
+  let remainder = lower;
+  let timezoneSeen = false;
+  remainder = remainder.replace(/\b(?:utc|gmt)(?:\s*[+-]\s*\d{1,2}(?::\d{2})?)?\b|\b(?:cet|cest)\b/gi, () => {
+    timezoneSeen = true;
+    return ' ';
+  });
+  if (timezoneSeen) remainder = remainder.replace(/\bto\b/g, ' ');
+  for (const term of [...generic].sort((a, b) => b.length - a.length)) {
+    remainder = remainder.replace(new RegExp(`(^|[^\\p{L}\\p{N}])${escapeLocationPattern(term)}(?=$|[^\\p{L}\\p{N}])`, 'gu'), ' ');
+  }
+  remainder = remainder
+    .replace(/\b(?:hybrid|on[- ]?site|onsite|flexible|office|fully|full|primarily|mostly|100\s*%)\b/g, ' ')
+    .replace(/[\s,;:()[\]{}\-/–—]+/g, ' ')
+    .trim();
+  return !remainder;
+}
+
+function explicitRestrictionScope(value) {
+  const text = value.trim();
+  const patterns = [
+    /(?:^|[,;])\s*(?:remote\s*[-:–—]\s*)?(.+?)\s+(?:residents?\s+)?only\b/i,
+    /\bmust\s+(?:be\s+)?(?:based|located|reside|resident)\s+in\s+([^,;]+)/i,
+    /\b(?:remote|work)\s+within\s+([^,;]+)/i,
+    /\bremote\s*[-:–—]\s*([^,;]+)/i,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) return match[1].replace(/\s+(?:residents?\s+)?only\b.*$/i, '').trim();
+  }
+  return '';
+}
+
+export function buildLocationClassifier(locationFilter) {
+  if (!locationFilter) return () => ({ status: 'eligible', code: 'filter_disabled' });
+  const alwaysAllowEntries = locationKeywordEntries(locationFilter.always_allow);
+  const allowEntries = locationKeywordEntries(locationFilter.allow);
+  const alwaysAllow = alwaysAllowEntries.map((entry) => entry.normalized);
+  const allow = allowEntries.map((entry) => entry.normalized);
+  const block = normalizeKeywordList(locationFilter.block);
+  const configuredEuropeWide = normalizeKeywordList(locationFilter.europe_wide);
+  const configuredUncertain = normalizeKeywordList(locationFilter.uncertain);
+  const generic = new Set([...GENERIC_LOCATION_TERMS, ...configuredUncertain]);
+  const configuredWideTerms = configuredEuropeWide.length
+    ? configuredEuropeWide
+    : allow.filter((keyword) => EUROPE_WIDE_TERMS.has(keyword));
+  const europeWide = new Set([
+    ...configuredWideTerms,
+    ...(configuredWideTerms.some((keyword) => EUROPE_WIDE_TERMS.has(keyword)) ? EUROPE_WIDE_TERMS : []),
+  ]);
+  const targetEntries = [...alwaysAllowEntries, ...allowEntries]
+    .filter((entry) => !generic.has(entry.normalized) && !europeWide.has(entry.normalized))
+    .filter((entry, index, entries) => entries.findIndex((candidate) => candidate.normalized === entry.normalized) === index);
+  const configuredIso = [...TARGET_COUNTRY_ISO]
+    .filter(([country]) => targetEntries.some((entry) => entry.normalized === country))
+    .map(([country, iso]) => ({ iso, raw: targetEntries.find((entry) => entry.normalized === country).raw }));
+
+  const findTarget = (text, { structured = false, permitShort = true } = {}) => {
+    const entry = targetEntries.find((candidate) => (
+      (permitShort || candidate.normalized.length > 3) && locationTextMatches(text, candidate.normalized)
+    ));
+    if (entry) return entry.raw;
+    if (structured) {
+      const alias = configuredIso.find(({ iso }) => locationTextMatches(text, iso));
+      if (alias) return alias.raw;
+    }
+    return '';
   };
+  const findEurope = (text) => [...europeWide].find((keyword) => locationTextMatches(text, keyword)) || '';
+  const isTargetScope = (scope) => Boolean(
+    findTarget(scope.toLowerCase(), { structured: true }) || findEurope(scope.toLowerCase()),
+  );
 
   return (location, url = '', title = '') => {
     const locationText = typeof location === 'string' ? location.trim() : '';
-    let urlText = '';
-    try { urlText = decodeURIComponent(new URL(url).pathname).replace(/[-_/]+/g, ' '); } catch {}
-    const remoteTitle = /\bremote\b/i.test(title) ? ' remote ' : '';
-    const lower = `${locationText} ${urlText}${remoteTitle}`.toLowerCase();
-    if (!locationText && ![...alwaysAllow, ...allow, ...block].some((keyword) => matches(lower, keyword))) return true;
-    const explicitlyAllowed = alwaysAllow.some((keyword) => keyword !== 'remote' && matches(lower, keyword));
-    if (block.length > 0 && block.some(k => matches(lower, k)) && !explicitlyAllowed) return false;
-    if (alwaysAllow.length > 0 && alwaysAllow.some(k => matches(lower, k))) return true;
-    if (allow.length === 0) return true;
-    return allow.some(k => matches(lower, k));
+    const titleText = typeof title === 'string' ? title.trim() : '';
+    const locationLower = locationText.toLowerCase();
+    const titleLower = titleText.toLowerCase();
+
+    for (const [source, value] of [['location', locationText], ['title', titleText]]) {
+      const restriction = explicitRestrictionScope(value);
+      if (restriction && !isTargetScope(restriction)) {
+        return { status: 'ineligible', code: 'remote_restricted_elsewhere', matched: restriction, source };
+      }
+    }
+
+    const locationTarget = findTarget(locationLower, { structured: true });
+    if (locationTarget) return { status: 'eligible', code: 'target_region', matched: locationTarget, source: 'location' };
+    if (findEurope(locationLower)) return { status: 'eligible', code: 'europe_wide', matched: 'Europe', source: 'location' };
+    const titleTarget = findTarget(titleLower);
+    if (titleTarget) return { status: 'eligible', code: 'target_region', matched: titleTarget, source: 'title' };
+    if (findEurope(titleLower)) return { status: 'eligible', code: 'europe_wide', matched: 'Europe', source: 'title' };
+
+    // With no allow-list, retain the historical block-only behavior.
+    if (targetEntries.length === 0 && europeWide.size === 0 && allow.length === 0 && alwaysAllow.length === 0) {
+      const blockedMatch = block.find((keyword) => locationTextMatches(locationLower, keyword));
+      if (blockedMatch) return { status: 'ineligible', code: 'blocked_region', matched: blockedMatch, source: 'location' };
+      return { status: 'eligible', code: 'allowlist_disabled' };
+    }
+
+    const blockedMatch = block.find((keyword) => locationTextMatches(locationLower, keyword));
+    if (blockedMatch) return { status: 'ineligible', code: 'blocked_region', matched: blockedMatch, source: 'location' };
+
+    const genericMatch = [...generic].find((keyword) => locationTextMatches(locationLower, keyword));
+    const unknownLocation = !locationText || /^(?:unknown|unspecified|not specified|n\/?a|multiple locations)$/i.test(locationText);
+
+    if (unknownLocation || nonGeographicLocation(locationText, generic)) {
+      let urlText = '';
+      try {
+        const path = decodeURIComponent(new URL(url).pathname);
+        const jobPath = path.match(/(?:^|\/)(?:jobs?|careers?|roles?|positions?|openings?|vacancies|apply)(?:\/|$)/i);
+        if (jobPath) {
+          urlText = path.slice(jobPath.index).replace(/[-_/]+/g, ' ').toLowerCase();
+        }
+      } catch {}
+      const urlTarget = findTarget(urlText, { permitShort: false });
+      if (urlTarget) return { status: 'eligible', code: 'target_region', matched: urlTarget, source: 'url' };
+      if (findEurope(urlText)) return { status: 'eligible', code: 'europe_wide', matched: 'Europe', source: 'url' };
+      if (unknownLocation && !genericMatch) return { status: 'uncertain', code: 'missing_location' };
+      return { status: 'uncertain', code: genericMatch ? 'generic_remote_only' : 'non_geographic_location' };
+    }
+
+    return { status: 'ineligible', code: 'outside_target_region' };
   };
+}
+
+export function buildLocationFilter(locationFilter) {
+  const classify = buildLocationClassifier(locationFilter);
+  const filter = (location, url = '', title = '') => classify(location, url, title).status !== 'ineligible';
+  filter.classify = classify;
+  return filter;
 }
 
 export function parseSinceDays(args, defaultDays = null) {
@@ -219,6 +353,30 @@ export function normalizeUrlForDedup(rawUrl) {
   } catch {
     return String(rawUrl ?? '').trim();
   }
+}
+
+function stripBareProsePunctuation(value) {
+  return value.replace(/[.,;!]+$/, '');
+}
+
+export function extractHttpUrlsFromMarkdown(text) {
+  if (typeof text !== 'string' || !text) return [];
+  const urls = new Set();
+  const add = (value, { prose = false } = {}) => {
+    const candidate = prose ? stripBareProsePunctuation(value) : value;
+    try {
+      const parsed = new URL(candidate);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') urls.add(parsed.href);
+    } catch {}
+  };
+
+  for (const match of text.matchAll(/\[[^\]]*\]\(\s*<?(https?:\/\/[^\s>)]+)>?\s*\)/gi)) add(match[1]);
+  for (const match of text.matchAll(/<(https?:\/\/[^\s<>]+)>/gi)) add(match[1]);
+  // Tracker notes use an explicit `URL:` label and semicolons to separate the
+  // following prose field. Parse that grammar before the generic fallback.
+  for (const match of text.matchAll(/\bURL:\s*(https?:\/\/[^\s|;]+)/gi)) add(match[1]);
+  for (const match of text.matchAll(/https?:\/\/[^\s<>"'()[\]|]+/gi)) add(match[0], { prose: true });
+  return [...urls];
 }
 
 // ── Content filter ──────────────────────────────────────────────────
@@ -580,13 +738,16 @@ function scanHistoryPolicy(config = {}) {
   };
 }
 
-export function loadSeenUrls(policy = {}) {
+export function loadSeenUrls(policy = {}, paths = {}) {
   const seen = new Set();
   let recheckEligible = 0;
+  const scanHistoryPath = paths.scanHistoryPath || SCAN_HISTORY_PATH;
+  const pipelinePath = paths.pipelinePath || PIPELINE_PATH;
+  const applicationsPath = paths.applicationsPath || APPLICATIONS_PATH;
 
   // scan-history.tsv
-  if (existsSync(SCAN_HISTORY_PATH)) {
-    const lines = readFileSync(SCAN_HISTORY_PATH, 'utf-8').split('\n');
+  if (existsSync(scanHistoryPath)) {
+    const lines = readFileSync(scanHistoryPath, 'utf-8').split('\n');
     for (const line of lines.slice(1)) { // skip header
       const [url, firstSeen, , , , status = 'added'] = line.split('\t');
       if (!url) continue;
@@ -596,19 +757,15 @@ export function loadSeenUrls(policy = {}) {
   }
 
   // pipeline.md — extract URLs from checkbox lines
-  if (existsSync(PIPELINE_PATH)) {
-    const text = readFileSync(PIPELINE_PATH, 'utf-8');
-    for (const match of text.matchAll(/- \[[ x]\] (https?:\/\/\S+)/g)) {
-      seen.add(normalizeUrlForDedup(match[1]));
-    }
+  if (existsSync(pipelinePath)) {
+    const text = readFileSync(pipelinePath, 'utf-8');
+    for (const url of extractHttpUrlsFromMarkdown(text)) seen.add(normalizeUrlForDedup(url));
   }
 
   // applications.md — extract URLs from report links and any inline URLs
-  if (existsSync(APPLICATIONS_PATH)) {
-    const text = readFileSync(APPLICATIONS_PATH, 'utf-8');
-    for (const match of text.matchAll(/https?:\/\/[^\s|)]+/g)) {
-      seen.add(normalizeUrlForDedup(match[0]));
-    }
+  if (existsSync(applicationsPath)) {
+    const text = readFileSync(applicationsPath, 'utf-8');
+    for (const url of extractHttpUrlsFromMarkdown(text)) seen.add(normalizeUrlForDedup(url));
   }
 
   return { seen, recheckEligible };
@@ -964,7 +1121,14 @@ async function verifyOffers(offers, { headedFallback = false, throttleBaseMs = 0
             // 'uncertain' (timeout/DNS/5xx) must not commit an unverified URL —
             // fall through to expired (the original 404/410 is a real closure).
             if (recheck.result === 'active') {
-              migrated.push({ ...offer, url: newUrl, previousUrl: offer.url });
+              migrated.push({
+                ...offer,
+                url: newUrl,
+                previousUrl: offer.url,
+                livenessStatus: recheck.result,
+                livenessCode: recheck.code,
+                livenessReason: recheck.reason,
+              });
               console.log(`  🔄 migrated  ${offer.company} | ${offer.title} → ${newUrl}`);
               continue;
             }
@@ -985,7 +1149,12 @@ async function verifyOffers(offers, { headedFallback = false, throttleBaseMs = 0
         console.log(`  ⚠️ no-apply  ${offer.company} | ${offer.title} (${reason})`);
       } else {
         // 'active' or 'uncertain' due to navigation_error (transient — retry next scan)
-        verified.push(offer);
+        verified.push({
+          ...offer,
+          livenessStatus: result,
+          livenessCode: code,
+          livenessReason: reason,
+        });
         const icon = result === 'active' ? '✅' : '⚠️';
         console.log(`  ${icon} ${result.padEnd(9)} ${offer.company} | ${offer.title}`);
       }
@@ -1124,7 +1293,7 @@ async function main() {
       }
       
       if (resolved.error) { 
-        resolveErrors.push({ company: entry.name, error: resolved.error }); 
+        resolveErrors.push({ company: entry.name, error: resolved.error, kind: 'provider_resolution' });
         continue; 
       }
       
@@ -1170,9 +1339,11 @@ async function main() {
   const newOffersByCompanyRole = new Map();
   const newOffersByCandidateId = new Map();
   const errors = [...resolveErrors];
+  const degradedDiagnostics = [];
   const emptyTargets = [];
+  const degradedTargetHealth = new Map();
   let successfulTargets = 0;
-  let failedTargets = 0;
+  let failedTargets = resolveErrors.length;
   let degradedTargets = 0;
 
   const tasks = targets.map(company => async () => {
@@ -1187,22 +1358,46 @@ async function main() {
       } catch (parserErr) {
         if (provider.id !== 'local-parser') throw parserErr;
         const fallback = resolveProvider(company, providers, { skipIds: ['local-parser'] });
-        if (!fallback || fallback.error) throw parserErr;
+        if (!fallback || fallback.error) {
+          const fallbackReason = fallback?.error || 'no fallback provider matched';
+          const combined = new Error(`local parser failed: ${parserErr.message}; fallback failed: ${fallbackReason}`);
+          combined.scanKind = fallback?.error ? 'provider_resolution' : classifyFetchError(parserErr);
+          throw combined;
+        }
         provider = fallback.provider;
         sourceName = `${provider.id}-api`;
-        jobs = await provider.fetch(company, ctx);
-        errors.push({
+        try {
+          jobs = await provider.fetch(company, ctx);
+        } catch (fallbackErr) {
+          const combined = new Error(`local parser failed: ${parserErr.message}; ${provider.id} fallback failed: ${fallbackErr.message}`);
+          combined.status = fallbackErr.status;
+          combined.kind = fallbackErr.kind;
+          combined.scanKind = classifyFetchError(fallbackErr);
+          throw combined;
+        }
+        degradedDiagnostics.push({
           company: company.name,
           error: `local parser failed, used API fallback: ${parserErr.message}`,
+          kind: 'fallback',
         });
+        degradedTargetHealth.set(company.name, 'partial:fallback');
         targetDegraded = true;
       }
       if (!Array.isArray(jobs)) {
         throw new Error(`${provider.id}: fetch() did not return an array`);
       }
-      if (jobs.providerDegraded) {
+      const coverage = providerCoverage(jobs);
+      if (coverage?.status === 'partial') {
         targetDegraded = true;
-        errors.push({ company: company.name, error: `${provider.id}: partial provider result`, kind: 'partial' });
+        if (!degradedTargetHealth.has(company.name)) {
+          degradedTargetHealth.set(company.name, `partial:${coverage.code}`);
+        }
+        degradedDiagnostics.push({
+          company: company.name,
+          error: `${provider.id}: ${coverage.reason}`,
+          kind: 'partial',
+          coverage,
+        });
       }
       if (targetDegraded) degradedTargets++;
       successfulTargets++;
@@ -1241,7 +1436,12 @@ async function main() {
           totalFilteredTier++;
           continue;
         }
-        if (!locationFilter(job.location, job.url, job.title)) {
+        const locationEligibility = locationFilter.classify(job.location, job.url, job.title);
+        job.locationEligibility = locationEligibility.status;
+        job.locationEligibilityCode = locationEligibility.code;
+        job.locationEligibilityMatch = locationEligibility.matched;
+        job.locationEligibilitySource = locationEligibility.source;
+        if (locationEligibility.status === 'ineligible') {
           totalFilteredLocation++;
           continue;
         }
@@ -1303,13 +1503,13 @@ async function main() {
       errors.push({
         company: company.name,
         error: err.message,
-        kind: classifyFetchError(err),
+        kind: err.scanKind || classifyFetchError(err),
       });
     }
   });
 
   await parallelFetch(tasks, CONCURRENCY);
-  const attemptedTargets = targets.length;
+  const attemptedTargets = targets.length + resolveErrors.length;
   const completionStatus = attemptedTargets === 0
     ? (agentHandoff.length > 0 ? 'handoff_only' : 'no_executable_targets')
     : successfulTargets === 0
@@ -1422,7 +1622,9 @@ async function main() {
   console.log(`Companies scanned:     ${summaryCompanies}`);
   if (summaryBoards > 0) console.log(`Job boards scanned:    ${summaryBoards}`);
   console.log(`Targets succeeded:     ${successfulTargets}/${attemptedTargets}`);
-  console.log(`Completion status:     ${completionStatus}${completionStatus === 'partial' ? ' (degraded)' : ''}`);
+  console.log(`Targets failed:        ${failedTargets}`);
+  console.log(`Targets degraded:      ${degradedTargets}`);
+  console.log(`Completion status:     ${completionStatus}`);
   console.log(`Total jobs found:      ${totalFound}`);
   console.log(`Filtered by title:     ${totalFilteredTitle} removed`);
   if (skipTiers.length > 0) {
@@ -1489,15 +1691,24 @@ async function main() {
   }
 
   const unreachableTargets = errors.filter((e) => e.kind === 'slug_gone');
+  const endpointGoneTargets = errors.filter((e) => e.kind === 'endpoint_gone');
   const networkTargets = errors.filter((e) => e.kind === 'network');
-  const otherErrors = errors.filter((e) => e.kind !== 'slug_gone' && e.kind !== 'network');
+  const partialTargets = degradedDiagnostics.filter((e) => e.kind === 'partial');
+  const fallbackTargets = degradedDiagnostics.filter((e) => e.kind === 'fallback');
+  const otherErrors = errors.filter((e) => !['slug_gone', 'endpoint_gone', 'network'].includes(e.kind));
   const nowStr = new Date().toISOString();
   const errorKindByCompany = new Map(errors.filter((error) => error.kind).map((error) => [error.company, error.kind]));
-  const healthRecords = targets.map((target) => ({
+  const healthByCompany = new Map(targets.map((target) => [target.name, {
     timestamp: nowStr,
     company: target.name,
-    status: errorKindByCompany.get(target.name) || (emptyTargets.includes(target.name) ? 'empty' : 'reachable'),
-  }));
+    status: degradedTargetHealth.get(target.name)
+      || errorKindByCompany.get(target.name)
+      || (emptyTargets.includes(target.name) ? 'empty' : 'reachable'),
+  }]));
+  for (const error of resolveErrors) {
+    healthByCompany.set(error.company, { timestamp: nowStr, company: error.company, status: 'provider_resolution' });
+  }
+  const healthRecords = [...healthByCompany.values()];
   const streaks = computeConsecutiveFailures([...loadPortalHealth(), ...healthRecords]);
   const threshold = Number(config.portal_health_threshold) > 0 ? Number(config.portal_health_threshold) : 3;
   const persistent = [...new Set(errors.filter((error) => (streaks.get(error.company) || 0) >= threshold).map((error) => error.company))];
@@ -1506,6 +1717,18 @@ async function main() {
   if (unreachableTargets.length > 0) {
     const names = unreachableTargets.map((e) => e.company).join(', ');
     console.log(`\n⚠️  ${unreachableTargets.length} target(s) unreachable (slug?): ${names} — run: node verify-portals.mjs`);
+  }
+  if (endpointGoneTargets.length > 0) {
+    const names = endpointGoneTargets.map((e) => e.company).join(', ');
+    console.log(`\n⚠️  ${endpointGoneTargets.length} provider endpoint(s) gone: ${names} — inspect provider support before replacing the endpoint`);
+  }
+  if (partialTargets.length > 0) {
+    console.log(`\n🟠 ${partialTargets.length} target(s) returned partial coverage while retaining fetched jobs:`);
+    for (const e of partialTargets) console.log(`  ◐ ${e.company}: ${e.error}`);
+  }
+  if (fallbackTargets.length > 0) {
+    console.log(`\n🟠 ${fallbackTargets.length} target(s) succeeded through a fallback provider:`);
+    for (const e of fallbackTargets) console.log(`  ◐ ${e.company}: ${e.error}`);
   }
   if (emptyTargets.length > 0) {
     console.log(`🟡 ${emptyTargets.length} target(s) live but empty: ${emptyTargets.join(', ')}`);

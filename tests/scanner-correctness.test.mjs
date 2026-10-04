@@ -4,9 +4,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   buildLocationFilter,
+  buildLocationClassifier,
+  extractHttpUrlsFromMarkdown,
+  loadSeenUrls,
   normalizeUrlForDedup,
   parseSinceDays,
   shouldDedupScanHistoryRow,
@@ -21,6 +24,7 @@ import radancy from '../providers/radancy.mjs';
 import successfactors from '../providers/successfactors.mjs';
 import greenhouse from '../providers/greenhouse.mjs';
 import { verifyFullyRemote } from '../providers/arbeitsagentur.mjs';
+import { classifyFetchError } from '../verify-portals.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
@@ -29,8 +33,11 @@ function writePortals(file, entries) {
     'tracked_companies:',
     ...entries.flatMap((entry) => [
       `  - name: ${entry.name}`,
-      '    provider: fixture',
-      `    mode: ${entry.mode}`,
+      ...(entry.provider === null ? [] : [`    provider: ${entry.provider || 'fixture'}`]),
+      ...(entry.mode ? [`    mode: ${entry.mode}`] : []),
+      ...(entry.careers_url ? [`    careers_url: ${entry.careers_url}`] : []),
+      ...(entry.scan_method ? [`    scan_method: ${entry.scan_method}`] : []),
+      ...(entry.parser ? ['    parser:', '      command: node', '      script: fixture-parser.mjs'] : []),
     ]),
     'title_filter:',
     '  positive: [Engineer]',
@@ -43,13 +50,38 @@ function standardScanFixture(entries, runId) {
   const data = join(dir, 'data');
   mkdirSync(providers);
   mkdirSync(data);
-  writeFileSync(join(providers, 'fixture.mjs'), `export default {
+  const resultHelper = pathToFileURL(join(ROOT, 'providers', '_result.mjs')).href;
+  writeFileSync(join(providers, 'fixture.mjs'), `import { markProviderCoverage } from ${JSON.stringify(resultHelper)};
+  export default {
     id: 'fixture',
     async fetch(entry) {
       if (entry.mode === 'throw') throw new Error('fictional provider unavailable');
       if (entry.mode === 'two') return [1, 2].map((id) => ({ company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/role-' + id, location: 'Helsinki, Finland' }));
       if (entry.mode === 'job') return [{ company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/Role', location: 'Helsinki, Finland' }];
+      if (entry.mode === 'degraded') {
+        const jobs = [{ company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/partial', location: 'Helsinki, Finland' }];
+        Object.defineProperty(jobs, 'providerDegraded', { value: true });
+        Object.defineProperty(jobs, 'providerDegradedReason', { value: 'fixture pagination truncated' });
+        return jobs;
+      }
+      if (entry.mode === 'typed-degraded') {
+        const jobs = [{ company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/typed-partial', location: 'Helsinki, Finland' }];
+        return markProviderCoverage(jobs, { status: 'partial', code: 'max_pages', reason: 'fixture reached max pages', pagesFetched: 2, maxPages: 2 });
+      }
       return [];
+    },
+  };\n`);
+  writeFileSync(join(providers, 'local-parser.mjs'), `export default {
+    id: 'local-parser',
+    detect(entry) { return entry.parser || null; },
+    async fetch() { throw new Error('primary parser exploded'); },
+  };\n`);
+  writeFileSync(join(providers, 'fallback.mjs'), `export default {
+    id: 'fallback',
+    detect(entry) { return entry.careers_url?.includes('fallback.example') || null; },
+    async fetch(entry) {
+      if (entry.mode === 'fallback-throws') throw new Error('fallback network exploded');
+      return [{ company: entry.name, title: 'Backend Engineer', url: 'https://fallback.example/jobs/' + entry.name, location: 'Helsinki, Finland' }];
     },
   };\n`);
   const portals = join(dir, 'portals.yml');
@@ -70,7 +102,16 @@ function standardScanFixture(entries, runId) {
       CAREER_OPS_NO_DNS_CACHE: '1',
     },
   });
-  return { dir, data, pipeline, history, result, runDir: join(dir, 'output', 'scan-runs', runId) };
+  return {
+    dir, data, pipeline, history, result,
+    scanRuns: join(data, 'scan-runs.tsv'),
+    runDir: join(dir, 'output', 'scan-runs', runId),
+  };
+}
+
+function lastTsvRow(file) {
+  const [header, ...rows] = readFileSync(file, 'utf8').trim().split(/\r?\n/);
+  return Object.fromEntries(header.split('\t').map((key, index) => [key, rows.at(-1).split('\t')[index]]));
 }
 
 function reverseScanFixture({ resolver = false } = {}) {
@@ -129,6 +170,32 @@ test('URL dedup removes cosmetic presentation without changing path case', () =>
   assert.equal(left, right);
   assert.notEqual(normalizeUrlForDedup('https://example.com/Jobs/Role'), normalizeUrlForDedup('https://example.com/jobs/role'));
   assert.notEqual(normalizeUrlForDedup('https://example.com/jobs/role?team=one'), right);
+  assert.notEqual(normalizeUrlForDedup('https://example.com/jobs/role;'), right);
+});
+
+test('application-history URL extraction respects Markdown and prose delimiters', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'career-ops-seen-urls-'));
+  try {
+    const history = join(dir, 'scan-history.tsv');
+    const pipeline = join(dir, 'pipeline.md');
+    const applications = join(dir, 'applications.md');
+    writeFileSync(history, 'url\tfirst_seen\tportal\ttitle\tcompany\tstatus\tlocation\nhttps://history.example/job/1\t2026-08-08\tfixture\tRole\tCo\tadded\tFinland\n');
+    writeFileSync(pipeline, '- [ ] https://pipeline.example/job/2 | Co | Role\n');
+    writeFileSync(applications, [
+      '| Company | Role | Notes |',
+      '|---|---|---|',
+      '| Hone Health | Data Engineering Intern | URL: https://himalayas.app/companies/hone-health/jobs/data-engineering-intern-fall-2026; CV variant not recorded. |',
+      '| Acme | Engineer | [https://example.com/job/123](https://example.com/job/123). |',
+    ].join('\n'));
+    const { seen } = loadSeenUrls({}, { scanHistoryPath: history, pipelinePath: pipeline, applicationsPath: applications });
+    assert.ok(seen.has(normalizeUrlForDedup('https://history.example/job/1')));
+    assert.ok(seen.has(normalizeUrlForDedup('https://pipeline.example/job/2')));
+    assert.ok(seen.has(normalizeUrlForDedup('https://himalayas.app/companies/hone-health/jobs/data-engineering-intern-fall-2026')));
+    assert.ok(seen.has(normalizeUrlForDedup('https://example.com/job/123')));
+    assert.deepEqual(extractHttpUrlsFromMarkdown('[x](https://example.com/job/123).'), ['https://example.com/job/123']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('standard scan CLI distinguishes healthy empty, failed, and partial completion', () => {
@@ -147,11 +214,138 @@ test('standard scan CLI distinguishes healthy empty, failed, and partial complet
     assert.equal(readFileSync(failed.history, 'utf8'), 'url\tfirst_seen\tportal\ttitle\tcompany\tstatus\tlocation\n');
 
     assert.equal(partial.result.status, 0, partial.result.stderr);
-    assert.match(partial.result.stdout, /Completion status:\s+partial \(degraded\)/);
+    assert.match(partial.result.stdout, /Targets failed:\s+1/);
+    assert.match(partial.result.stdout, /Targets degraded:\s+0/);
+    assert.match(partial.result.stdout, /Completion status:\s+partial/);
     assert.equal(existsSync(partial.runDir), true);
     assert.match(readFileSync(partial.pipeline, 'utf8'), /Backend Engineer/);
   } finally {
     for (const fixture of [healthy, failed, partial]) rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test('standard scan counts partial provider coverage as degraded while retaining jobs', () => {
+  const fixture = standardScanFixture([{ name: 'Truncated', mode: 'degraded' }], 'degraded-provider');
+  try {
+    assert.equal(fixture.result.status, 0, fixture.result.stderr);
+    assert.match(fixture.result.stdout, /Targets failed:\s+0/);
+    assert.match(fixture.result.stdout, /Targets degraded:\s+1/);
+    assert.match(fixture.result.stdout, /Completion status:\s+partial/);
+    assert.match(readFileSync(fixture.pipeline, 'utf8'), /\/partial/);
+    const manifest = JSON.parse(readFileSync(join(fixture.runDir, 'manifest.json'), 'utf8'));
+    assert.equal(manifest.metadata.targets_succeeded, 1);
+    assert.equal(manifest.metadata.targets_degraded, 1);
+    assert.equal(manifest.metadata.targets_failed, 0);
+    const health = readFileSync(join(fixture.data, 'portal-health.tsv'), 'utf8');
+    assert.match(health, /Truncated\tpartial:provider_degraded/);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test('typed partial coverage is a degraded success, not an error', () => {
+  const fixture = standardScanFixture([{ name: 'Typed', mode: 'typed-degraded' }], 'typed-degraded-provider');
+  try {
+    assert.equal(fixture.result.status, 0, fixture.result.stderr);
+    assert.match(fixture.result.stdout, /Targets succeeded:\s+1\/1/);
+    assert.match(fixture.result.stdout, /Targets failed:\s+0/);
+    assert.match(fixture.result.stdout, /Targets degraded:\s+1/);
+    assert.match(fixture.result.stdout, /Completion status:\s+partial/);
+    assert.doesNotMatch(fixture.result.stdout, /Errors \(/);
+    assert.match(readFileSync(fixture.pipeline, 'utf8'), /typed-partial/);
+    const manifest = JSON.parse(readFileSync(join(fixture.runDir, 'manifest.json'), 'utf8'));
+    assert.deepEqual([
+      manifest.metadata.targets_attempted,
+      manifest.metadata.targets_succeeded,
+      manifest.metadata.targets_failed,
+      manifest.metadata.targets_degraded,
+    ], [1, 1, 0, 1]);
+    assert.match(readFileSync(join(fixture.data, 'portal-health.tsv'), 'utf8'), /Typed\tpartial:max_pages/);
+    assert.equal(lastTsvRow(fixture.scanRuns).errors, '0');
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test('local parser fallback reports degraded success and preserves both causes when fallback fails', () => {
+  const recovered = standardScanFixture([{
+    name: 'Recovered', provider: null, parser: true, careers_url: 'https://fallback.example/jobs', mode: 'fallback-ok',
+  }], 'parser-fallback-success');
+  const failed = standardScanFixture([{
+    name: 'DoubleBroken', provider: null, parser: true, careers_url: 'https://fallback.example/jobs', mode: 'fallback-throws',
+  }], 'parser-fallback-failed');
+  try {
+    assert.equal(recovered.result.status, 0, recovered.result.stderr);
+    assert.match(recovered.result.stdout, /Targets succeeded:\s+1\/1/);
+    assert.match(recovered.result.stdout, /Targets failed:\s+0/);
+    assert.match(recovered.result.stdout, /Targets degraded:\s+1/);
+    assert.match(recovered.result.stdout, /succeeded through a fallback provider/);
+    assert.match(readFileSync(join(recovered.data, 'portal-health.tsv'), 'utf8'), /Recovered\tpartial:fallback/);
+    assert.equal(lastTsvRow(recovered.scanRuns).errors, '0');
+
+    assert.notEqual(failed.result.status, 0);
+    assert.match(failed.result.stdout + failed.result.stderr, /primary parser exploded/);
+    assert.match(failed.result.stdout + failed.result.stderr, /fallback network exploded/);
+    assert.match(failed.result.stdout, /Targets succeeded:\s+0\/1/);
+    assert.match(failed.result.stdout, /Targets failed:\s+1/);
+    assert.match(failed.result.stdout, /Targets degraded:\s+0/);
+    assert.match(failed.result.stdout, /Completion status:\s+failed/);
+  } finally {
+    rmSync(recovered.dir, { recursive: true, force: true });
+    rmSync(failed.dir, { recursive: true, force: true });
+  }
+});
+
+test('provider resolution failures count as attempted failures while WebSearch handoffs do not', () => {
+  const mixed = standardScanFixture([
+    { name: 'Working', mode: 'job' },
+    { name: 'Unresolved', provider: 'missing-provider' },
+  ], 'resolution-mixed');
+  const failed = standardScanFixture([{ name: 'UnresolvedOnly', provider: 'missing-provider' }], 'resolution-only');
+  const handoff = standardScanFixture([{ name: 'SearchOnly', provider: null, scan_method: 'websearch' }], 'handoff-only');
+  try {
+    assert.equal(mixed.result.status, 0, mixed.result.stderr);
+    assert.match(mixed.result.stdout, /Targets succeeded:\s+1\/2/);
+    assert.match(mixed.result.stdout, /Targets failed:\s+1/);
+    assert.match(mixed.result.stdout, /Targets degraded:\s+0/);
+    assert.match(mixed.result.stdout, /Completion status:\s+partial/);
+    const manifest = JSON.parse(readFileSync(join(mixed.runDir, 'manifest.json'), 'utf8'));
+    assert.deepEqual([
+      manifest.metadata.targets_attempted,
+      manifest.metadata.targets_succeeded,
+      manifest.metadata.targets_failed,
+      manifest.metadata.targets_degraded,
+    ], [2, 1, 1, 0]);
+    assert.match(readFileSync(join(mixed.data, 'portal-health.tsv'), 'utf8'), /Unresolved\tprovider_resolution/);
+    assert.equal(lastTsvRow(mixed.scanRuns).errors, '1');
+
+    assert.notEqual(failed.result.status, 0);
+    assert.match(failed.result.stdout, /Targets succeeded:\s+0\/1/);
+    assert.match(failed.result.stdout, /Targets failed:\s+1/);
+    assert.match(failed.result.stdout, /Completion status:\s+failed/);
+
+    assert.equal(handoff.result.status, 0, handoff.result.stderr);
+    assert.match(handoff.result.stdout, /Targets succeeded:\s+0\/0/);
+    assert.match(handoff.result.stdout, /Targets failed:\s+0/);
+    assert.match(handoff.result.stdout, /Completion status:\s+handoff_only/);
+  } finally {
+    for (const fixture of [mixed, failed, handoff]) rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test('failed and degraded targets remain separate dimensions in the same partial run', () => {
+  const fixture = standardScanFixture([
+    { name: 'Typed', mode: 'typed-degraded' },
+    { name: 'Broken', mode: 'throw' },
+  ], 'failed-and-degraded');
+  try {
+    assert.equal(fixture.result.status, 0, fixture.result.stderr);
+    assert.match(fixture.result.stdout, /Targets succeeded:\s+1\/2/);
+    assert.match(fixture.result.stdout, /Targets failed:\s+1/);
+    assert.match(fixture.result.stdout, /Targets degraded:\s+1/);
+    assert.equal(lastTsvRow(fixture.scanRuns).errors, '1');
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
   }
 });
 
@@ -257,7 +451,7 @@ test('location filters use token boundaries and cannot let generic remote bypass
   assert.equal(finland('', 'https://jobs.example/roles/helsinki-finland/123', 'Engineer'), true);
 
   const remote = buildLocationFilter({ always_allow: ['remote'], allow: ['finland'], block: ['spain'] });
-  assert.equal(remote('Madrid, Spain', 'https://jobs.example/123', 'Backend Engineer — Remote Europe'), false);
+  assert.equal(remote('Madrid, Spain', 'https://jobs.example/123', 'Backend Engineer — Remote'), false);
 });
 
 test('location filtering requires explicit allowed-region evidence over blocked geography', () => {
@@ -266,6 +460,61 @@ test('location filtering requires explicit allowed-region evidence over blocked 
   assert.equal(filter('Madrid, Spain', '', 'Remote Engineer'), false);
   assert.equal(filter('Remote Europe', '', 'Engineer'), true);
   assert.equal(filter('New York, United States; Helsinki, Finland', '', 'Engineer'), true);
+});
+
+test('location eligibility is source-aware across targets, restrictions, ISO codes, and non-geographic values', () => {
+  const classify = buildLocationClassifier({
+    always_allow: ['Finland', 'Helsinki', 'Germany', 'Berlin', 'Denmark', 'Copenhagen', 'Netherlands', 'Amsterdam'],
+    allow: ['Remote Europe', 'Europe', 'European Union', 'EU', 'EEA', 'Remote', 'Worldwide'],
+    block: ['United States', 'USA', 'US only'],
+  });
+  const eligible = [
+    ['Berlin, Germany'],
+    ['', '', 'Software Engineer - Berlin'],
+    ['United States', '', 'Software Engineer - Berlin'],
+    ['United States; Helsinki, Finland'],
+    ['Remote Europe'], ['Europe'], ['EU'], ['EEA'], ['European Union'], ['European Economic Area'],
+    ['Karlsruhe, DE'], ['Groningen, NL'], ['Herning, DK'], ['Kuopio, FI'],
+    ['Remote', 'https://jobs.example/jobs/berlin/backend-engineer', 'Backend Engineer'],
+  ];
+  for (const args of eligible) assert.equal(classify(...args).status, 'eligible', args.join(' | '));
+
+  const titleEvidence = classify('United States', '', 'Software Engineer - Berlin');
+  assert.deepEqual(titleEvidence, { status: 'eligible', code: 'target_region', matched: 'Berlin', source: 'title' });
+  const isoEvidence = classify('Herning, DK');
+  assert.equal(isoEvidence.matched, 'Denmark');
+  assert.equal(isoEvidence.source, 'location');
+  const urlEvidence = classify('Remote', 'https://jobs.example/jobs/berlin/backend-engineer', 'Backend Engineer');
+  assert.equal(urlEvidence.source, 'url');
+
+  const ineligible = [
+    ['US only'], ['US only', '', 'Software Engineer - Berlin'], ['Remote - US only'],
+    ['Remote - Mexico'], ['Japan only'], ['North America only'], ['Madrid, Spain'],
+    ['Toronto, Canada'], ['Spain, Remote'],
+    ['US only', 'https://jobs.example/jobs/berlin/backend-engineer', 'Backend Engineer'],
+  ];
+  for (const args of ineligible) assert.equal(classify(...args).status, 'ineligible', args.join(' | '));
+
+  const uncertain = [
+    ['Remote'], ['Worldwide'], ['Global'], ['Anywhere in the World'], ['EMEA'], [''], ['Unknown'],
+    ['Hybrid'], ['On-site'], ['Onsite'], ['Flexible'], ['Office / Remote'], ['Remote / Hybrid'],
+    ['Remote, CET'], ['Remote, CEST'], ['Remote, GMT'], ['Remote, UTC+2'],
+    ['Remote, UTC+1 to UTC+3'], ['CET'], ['UTC+2'], ['office'],
+    ['Remote', 'https://jobs.example/de/jobs/backend-engineer', 'Backend Engineer'],
+    ['Remote', 'https://jobs.example/eu/jobs/backend-engineer', 'Backend Engineer'],
+    ['', 'https://jobs.example/jobs/de/backend-engineer', 'Backend Engineer'],
+    ['', '', 'Backend Engineer DE'], ['', '', 'Backend Engineer define'],
+  ];
+  for (const args of uncertain) assert.equal(classify(...args).status, 'uncertain', args.join(' | '));
+
+  for (const country of ['Finland', 'Germany', 'Denmark', 'Netherlands']) {
+    const withoutCountry = buildLocationClassifier({
+      allow: ['Remote'],
+      always_allow: ['Finland', 'Germany', 'Denmark', 'Netherlands'].filter((value) => value !== country),
+    });
+    const iso = { Finland: 'FI', Germany: 'DE', Denmark: 'DK', Netherlands: 'NL' }[country];
+    assert.notEqual(withoutCountry(`Somewhere, ${iso}`).status, 'eligible', country);
+  }
 });
 
 test('uncertain liveness remains retryable and Workday 200 requires a posting shape', () => {
@@ -343,6 +592,13 @@ test('portal health appends are locked and every failure kind contributes to str
       { company: 'Blocked', status: 'unknown' },
     ]).get('Blocked'), 3);
     assert.equal(computeConsecutiveFailures(records).get('Acme'), 0);
+    assert.equal(computeConsecutiveFailures([
+      { company: 'Partial', status: 'server' },
+      { company: 'Partial', status: 'partial:max_pages' },
+    ]).get('Partial'), 0);
+    assert.equal(computeConsecutiveFailures([{ company: 'Malformed' }]).get('Malformed'), 1);
+    assert.equal(classifyFetchError({ status: 404 }), 'slug_gone');
+    assert.equal(classifyFetchError({ status: 404, kind: 'endpoint_gone' }), 'endpoint_gone');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

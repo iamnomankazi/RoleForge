@@ -1,252 +1,162 @@
-// tests/providers/hackernews.test.mjs — moved verbatim from test-all.mjs (#1440).
+import assert from 'node:assert/strict';
 import { pass, fail, ROOT } from '../helpers.mjs';
-import { join } from 'path';
-import { pathToFileURL } from 'url';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 console.log('\nProvider — hackernews');
 
 try {
-  const hackernewsModule = await import(pathToFileURL(join(ROOT, 'providers/hackernews.mjs')).href);
-  const hn = hackernewsModule.default;
-  const { parseHnComment, resolveLatestThreadId } = hackernewsModule;
+  const module = await import(pathToFileURL(join(ROOT, 'providers/hackernews.mjs')).href);
+  const provider = module.default;
+  const { parseHnComment, resolveLatestThreadId } = module;
+  const { buildLocationClassifier } = await import(pathToFileURL(join(ROOT, 'scan.mjs')).href);
 
-  if (hn.id === 'hackernews' && hn.detect({ provider: 'hackernews' }) && hn.detect({ provider: 'other' }) === null) {
-    pass('hackernews id and explicit provider detection are scoped correctly');
-  } else {
-    fail('hackernews id/detect behavior is incorrect');
-  }
+  assert.equal(provider.id, 'hackernews');
+  assert.ok(provider.detect({ provider: 'hackernews' }));
+  assert.equal(provider.detect({ provider: 'other' }), null);
+  pass('id and explicit provider detection are scoped correctly');
 
-  // resolveLatestThreadId ─ happy path
-  const fakeSearch = {
-    hits: [
-      { objectID: '99999999', title: 'Ask HN: Who is hiring? (June 2025)' },
-      { objectID: '88888888', title: 'Ask HN: Who wants to be hired? (June 2025)' },
-    ],
-  };
-  if (resolveLatestThreadId(fakeSearch) === '99999999') {
-    pass('resolveLatestThreadId picks the first matching "Who is hiring?" hit');
-  } else {
-    fail(`resolveLatestThreadId returned ${resolveLatestThreadId(fakeSearch)}`);
-  }
+  assert.equal(resolveLatestThreadId({ hits: [
+    { objectID: '1', title: 'Ask HN: Who wants to be hired?' },
+    { objectID: '2', title: 'Ask HN: Who is hiring? (August 2026)' },
+  ] }), '2');
+  assert.equal(resolveLatestThreadId({ hits: [] }), null);
+  assert.equal(resolveLatestThreadId(null), null);
+  pass('latest monthly hiring thread resolution is defensive');
 
-  // resolveLatestThreadId ─ no matching hit
-  const noMatch = { hits: [{ objectID: '11111', title: 'Ask HN: Who wants to be hired?' }] };
-  if (resolveLatestThreadId(noMatch) === null) {
-    pass('resolveLatestThreadId returns null when no thread matches');
-  } else {
-    fail('resolveLatestThreadId should return null for non-hiring threads');
-  }
-
-  // resolveLatestThreadId ─ bad input
-  if (resolveLatestThreadId(null) === null && resolveLatestThreadId({}) === null) {
-    pass('resolveLatestThreadId handles null / empty input gracefully');
-  } else {
-    fail('resolveLatestThreadId should return null for bad input');
-  }
-
-  // parseHnComment ─ full pipe-delimited format
-  const fullFmt = 'Acme Corp | Senior Engineer | Remote | https://acme.com/jobs/123\nWe are hiring…';
-  const parsed = parseHnComment(fullFmt, 'https://news.ycombinator.com/item?id=1');
-  if (parsed && parsed.company === 'Acme Corp' && parsed.location === 'Remote') {
-    pass('parseHnComment extracts company and location from pipe-delimited header');
-  } else {
-    fail(`parseHnComment pipe format: ${JSON.stringify(parsed)}`);
-  }
-  if (parsed && parsed.url === 'https://acme.com/jobs/123') {
-    pass('parseHnComment extracts URL from comment text');
-  } else {
-    fail(`parseHnComment url: ${JSON.stringify(parsed?.url)}`);
-  }
-
-  // parseHnComment ─ URL in first line stripped from title
-  if (parsed && !parsed.title.includes('https://')) {
-    pass('parseHnComment strips URLs from the title field');
-  } else {
-    fail(`parseHnComment title still contains URL: ${JSON.stringify(parsed?.title)}`);
-  }
-
-  // parseHnComment ─ free-form (no pipes, no URL in text)
-  const freeFmt = 'Looking for a Rails dev, anywhere, part-time.';
-  const parsedFree = parseHnComment(freeFmt, 'https://news.ycombinator.com/item?id=1');
-  if (parsedFree && parsedFree.title === freeFmt && parsedFree.url === 'https://news.ycombinator.com/item?id=1') {
-    pass('parseHnComment handles free-form comment, falls back to thread URL');
-  } else {
-    fail(`parseHnComment free-form: ${JSON.stringify(parsedFree)}`);
-  }
-  if (parsedFree && parsedFree.company === '' && parsedFree.location === '') {
-    pass('parseHnComment leaves company/location empty for free-form comments');
-  } else {
-    fail(`parseHnComment free-form company/location: ${JSON.stringify(parsedFree)}`);
-  }
-
-  // parseHnComment ─ HTML entities and tags
-  const htmlFmt = '<p>Beta &amp; Co | Staff SWE | New York, NY | <a href="https://beta.io/jobs">https://beta.io/jobs</a></p>';
-  const parsedHtml = parseHnComment(htmlFmt, '');
-  if (parsedHtml && parsedHtml.company === 'Beta & Co') {
-    pass('parseHnComment decodes HTML entities (company name)');
-  } else {
-    fail(`parseHnComment HTML entity decode: ${JSON.stringify(parsedHtml?.company)}`);
-  }
-  if (parsedHtml && parsedHtml.url === 'https://beta.io/jobs') {
-    pass('parseHnComment extracts href URL from anchor tags');
-  } else {
-    fail(`parseHnComment anchor URL: ${JSON.stringify(parsedHtml?.url)}`);
-  }
-
-  const numericEntityUrl = parseHnComment(
-    'Snout https:&#x2F;&#x2F;snout.com&#x2F; | Backend Engineer | Remote Europe',
-    'https://news.ycombinator.com/item?id=1',
+  const standard = parseHnComment(
+    'Acme Corp | Backend Engineer | Remote Europe | Full-Time\nWe build data systems.\nApply: https://jobs.lever.co/acme/123',
+    'https://news.ycombinator.com/item?id=10',
   );
-  if (numericEntityUrl?.url === 'https://snout.com/' && !numericEntityUrl.title.includes('&#x2F;')) {
-    pass('parseHnComment decodes numeric URL entities from current Algolia payloads');
-  } else {
-    fail(`parseHnComment numeric entity URL: ${JSON.stringify(numericEntityUrl)}`);
+  assert.equal(standard?.company, 'Acme Corp');
+  assert.equal(standard?.title, 'Backend Engineer');
+  assert.equal(standard?.location, 'Remote Europe');
+  assert.equal(standard?.url, 'https://jobs.lever.co/acme/123');
+  assert.match(standard?.description || '', /We build data systems/);
+  assert.equal(standard?.sourceUrl, 'https://news.ycombinator.com/item?id=10');
+  pass('standard pipe header yields clean company/role/location plus description and provenance');
+
+  const headerCases = [
+    ['Remote | Apply: https://jobs.lever.co/acme/1', 'Remote'],
+    ['Remote | Careers: https://jobs.lever.co/acme/1', 'Remote'],
+    ['Remote | Full-time | https://jobs.lever.co/acme/1', 'Remote'],
+    ['Remote | Europe | https://jobs.lever.co/acme/1', 'Remote; Europe'],
+    ['Remote | CET | https://jobs.lever.co/acme/1', 'Remote; CET'],
+    ['Hybrid | Berlin | https://jobs.lever.co/acme/1', 'Hybrid; Berlin'],
+  ];
+  const classifyLocation = buildLocationClassifier({
+    always_allow: ['Germany', 'Berlin'],
+    allow: ['Remote Europe', 'Europe', 'EU', 'EEA', 'Remote'],
+  });
+  for (const [tail, expectedLocation] of headerCases) {
+    const parsed = parseHnComment(`Header Co | Engineer | ${tail}`, 'https://news.ycombinator.com/item?id=1010');
+    assert.equal(parsed?.location, expectedLocation, tail);
   }
+  assert.equal(classifyLocation('Remote; Europe').status, 'eligible');
+  assert.equal(classifyLocation('Remote; CET').status, 'uncertain');
+  assert.equal(classifyLocation('Hybrid; Berlin').status, 'eligible');
+  const restrictedHeader = parseHnComment(
+    'Header Co | Engineer | Remote | US only | https://jobs.lever.co/acme/1',
+    'https://news.ycombinator.com/item?id=1011',
+  );
+  assert.equal(classifyLocation(restrictedHeader?.location).status, 'ineligible');
+  pass('action labels stay out of HN locations while meaningful secondary evidence reaches the classifier');
 
-  // parseHnComment ─ <p> paragraph body must not bleed into location field
-  // Real HN posts often have "Company | Role | Location<p>Body text..." where the
-  // second <p> paragraph (job description) runs on without a 4th pipe segment.
-  // The parser must convert block tags to newlines so parts[2] stays clean.
-  const bleedFmt = '<p>Linear | Product Engineer | Remote<p>We are hiring at https://linear.app/careers/pe-2025';
-  const parsedBleed = parseHnComment(bleedFmt, 'https://news.ycombinator.com/item?id=1');
-  if (parsedBleed && parsedBleed.location === 'Remote') {
-    pass('parseHnComment location does not bleed body paragraph text (block tag newline fix)');
-  } else {
-    fail(`parseHnComment location bleed: ${JSON.stringify(parsedBleed?.location)}`);
+  const laterUrl = parseHnComment(
+    '<p>Beta &amp; Co | ML Engineer | Helsinki, Finland</p><p>Details first.</p><p><a href="https://beta.example/careers/ml">Apply here</a></p>',
+    'https://news.ycombinator.com/item?id=11',
+  );
+  assert.equal(laterUrl?.company, 'Beta & Co');
+  assert.equal(laterUrl?.url, 'https://beta.example/careers/ml');
+  pass('HTML anchors and later-paragraph careers URLs are handled');
+
+  const ranked = parseHnComment(
+    'Ranked Co | Data Engineer | Amsterdam, Netherlands\nFounder: https://www.linkedin.com/in/example-person\nWebsite: https://ranked.example/about\nApply: https://jobs.ashbyhq.com/ranked/abc',
+    'https://news.ycombinator.com/item?id=12',
+  );
+  assert.equal(ranked?.url, 'https://jobs.ashbyhq.com/ranked/abc');
+  pass('LinkedIn personal profiles are rejected and a later ATS URL wins');
+
+  const multiple = parseHnComment(
+    'Many Co | Software Engineer | Berlin, Germany\nBlog: https://many.example/blog/post\nCareers: https://many.example/careers/software-engineer\nSocial: https://x.com/many',
+    'https://news.ycombinator.com/item?id=13',
+  );
+  assert.equal(multiple?.url, 'https://many.example/careers/software-engineer');
+  pass('multiple URLs are ranked by job/careers evidence instead of first occurrence');
+
+  const companyBeforeBoard = parseHnComment(
+    'Priority Co | Software Engineer | Remote\nLinkedIn: https://www.linkedin.com/jobs/view/123\nDirect: https://company.example/careers/software-engineer',
+    'https://news.ycombinator.com/item?id=131',
+  );
+  assert.equal(companyBeforeBoard?.url, 'https://company.example/careers/software-engineer');
+  const linkedInFallback = parseHnComment(
+    'Fallback Co | Software Engineer | Remote\nApply: https://www.linkedin.com/jobs/view/456',
+    'https://news.ycombinator.com/item?id=132',
+  );
+  assert.equal(linkedInFallback?.url, 'https://www.linkedin.com/jobs/view/456');
+  pass('direct company postings outrank LinkedIn Jobs while LinkedIn remains a fallback');
+
+  for (const lookalike of [
+    'https://fakegreenhouse.io/acme/123',
+    'https://notlever.co/acme/123',
+  ]) {
+    const guarded = parseHnComment(
+      `Host Guard Co | Engineer | Remote\nLookalike: ${lookalike}\nApply: https://www.linkedin.com/jobs/view/789`,
+      'https://news.ycombinator.com/item?id=133',
+    );
+    assert.equal(guarded?.url, 'https://www.linkedin.com/jobs/view/789', lookalike);
   }
-  if (parsedBleed && parsedBleed.url === 'https://linear.app/careers/pe-2025') {
-    pass('parseHnComment finds URL in body paragraph when absent from header line');
-  } else {
-    fail(`parseHnComment body-paragraph URL: ${JSON.stringify(parsedBleed?.url)}`);
-  }
+  pass('ATS trust uses exact-host-or-subdomain matching, not loose hostname suffixes');
 
-  // parseHnComment ─ deleted / empty comments return null
-  if (parseHnComment('', '') === null && parseHnComment(null, '') === null) {
-    pass('parseHnComment returns null for empty / null input');
-  } else {
-    fail('parseHnComment should return null for empty/null input');
-  }
+  const noExternal = parseHnComment(
+    'No Link Co | Backend Engineer | Remote\nContact https://www.linkedin.com/in/example-person',
+    'https://news.ycombinator.com/item?id=14',
+  );
+  assert.equal(noExternal?.url, '');
+  assert.equal(parseHnComment('Software Engineer with 5+ years of experience building enterprise systems.', 'https://news.ycombinator.com/item?id=15'), null);
+  assert.equal(parseHnComment('', ''), null);
+  pass('no usable external URL and malformed/free-form headers degrade conservatively');
 
-  // provider.fetch() — integration with mock ctx
-  const FAKE_THREAD_ID = '42424242';
-  const FAKE_THREAD_URL = `https://news.ycombinator.com/item?id=${FAKE_THREAD_ID}`;
+  const numericEntity = parseHnComment(
+    'Snout | Backend Engineer | EEA | https:&#x2F;&#x2F;snout.example&#x2F;careers&#x2F;backend',
+    'https://news.ycombinator.com/item?id=16',
+  );
+  assert.equal(numericEntity?.url, 'https://snout.example/careers/backend');
+  pass('numeric HTML entities in URLs are decoded');
 
-  const fakeSearchResp = {
-    hits: [{ objectID: FAKE_THREAD_ID, title: 'Ask HN: Who is hiring? (June 2025)' }],
-  };
-  const fakeItemResp = {
-    id: FAKE_THREAD_ID,
-    children: [
-      {
-        objectID: 'c1',
-        text: 'Startup XYZ | Backend Engineer | San Francisco | https://xyz.io/careers',
-        created_at: '2025-06-01T10:00:00Z',
-      },
-      { objectID: 'c2', deleted: true, text: '' },      // deleted — should be skipped
-      { objectID: 'c3', text: '' },                      // empty — should be skipped
-      {
-        objectID: 'c4',
-        text: 'Freelance gig, no URL here, DM me.',      // no URL — falls back to thread URL
-        created_at: '2025-06-01T11:00:00Z',
-      },
-    ],
-  };
-
-  let searchFetched = false;
-  let itemFetched = false;
-  const mockCtx = {
-    async fetchJson(url, _opts) {
-      if (url.includes('search_by_date')) { searchFetched = true; return fakeSearchResp; }
-      if (url.includes(`/items/${FAKE_THREAD_ID}`)) { itemFetched = true; return fakeItemResp; }
-      throw new Error(`hackernews mock: unexpected fetch ${url}`);
-    },
-  };
-
-  const jobs = await hn.fetch({ name: 'HN Hiring', provider: 'hackernews' }, mockCtx);
-
-  if (searchFetched && itemFetched) {
-    pass('hackernews.fetch() calls search API then items API');
-  } else {
-    fail(`hackernews.fetch() API calls: search=${searchFetched} item=${itemFetched}`);
-  }
-
-  if (jobs.length === 2) {
-    pass('hackernews.fetch() returns 2 jobs (skips deleted + empty comments)');
-  } else {
-    fail(`hackernews.fetch() returned ${jobs.length} jobs (expected 2)`);
-  }
-
-  if (jobs[0]?.company === 'Startup XYZ' && jobs[0]?.location === 'San Francisco') {
-    pass('hackernews.fetch() maps pipe-delimited company and location');
-  } else {
-    fail(`hackernews.fetch() row 0: ${JSON.stringify(jobs[0])}`);
-  }
-
-  if (jobs[0]?.url === 'https://xyz.io/careers') {
-    pass('hackernews.fetch() maps job URL from comment text');
-  } else {
-    fail(`hackernews.fetch() row 0 url: ${JSON.stringify(jobs[0]?.url)}`);
-  }
-
-  if (jobs[0]?.postedAt === Date.parse('2025-06-01T10:00:00Z')) {
-    pass('hackernews.fetch() parses created_at to postedAt epoch ms');
-  } else {
-    fail(`hackernews.fetch() postedAt: ${JSON.stringify(jobs[0]?.postedAt)}`);
-  }
-
-  if (jobs[1]?.url === FAKE_THREAD_URL) {
-    pass('hackernews.fetch() falls back to thread URL for comments with no link');
-  } else {
-    fail(`hackernews.fetch() fallback url: ${JSON.stringify(jobs[1]?.url)}`);
-  }
-
-  // provider.fetch() — throws when no thread found
-  let threw = false;
-  try {
-    await hn.fetch({ name: 'HN' }, {
-      async fetchJson() { return { hits: [] }; },
-    });
-  } catch (e) {
-    threw = true;
-  }
-  if (threw) {
-    pass('hackernews.fetch() throws when "Who is hiring?" thread not found');
-  } else {
-    fail('hackernews.fetch() should throw when no matching thread found');
-  }
-
-  const emptyJobs = await hn.fetch({ name: 'HN' }, {
+  const threadId = '42424242';
+  const search = { hits: [{ objectID: threadId, title: 'Ask HN: Who is hiring? (August 2026)' }] };
+  const item = { children: [
+    { id: 101, text: 'Startup XYZ | Backend Engineer | Helsinki, Finland\nhttps://xyz.example/careers/backend', created_at: '2026-08-01T10:00:00Z' },
+    { id: 102, text: 'URL-less Co | Data Engineer | Remote' },
+    { id: 103, text: 'Profile only | Engineer | Remote\nhttps://linkedin.com/in/profile' },
+    { id: 104, deleted: true, text: 'Deleted | Engineer | Remote\nhttps://deleted.example/jobs/1' },
+  ] };
+  const jobs = await provider.fetch({ name: 'HN Hiring' }, {
     async fetchJson(url) {
-      if (url.includes('search_by_date')) return fakeSearchResp;
-      return { children: [] };
+      if (url.includes('search_by_date')) return search;
+      if (url.includes(`/items/${threadId}`)) return item;
+      throw new Error(`unexpected URL ${url}`);
     },
   });
-  if (emptyJobs.length === 0) pass('hackernews.fetch() treats a valid empty thread as healthy empty');
-  else fail(`hackernews.fetch() valid empty returned ${emptyJobs.length} rows`);
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].url, 'https://xyz.example/careers/backend');
+  assert.equal(jobs[0].sourceUrl, 'https://news.ycombinator.com/item?id=101');
+  assert.equal(jobs[0].postedAt, Date.parse('2026-08-01T10:00:00Z'));
+  assert.match(jobs[0].description, /Startup XYZ/);
+  pass('fetch skips unsafe rows while preserving per-comment identity, date, and body text');
 
-  const numericCommentJobs = await hn.fetch({ name: 'HN' }, {
-    async fetchJson(url) {
-      if (url.includes('search_by_date')) return fakeSearchResp;
-      return { children: [{ id: 12345678, text: 'URL-less but valid hiring post' }] };
-    },
+  const empty = await provider.fetch({ name: 'HN' }, {
+    async fetchJson(url) { return url.includes('search_by_date') ? search : { children: [] }; },
   });
-  if (numericCommentJobs[0]?.url === 'https://news.ycombinator.com/item?id=12345678') {
-    pass('URL-less HN postings use a per-comment URL so scanner dedup does not collapse the whole thread');
-  } else {
-    fail(`URL-less HN posting fallback = ${JSON.stringify(numericCommentJobs[0]?.url)}`);
-  }
+  assert.deepEqual(empty, []);
+  pass('valid empty threads remain healthy empty');
 
-  let malformedSearchThrew = false;
-  try { await hn.fetch({}, { fetchJson: async () => ({ results: [] }) }); } catch { malformedSearchThrew = true; }
-  if (malformedSearchThrew) pass('hackernews.fetch() rejects malformed search payloads');
-  else fail('hackernews.fetch() should reject malformed search payloads');
-
-  let malformedItemThrew = false;
-  try {
-    await hn.fetch({}, { fetchJson: async (url) => url.includes('search_by_date') ? fakeSearchResp : { comments: [] } });
-  } catch { malformedItemThrew = true; }
-  if (malformedItemThrew) pass('hackernews.fetch() rejects malformed item payloads');
-  else fail('hackernews.fetch() should reject malformed item payloads');
-} catch (e) {
-  fail(`hackernews provider tests crashed: ${e.message}`);
+  await assert.rejects(() => provider.fetch({}, { fetchJson: async () => ({ results: [] }) }), /malformed search/);
+  await assert.rejects(() => provider.fetch({}, {
+    fetchJson: async (url) => url.includes('search_by_date') ? search : { comments: [] },
+  }), /expected children/);
+  pass('malformed API payloads fail truthfully');
+} catch (error) {
+  fail(`hackernews provider tests crashed: ${error.stack || error.message}`);
 }

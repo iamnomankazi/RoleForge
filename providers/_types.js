@@ -38,6 +38,8 @@
  * @property {string} [sourceId] Stable source identifier when the provider exposes one.
  * @property {string} [sourceQuery] Primary query that discovered the job.
  * @property {string[]} [sourceQueries] All queries that discovered the job.
+ * @property {string} [sourceUrl] Provider-owned source/provenance URL when it
+ *                               differs from the selected job/careers URL.
  */
 
 /**
@@ -122,7 +124,9 @@
  * @typedef {object} Provider
  * @property {string} id                                                       Unique across all loaded providers.
  * @property {((entry: PortalEntry) => (DetectHit | null))} [detect]           Optional auto-detection.
- * @property {(entry: PortalEntry, ctx: Context) => Promise<Job[]>} fetch      Required.
+ * @property {(entry: PortalEntry, ctx: Context) => Promise<Job[]>} fetch      Required. Providers may attach
+ *                                                                             non-enumerable structured coverage
+ *                                                                             metadata with _result.mjs.
  */
 
 export {};

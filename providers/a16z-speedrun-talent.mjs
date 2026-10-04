@@ -2,6 +2,7 @@
 /** @typedef {import('./_types.js').Provider} Provider */
 
 import { requiredArray, requireUsableRows } from './_payload.mjs';
+import { markProviderCoverage } from './_result.mjs';
 
 // Public, zero-auth a16z speedrun/portfolio talent-network feed.
 const FEED_BASE = 'https://speedrun-talent-network.com/api/v1/jobs';
@@ -97,6 +98,7 @@ export default {
     const query = resolveQuery(entry);
     const jobs = [];
     const seen = new Set();
+    let partialCoverage = null;
 
     for (let page = 0; page < maxPages; page++) {
       const params = new URLSearchParams({ page: String(page), source: 'career-ops' });
@@ -116,9 +118,17 @@ export default {
       if (rows.length < PER_PAGE) break;
       if (Number.isInteger(json.total_pages) && page + 1 >= json.total_pages) break;
       if (page + 1 >= maxPages && Number.isInteger(json.total_pages) && json.total_pages > maxPages) {
-        console.error(`a16z-speedrun-talent: ${entry?.name || 'board'} truncated at max_pages=${maxPages}`);
+        partialCoverage = {
+          status: 'partial',
+          code: 'max_pages',
+          reason: `${entry?.name || 'board'} truncated at max_pages=${maxPages} (${json.total_pages} total pages)`,
+          pagesFetched: page + 1,
+          maxPages,
+          totalPages: json.total_pages,
+        };
+        console.error(`a16z-speedrun-talent: ${partialCoverage.reason}`);
       }
     }
-    return jobs;
+    return partialCoverage ? markProviderCoverage(jobs, partialCoverage) : jobs;
   },
 };

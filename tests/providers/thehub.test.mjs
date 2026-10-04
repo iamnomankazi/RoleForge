@@ -153,6 +153,19 @@ try {
   if (badThrew) pass('thehub.fetch() throws on unexpected API response shape');
   else fail('thehub.fetch() should throw when the docs array is absent');
 
+  const gone = Object.assign(new Error('HTTP 404 Not Found'), { status: 404 });
+  let classified;
+  try {
+    await thehub.fetch({ name: 'The Hub' }, { fetchJson: async () => { throw gone; } });
+  } catch (error) {
+    classified = error;
+  }
+  if (classified?.kind === 'endpoint_gone' && classified?.providerEndpoint === 'https://thehub.io/api/jobs') {
+    pass('thehub.fetch() marks board-wide 404/410 failures as endpoint_gone, not slug_gone');
+  } else {
+    fail(`thehub endpoint failure classification = ${JSON.stringify({ kind: classified?.kind, endpoint: classified?.providerEndpoint })}`);
+  }
+
 } catch (e) {
   fail(`thehub provider tests crashed: ${e.message}`);
 }

@@ -25,7 +25,10 @@ export function loadPortalHealth(filePath = PORTAL_HEALTH_PATH) {
 export function computeConsecutiveFailures(records) {
   const streaks = new Map();
   for (const record of records) {
-    if (record.status === 'reachable' || record.status === 'empty') streaks.set(record.company, 0);
+    const status = String(record?.status || '');
+    if (status === 'reachable' || status === 'empty' || status.startsWith('partial:')) {
+      streaks.set(record.company, 0);
+    }
     else streaks.set(record.company, (streaks.get(record.company) || 0) + 1);
   }
   return streaks;

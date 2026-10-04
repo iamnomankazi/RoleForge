@@ -155,11 +155,12 @@ export function deriveSlugCandidates(name) {
 /**
  * Classify a fetch/probe failure for scan summaries and slug diagnostics.
  *
- * @param {Error|{status?: number, name?: string, message?: string}|null|undefined} err
- * @returns {'slug_gone'|'auth'|'network'|'server'|'unknown'}
+ * @param {Error|{status?: number, name?: string, message?: string, kind?: string}|null|undefined} err
+ * @returns {'slug_gone'|'endpoint_gone'|'auth'|'network'|'server'|'unknown'}
  */
 export function classifyFetchError(err) {
   if (!err) return 'unknown';
+  if (err.kind === 'endpoint_gone') return 'endpoint_gone';
   if (err.name === 'AbortError') return 'network';
   const msg = String(err.message || err);
   if (/ECONNREFUSED|ENOTFOUND|ETIMEDOUT|fetch failed|network/i.test(msg)) {
@@ -437,6 +438,7 @@ const ICON = { live: '✅', empty: '🟡', missing: '❌', skipped: '➖' };
 
 const ERROR_KIND_LABEL = {
   slug_gone: 'slug not found',
+  endpoint_gone: 'provider endpoint gone',
   auth: 'auth blocked',
   network: 'network error',
   server: 'server error',

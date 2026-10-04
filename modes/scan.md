@@ -214,11 +214,10 @@ Levels are additive — they are executed in order, and results are merged and d
 
 6b. **Filter by Location (Optional)** using `location_filter` from `portals.yml`:
    - If the `location_filter` block is absent, all locations pass (default behavior).
-   - Empty location on a posting → passes (do not penalize missing data).
-   - Any keyword from `block` present → reject (precedes allow).
-   - Empty `allow` → passes (already cleared block).
-   - Non-empty `allow` → must match at least one keyword.
-   - All matches are case-insensitive substring matches.
+   - Structured location and explicit title locations are strong target evidence; clear hard geographic restrictions override them.
+   - Missing, generic remote, work-mode-only, and timezone-only locations remain uncertain and are retained.
+   - A target in a clearly job-specific URL path is fallback evidence only; it cannot override a restriction or explicit non-target location.
+   - Structured FI/DE/DK/NL tokens are recognized only when their corresponding country is configured; short codes are never inferred from titles or URLs.
    - The location is persisted as the 7th column in `scan-history.tsv` for later auditing.
 
 7. **Deduplicate** against 3 sources:
