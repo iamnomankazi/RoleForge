@@ -68,7 +68,10 @@
  * @property {('http')}           [transport]      Default: 'http'. Reserved for future transports.
  * @property {number}             [max_pages]      Provider-specific pagination cap (avature, workday).
  * @property {number}             [max_jobs]       Provider-specific raw-job cap (for example, Himalayas browse).
- * @property {string[]|object[]}  [search_queries] Provider-specific targeted retrieval queries.
+ * @property {(string|{query?: string, q?: string, sort?: string, country?: string|string[], seniority?: string|string[], employment_type?: string|string[]})[]} [search_queries]
+ *                                                 Provider-specific targeted retrieval queries. Himalayas accepts
+ *                                                 structured q/sort/country/seniority/employment-type filters while
+ *                                                 keeping downstream Career-Ops filtering authoritative.
  * @property {number}             [search_max_pages] Provider-specific targeted-search page cap.
  * @property {number}             [search_max_jobs] Provider-specific targeted raw-job cap.
  * @property {string}             [offset_param]   avature only: pins the pagination query key and disables the

@@ -1,6 +1,8 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
 
+import { markProviderCoverage } from './_result.mjs';
+
 // The Hub provider — board-wide public feed used by thehub.io's jobs frontend:
 // https://api.thehub.io/v2/jobsandfeatured
 // Response shape: { jobs: { docs: [ { id, key, title, company: { name, ... },
@@ -121,6 +123,7 @@ export default {
     const fallbackCompany = entry?.name;
     const out = [];
     const seenUrls = new Set();
+    let partialCoverage = null;
 
     for (let page = 1; page <= maxPages; page++) {
       const url = `${FEED_BASE}?page=${page}&countryCode=EU&sorting=newJobs`;
@@ -149,10 +152,23 @@ export default {
           out.push(normalized);
         }
       }
+      const totalPages = Number.isInteger(json.jobs.pages) ? json.jobs.pages : null;
+      const hasKnownMorePages = totalPages !== null && totalPages > page;
+      if (page >= maxPages && hasKnownMorePages) {
+        partialCoverage = {
+          status: 'partial',
+          code: 'max_pages',
+          reason: `${entry?.name || 'board'} truncated at max_pages=${maxPages} (${totalPages} total pages)`,
+          pagesFetched: page,
+          maxPages,
+          totalPages,
+        };
+        break;
+      }
       // Stop at the last page: a short page, or page >= the reported total pages.
       if (json.jobs.docs.length < PER_PAGE) break;
-      if (Number.isInteger(json.jobs.pages) && page >= json.jobs.pages) break;
+      if (totalPages !== null && page >= totalPages) break;
     }
-    return out;
+    return partialCoverage ? markProviderCoverage(out, partialCoverage) : out;
   },
 };

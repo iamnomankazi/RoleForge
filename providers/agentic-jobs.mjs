@@ -3,6 +3,7 @@
 
 import { decodeEntities } from './_html-entities.mjs';
 import { requiredArray, requireUsableRows } from './_payload.mjs';
+import { markProviderCoverage } from './_result.mjs';
 
 const SITE_ORIGIN = 'https://agentic-engineering-jobs.com';
 const API_BASE = `${SITE_ORIGIN}/api/v1`;
@@ -108,6 +109,7 @@ export default {
     const jobs = [];
     const seen = new Set();
     let total = null;
+    let partialCoverage = null;
 
     for (let page = 1; page <= maxPages; page++) {
       if (page > 1) await wait(PAGE_DELAY_MS);
@@ -131,11 +133,22 @@ export default {
         }
       }
 
-      if (jobs.length >= MAX_JOBS) break;
       if (rows.length < effectivePageSize) break;
       if (total !== null && page * effectivePageSize >= total) break;
+      if (page >= maxPages && total !== null && page * effectivePageSize < total) {
+        partialCoverage = {
+          status: 'partial',
+          code: 'max_pages',
+          reason: `${entry?.name || 'board'} truncated at max_pages=${maxPages} (${total} total jobs)`,
+          pagesFetched: page,
+          maxPages,
+        };
+        break;
+      }
+      if (jobs.length >= MAX_JOBS) break;
     }
 
-    return jobs.slice(0, MAX_JOBS);
+    const result = jobs.slice(0, MAX_JOBS);
+    return partialCoverage ? markProviderCoverage(result, partialCoverage) : result;
   },
 };

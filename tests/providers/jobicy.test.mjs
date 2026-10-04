@@ -9,12 +9,13 @@ try {
   const jobicyModule = await import(pathToFileURL(join(ROOT, 'providers/jobicy.mjs')).href);
   const jobicy = jobicyModule.default;
   const { parseJobicyResponse } = jobicyModule;
+  const { providerCoverage } = await import(pathToFileURL(join(ROOT, 'providers/_result.mjs')).href);
 
   if (jobicy.id === 'jobicy') pass('jobicy.id is "jobicy"');
   else fail(`jobicy.id is ${JSON.stringify(jobicy.id)}`);
 
   const hit = jobicy.detect({ name: 'Jobicy Board', provider: 'jobicy' });
-  if (hit && hit.url === 'https://jobicy.com/api/v2/remote-jobs?count=50') {
+  if (hit && hit.url === 'https://jobicy.com/api/v2/remote-jobs?count=100') {
     pass('jobicy.detect() claims explicit provider config');
   } else {
     fail(`jobicy.detect() returned ${JSON.stringify(hit)}`);
@@ -111,8 +112,8 @@ try {
     { fetchJson: async (url, opts) => { capturedUrl = url; capturedOpts = opts; return sample; } },
   );
 
-  if (capturedUrl === 'https://jobicy.com/api/v2/remote-jobs?count=50') {
-    pass('jobicy.fetch() requests the pinned JSON feed URL');
+  if (capturedUrl === 'https://jobicy.com/api/v2/remote-jobs?count=100') {
+    pass('jobicy.fetch() requests the pinned 100-job JSON feed URL');
   } else {
     fail(`jobicy.fetch() requested ${JSON.stringify(capturedUrl)}`);
   }
@@ -128,6 +129,8 @@ try {
   } else {
     fail(`jobicy.fetch() normalized row = ${JSON.stringify(fetched[0])}`);
   }
+  if (providerCoverage(fetched) === null) pass('jobicy.fetch() does not report false partial coverage for its single response');
+  else fail(`jobicy.fetch() coverage = ${JSON.stringify(providerCoverage(fetched))}`);
 
   const empty = await jobicy.fetch({ name: 'Jobicy' }, { fetchJson: async () => ({ jobs: [] }) });
   if (empty.length === 0) pass('jobicy.fetch() treats a valid empty jobs array as healthy empty');

@@ -2,6 +2,7 @@
 /** @typedef {import('./_types.js').Provider} Provider */
 
 import { requireUsableRows } from './_payload.mjs';
+import { markProviderCoverage } from './_result.mjs';
 
 // Himalayas provider - targeted search plus a bounded board-wide latest feed.
 // Browse (https://himalayas.app/jobs/api) uses offset pagination; search
@@ -12,10 +13,10 @@ import { requireUsableRows } from './_payload.mjs';
 //
 // Wire in via a `job_boards:` entry with `provider: himalayas`.
 
-const FEED_URL = 'https://himalayas.app/jobs/api?limit=50';
+const FEED_URL = 'https://himalayas.app/jobs/api?limit=20';
 const SEARCH_URL = 'https://himalayas.app/jobs/api/search';
 const TRUSTED_HOST = 'himalayas.app';
-const REQUEST_LIMIT = 50;
+const REQUEST_LIMIT = 20;
 const DEFAULT_MAX_PAGES = 15;
 const MAX_PAGES_CAP = 50;
 const DEFAULT_MAX_JOBS = 300;
@@ -148,16 +149,33 @@ function resolveSearchMaxJobs(entry) {
   return Math.min(configured, MAX_SEARCH_JOBS_CAP);
 }
 
+const SEARCH_SORTS = new Set(['relevant', 'recent', 'salaryAsc', 'salaryDesc', 'nameAToZ', 'nameZToA', 'jobs']);
+
+function searchFilterValue(value) {
+  if (Array.isArray(value)) return cleanStringArray(value).join(',');
+  return cleanText(value);
+}
+
 function normalizeSearchQueries(value) {
   const values = Array.isArray(value) ? value : [];
   const seen = new Set();
   const queries = [];
   for (const item of values) {
-    const query = cleanText(typeof item === 'string' ? item : item?.query);
-    const key = query.toLocaleLowerCase('en');
+    const query = cleanText(typeof item === 'string' ? item : item?.query ?? item?.q);
+    const requestedSort = cleanText(typeof item === 'object' ? item?.sort : '');
+    const sort = SEARCH_SORTS.has(requestedSort) ? requestedSort : 'recent';
+    const country = searchFilterValue(typeof item === 'object' ? item?.country : '');
+    const seniority = searchFilterValue(typeof item === 'object' ? item?.seniority : '');
+    const employmentType = searchFilterValue(typeof item === 'object'
+      ? item?.employment_type ?? item?.employmentType
+      : '');
+    const key = JSON.stringify([
+      query.toLocaleLowerCase('en'), sort, country.toLocaleLowerCase('en'),
+      seniority.toLocaleLowerCase('en'), employmentType.toLocaleLowerCase('en'),
+    ]);
     if (!query || seen.has(key)) continue;
     seen.add(key);
-    queries.push(query);
+    queries.push({ query, sort, country, seniority, employmentType });
   }
   return queries;
 }
@@ -169,10 +187,14 @@ function buildFeedUrl(offset, limit) {
   return assertHimalayasUrl(url.href);
 }
 
-function buildSearchUrl(query, page) {
+function buildSearchUrl(querySpec, page) {
   const url = new URL(SEARCH_URL);
-  url.searchParams.set('q', query);
+  url.searchParams.set('q', querySpec.query);
   url.searchParams.set('page', String(page));
+  url.searchParams.set('sort', querySpec.sort || 'recent');
+  if (querySpec.country) url.searchParams.set('country', querySpec.country);
+  if (querySpec.seniority) url.searchParams.set('seniority', querySpec.seniority);
+  if (querySpec.employmentType) url.searchParams.set('employment_type', querySpec.employmentType);
   return assertHimalayasUrl(url.href);
 }
 
@@ -321,6 +343,10 @@ export async function fetchHimalayasPages(entry, ctx) {
     repeatedPages: 0,
     effectivePageSize: undefined,
     reportedTotalCount: undefined,
+    sourceRowsCovered: 0,
+    reachedEnd: false,
+    stopReason: undefined,
+    truncated: false,
   };
 
   let offset = 0;
@@ -350,7 +376,11 @@ export async function fetchHimalayasPages(entry, ctx) {
         : Math.max(stats.reportedTotalCount, totalCount);
     }
 
-    if (responseRows.length === 0) break;
+    if (responseRows.length === 0) {
+      stats.reachedEnd = true;
+      stats.stopReason = 'end';
+      break;
+    }
 
     const candidateRows = rows.filter((item) => !isUnavailable(item, toEpochMs(item?.expiryDate)));
     const structurallyUsable = candidateRows.map(normalizeHimalayasJob).filter(Boolean);
@@ -359,6 +389,7 @@ export async function fetchHimalayasPages(entry, ctx) {
     const signature = rows.map(rawJobKey).join('\u0001');
     if (pageSignatures.has(signature)) {
       stats.repeatedPages += 1;
+      stats.stopReason = 'repeated_page';
       break;
     }
     pageSignatures.add(signature);
@@ -390,18 +421,39 @@ export async function fetchHimalayasPages(entry, ctx) {
 
     // A server that ignores offset, or a page that contains only already-seen
     // rows, must not drive an unbounded loop.
-    if (freshRawRows === 0) break;
+    if (freshRawRows === 0) {
+      stats.stopReason = 'duplicate_only';
+      break;
+    }
 
     const step = pageLimit || responseRows.length;
-    if (step <= 0 || responseRows.length < step) break;
+    if (step <= 0) {
+      stats.stopReason = 'no_progress';
+      break;
+    }
 
     const baseOffset = pageOffset ?? offset;
     const nextOffset = baseOffset + step;
-    if (totalCount !== undefined && nextOffset >= totalCount) break;
-    if (nextOffset <= offset) break;
+    stats.sourceRowsCovered = Math.max(stats.sourceRowsCovered, nextOffset);
+    if (responseRows.length < step || (totalCount !== undefined && nextOffset >= totalCount)) {
+      stats.reachedEnd = true;
+      stats.stopReason = 'end';
+      break;
+    }
+    if (nextOffset <= offset) {
+      stats.stopReason = 'no_progress';
+      break;
+    }
     offset = nextOffset;
   }
 
+  if (!stats.stopReason) {
+    stats.stopReason = stats.rawJobsFetched >= maxJobs ? 'max_jobs' : 'max_pages';
+  }
+  stats.truncated = !stats.reachedEnd
+    && ['max_pages', 'max_jobs'].includes(stats.stopReason)
+    && stats.reportedTotalCount !== undefined
+    && stats.sourceRowsCovered < stats.reportedTotalCount;
   stats.normalizedJobs = jobs.length;
   return { jobs, stats };
 }
@@ -423,7 +475,8 @@ export async function fetchHimalayasSearchPages(entry, ctx) {
   const seenRawKeys = new Set();
   const stats = {
     mode: 'targeted-search',
-    queries,
+    queries: queries.map(({ query }) => query),
+    querySpecs: queries,
     maxPages,
     maxJobs,
     pagesFetched: 0,
@@ -440,17 +493,32 @@ export async function fetchHimalayasSearchPages(entry, ctx) {
     effectivePageSize: undefined,
     reportedTotalCount: undefined,
     queryStats: [],
+    globalCapHit: false,
   };
 
-  for (const query of queries) {
-    if (stats.rawJobsFetched >= maxJobs) break;
+  for (const querySpec of queries) {
+    const query = querySpec.query;
+    if (stats.rawJobsFetched >= maxJobs) {
+      stats.globalCapHit = true;
+      break;
+    }
     const queryStats = {
       query,
+      filters: {
+        sort: querySpec.sort,
+        ...(querySpec.country ? { country: querySpec.country } : {}),
+        ...(querySpec.seniority ? { seniority: querySpec.seniority } : {}),
+        ...(querySpec.employmentType ? { employment_type: querySpec.employmentType } : {}),
+      },
       pagesFetched: 0,
       requests: 0,
       rawJobsFetched: 0,
       totalCount: undefined,
       repeatedPages: 0,
+      sourceRowsCovered: 0,
+      reachedEnd: false,
+      stopReason: undefined,
+      truncated: false,
     };
     const pageSignatures = new Set();
     const responseOffsets = new Set();
@@ -460,9 +528,15 @@ export async function fetchHimalayasSearchPages(entry, ctx) {
       // when the observed/default 20-row response would exceed the configured
       // total cap; the default cap is intentionally a multiple of 20.
       const expectedPageSize = stats.effectivePageSize || 20;
-      if (stats.rawJobsFetched > 0 && stats.rawJobsFetched + expectedPageSize > maxJobs) break;
+      if (stats.rawJobsFetched > 0 && stats.rawJobsFetched + expectedPageSize > maxJobs) {
+        stats.globalCapHit = true;
+        queryStats.stopReason = 'max_jobs';
+        queryStats.truncated = queryStats.totalCount !== undefined
+          && queryStats.sourceRowsCovered < queryStats.totalCount;
+        break;
+      }
 
-      const searchUrl = buildSearchUrl(query, page);
+      const searchUrl = buildSearchUrl(querySpec, page);
       const json = await ctx.fetchJson(searchUrl, { redirect: 'error' });
       if (!json || !Array.isArray(json.jobs)) throw unexpectedResponse(json);
 
@@ -485,7 +559,11 @@ export async function fetchHimalayasSearchPages(entry, ctx) {
           : Math.max(stats.reportedTotalCount, totalCount);
       }
 
-      if (responseRows.length === 0) break;
+      if (responseRows.length === 0) {
+        queryStats.reachedEnd = true;
+        queryStats.stopReason = 'end';
+        break;
+      }
 
       const candidateRows = responseRows.filter((item) => !isUnavailable(item, toEpochMs(item?.expiryDate)));
       const structurallyUsable = candidateRows.map(normalizeHimalayasJob).filter(Boolean);
@@ -493,6 +571,7 @@ export async function fetchHimalayasSearchPages(entry, ctx) {
       if (pageSignatures.has(signature) || (pageOffset !== undefined && responseOffsets.has(pageOffset))) {
         stats.repeatedPages += 1;
         queryStats.repeatedPages += 1;
+        queryStats.stopReason = 'repeated_page';
         break;
       }
       pageSignatures.add(signature);
@@ -535,10 +614,33 @@ export async function fetchHimalayasSearchPages(entry, ctx) {
 
       if (freshRawRows === 0) {
         stats.duplicateOnlyPages += 1;
+        queryStats.stopReason = 'duplicate_only';
         break;
       }
-      if (responseRows.length < (pageLimit || responseRows.length)) break;
-      if (stats.rawJobsFetched >= maxJobs) break;
+
+      const effectivePageSize = pageLimit || responseRows.length;
+      const baseOffset = pageOffset ?? (page - 1) * effectivePageSize;
+      const sourceRowsCovered = baseOffset + responseRows.length;
+      queryStats.sourceRowsCovered = Math.max(queryStats.sourceRowsCovered, sourceRowsCovered);
+      const sourceHasMore = totalCount !== undefined
+        ? sourceRowsCovered < totalCount
+        : responseRows.length >= effectivePageSize;
+      if (!sourceHasMore) {
+        queryStats.reachedEnd = true;
+        queryStats.stopReason = 'end';
+        break;
+      }
+      if (stats.rawJobsFetched >= maxJobs) {
+        stats.globalCapHit = true;
+        queryStats.stopReason = 'max_jobs';
+        queryStats.truncated = totalCount !== undefined && sourceRowsCovered < totalCount;
+        break;
+      }
+      if (page >= maxPages) {
+        queryStats.stopReason = 'max_pages';
+        queryStats.truncated = totalCount !== undefined && sourceRowsCovered < totalCount;
+        break;
+      }
     }
 
     stats.queryStats.push(queryStats);
@@ -602,10 +704,35 @@ export async function fetchHimalayasDiscovery(entry, ctx) {
     }
   }
 
+  const pageCappedQueries = targeted.stats.queryStats
+    .filter((query) => query.truncated && query.stopReason === 'max_pages');
+  const boundedReasons = [];
+  if (pageCappedQueries.length > 0) {
+    boundedReasons.push(
+      `${pageCappedQueries.length} of ${targeted.stats.queryStats.length} targeted queries reported additional results after the configured page cap`,
+    );
+  }
+  if (targeted.stats.globalCapHit) {
+    boundedReasons.push(`targeted search reached search_max_jobs=${targeted.stats.maxJobs}`);
+  }
+  if (browse.stats.truncated) {
+    boundedReasons.push(
+      `generic feed stopped at ${browse.stats.stopReason} (${browse.stats.rawJobsFetched} of ${browse.stats.reportedTotalCount} reported rows)`,
+    );
+  }
+  const coverage = boundedReasons.length > 0
+    ? {
+      status: 'partial',
+      code: 'bounded_search',
+      reason: `Himalayas discovery intentionally bounded: ${boundedReasons.join('; ')}`,
+    }
+    : null;
+
   return {
     jobs,
     targeted,
     browse,
+    coverage,
     stats: {
       rawJobsFetched: targeted.stats.rawJobsFetched + browse.stats.rawJobsFetched,
       apiRequests: targeted.stats.requests + browse.stats.requests,
@@ -631,7 +758,7 @@ export default {
    */
   async fetch(entry, ctx) {
     const result = await fetchHimalayasDiscovery(entry, ctx);
-    return result.jobs;
+    return result.coverage ? markProviderCoverage(result.jobs, result.coverage) : result.jobs;
   },
 };
 

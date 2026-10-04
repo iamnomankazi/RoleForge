@@ -1,12 +1,16 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
 
+import { markProviderCoverage } from './_result.mjs';
+
 // Arbeitnow provider — board-wide aggregator feed (EU/DACH-heavy, but
 // international): https://www.arbeitnow.com/api/job-board-api
 // Response shape: { data: [ { slug, company_name, title, description, remote,
 //   url, tags, job_types, location, created_at } ], links, meta }
 //
-// Jobs are ordered newest-first, 100 per page. The API echoes a rotating
+// Jobs are ordered newest-first. Live responses can use unusual page sizes
+// and overlapping windows, so `links.next` is the authoritative continuation
+// signal when present. The API echoes a rotating
 // featured `?search=` term into links.next, so page URLs are built directly as
 // `?page=N` (never by following links.next) to keep the FULL board in view —
 // scan.mjs's title_filter then gates on the configured titles. Pages are fetched
@@ -17,7 +21,7 @@
 
 const FEED_BASE = 'https://www.arbeitnow.com/api/job-board-api';
 const TRUSTED_HOST = 'www.arbeitnow.com';
-const PER_PAGE = 100;
+const LEGACY_PER_PAGE = 100;
 const DEFAULT_MAX_PAGES = 3;
 const MAX_PAGES_CAP = 50;
 
@@ -104,6 +108,7 @@ export default {
     const maxPages = resolveMaxPages(entry);
     const fallbackCompany = entry?.name;
     const out = [];
+    let partialCoverage = null;
 
     for (let page = 1; page <= maxPages; page++) {
       // Build the page URL directly (do NOT follow links.next — it carries a
@@ -120,8 +125,24 @@ export default {
         const normalized = normalizeArbeitnowJob(j, fallbackCompany);
         if (normalized) out.push(normalized);
       }
-      if (json.data.length < PER_PAGE) break; // short page → last page reached
+      const hasNextMetadata = json.links && typeof json.links === 'object'
+        && Object.prototype.hasOwnProperty.call(json.links, 'next');
+      const hasNext = hasNextMetadata
+        ? typeof json.links.next === 'string' && json.links.next.trim() !== ''
+        : json.data.length >= LEGACY_PER_PAGE;
+
+      if (!hasNext) break;
+      if (page >= maxPages) {
+        partialCoverage = {
+          status: 'partial',
+          code: 'max_pages',
+          reason: `${entry?.name || 'board'} truncated at max_pages=${maxPages} (API reported another page)`,
+          pagesFetched: page,
+          maxPages,
+        };
+        break;
+      }
     }
-    return out;
+    return partialCoverage ? markProviderCoverage(out, partialCoverage) : out;
   },
 };

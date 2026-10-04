@@ -10,6 +10,7 @@ try {
     default: provider, countryName, stripHtml, normalizeAgenticLocation,
     normalizeAgenticSalary, normalizeAgenticJob,
   } = await import(pathToFileURL(join(ROOT, 'providers/agentic-jobs.mjs')).href);
+  const { providerCoverage } = await import(pathToFileURL(join(ROOT, 'providers/_result.mjs')).href);
 
   assert.equal(provider.id, 'agentic-jobs');
   assert.ok(provider.detect({ provider: 'agentic-jobs' }));
@@ -36,8 +37,9 @@ try {
 
   const row = (slug) => ({ title: `Role ${slug}`, companyName: 'Acme', slug, location: 'Europe' });
   const calls = [];
+  const sleeps = [];
   const jobs = await provider.fetch({ max_pages: 4 }, {
-    sleep: async () => {},
+    sleep: async (ms) => { sleeps.push(ms); },
     fetchJson: async (url, opts) => {
       calls.push({ url, opts });
       const page = Number(new URL(url).searchParams.get('page'));
@@ -48,11 +50,13 @@ try {
   });
   assert.equal(calls.length, 2);
   assert.equal(jobs.length, 51);
+  assert.deepEqual(sleeps, [2100]);
+  assert.equal(providerCoverage(jobs), null);
   assert.ok(calls.every(({ opts }) => opts.redirect === 'error'));
   pass('pagination, rate-limit hook, redirect protection, and dedup work');
 
   const cappedCalls = [];
-  await provider.fetch({ max_pages: 10 }, {
+  const capped = await provider.fetch({ max_pages: 10 }, {
     maxPages: 1,
     fetchJson: async (url) => {
       cappedCalls.push(url);
@@ -60,9 +64,17 @@ try {
     },
   });
   assert.equal(cappedCalls.length, 1);
-  pass('entry/context pagination caps bound normal and probe calls');
+  assert.equal(capped.length, 50);
+  assert.deepEqual(providerCoverage(capped), {
+    status: 'partial', code: 'max_pages',
+    reason: 'board truncated at max_pages=1 (500 total jobs)',
+    pagesFetched: 1, maxPages: 1,
+  });
+  pass('entry/context pagination caps retain jobs and report structured partial coverage');
 
-  assert.deepEqual(await provider.fetch({}, { fetchJson: async () => ({ data: [], meta: { total: 0 } }) }), []);
+  const empty = await provider.fetch({}, { fetchJson: async () => ({ data: [], meta: { total: 0 } }) });
+  assert.deepEqual(empty, []);
+  assert.equal(providerCoverage(empty), null);
   await assert.rejects(() => provider.fetch({}, { fetchJson: async () => ({ jobs: [] }) }), /malformed response/);
   await assert.rejects(
     () => provider.fetch({}, { fetchJson: async () => ({ data: [{ title: 'Bad' }] }) }),

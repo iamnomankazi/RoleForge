@@ -611,7 +611,7 @@ search_queries:
 #
 # - name: Arbeitnow                       # EU/DACH-heavy board, newest-first
 #   provider: arbeitnow
-#   max_pages: 3          # optional page cap (100 jobs/page, default 3, max 50)
+#   max_pages: 20         # bounded deeper coverage; provider max is 50 pages
 #   enabled: true
 #
 # - name: Arbeitsagentur — AI Roles      # German federal jobs API
@@ -1611,7 +1611,7 @@ job_boards:
   - name: a16z speedrun talent network
     provider: a16z-speedrun-talent
     careers_url: https://speedrun-talent-network.com
-    max_pages: 3
+    max_pages: 20
     enabled: true
     notes: "a16z startup portfolio roles; normal scanner filters select relevant software, data, and AI openings."
 
@@ -1625,9 +1625,17 @@ job_boards:
   - name: Himalayas
     provider: himalayas
     careers_url: https://himalayas.app/jobs
-    max_pages: 3
+    search_queries:
+      - query: software engineer
+        sort: recent
+      - query: data engineer
+        sort: recent
+    search_max_pages: 2
+    search_max_jobs: 80
+    max_pages: 1
+    max_jobs: 20
     enabled: true
-    notes: "Remote jobs feed; normal scanner filters determine role and location fit."
+    notes: "Targeted recent searches plus a shallow generic feed; normal scanner filters determine role and location fit."
 
   - name: Jobicy
     provider: jobicy

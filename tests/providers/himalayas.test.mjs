@@ -17,12 +17,13 @@ try {
     fetchHimalayasDiscovery,
     classifyHimalayasLocation,
   } = himalayasModule;
+  const { providerCoverage } = await import(pathToFileURL(join(ROOT, 'providers/_result.mjs')).href);
 
   if (himalayas.id === 'himalayas') pass('himalayas.id is "himalayas"');
   else fail(`himalayas.id is ${JSON.stringify(himalayas.id)}`);
 
   const hit = himalayas.detect({ name: 'Himalayas', provider: 'himalayas' });
-  if (hit && hit.url === 'https://himalayas.app/jobs/api?limit=50') {
+  if (hit && hit.url === 'https://himalayas.app/jobs/api?limit=20') {
     pass('himalayas.detect() claims explicit provider config');
   } else {
     fail(`himalayas.detect() returned ${JSON.stringify(hit)}`);
@@ -169,8 +170,8 @@ try {
     { fetchJson: async (url, opts) => { capturedUrl = url; capturedOpts = opts; return sample; } },
   );
 
-  if (capturedUrl === 'https://himalayas.app/jobs/api?limit=50') {
-    pass('himalayas.fetch() requests the pinned API URL');
+  if (capturedUrl === 'https://himalayas.app/jobs/api?limit=20') {
+    pass('himalayas.fetch() requests the current 20-row public API limit');
   } else {
     fail(`himalayas.fetch() requested ${JSON.stringify(capturedUrl)}`);
   }
@@ -186,6 +187,8 @@ try {
   } else {
     fail(`himalayas.fetch() normalized row = ${JSON.stringify(fetched[0])}`);
   }
+  if (providerCoverage(fetched) === null) pass('complete Himalayas discovery does not report false partial coverage');
+  else fail(`complete Himalayas coverage = ${JSON.stringify(providerCoverage(fetched))}`);
 
   // Pagination uses the response's effective limit and offset, deduplicates
   // overlapping rows, and stops from totalCount without a speculative page.
@@ -214,8 +217,8 @@ try {
     fail(`pagination result = ${JSON.stringify(paged)}`);
   }
   if (pageCalls.length === 2
-      && pageCalls[0].url === 'https://himalayas.app/jobs/api?limit=50'
-      && pageCalls[1].url === 'https://himalayas.app/jobs/api?limit=50&offset=2'
+      && pageCalls[0].url === 'https://himalayas.app/jobs/api?limit=20'
+      && pageCalls[1].url === 'https://himalayas.app/jobs/api?limit=20&offset=2'
       && pageCalls.every(({ opts }) => opts?.redirect === 'error')) {
     pass('fetchHimalayasPages() builds bounded offset URLs with redirect:\"error\"');
   } else {
@@ -229,7 +232,10 @@ try {
     { name: 'Himalayas', provider: 'himalayas', max_pages: 1 },
     { fetchJson: async (url) => { pageCapCalls.push(url); return { offset: 0, limit: 2, totalCount: 99, jobs: [mkRow('a'), mkRow('b')] }; } },
   );
-  if (pageCapped.jobs.length === 2 && pageCapCalls.length === 1) pass('fetchHimalayasPages() honors entry.max_pages');
+  if (pageCapped.jobs.length === 2 && pageCapCalls.length === 1
+      && pageCapped.stats.stopReason === 'max_pages' && pageCapped.stats.truncated) {
+    pass('fetchHimalayasPages() honors entry.max_pages and records proven truncation');
+  }
   else fail(`max_pages cap = ${JSON.stringify({ jobs: pageCapped.jobs.length, calls: pageCapCalls })}`);
 
   const jobCapCalls = [];
@@ -246,6 +252,7 @@ try {
     },
   );
   if (jobCapped.jobs.length === 3 && jobCapped.stats.rawJobsFetched === 3
+      && jobCapped.stats.stopReason === 'max_jobs' && jobCapped.stats.truncated
       && jobCapCalls[1] === 'https://himalayas.app/jobs/api?limit=1&offset=2') {
     pass('fetchHimalayasPages() honors exact entry.max_jobs and narrows the final request');
   } else {
@@ -281,7 +288,8 @@ try {
   });
 
   // Search pagination is page-based, deduplicates query overlap, and records
-  // every query that found a shared job. The request must not add limit/offset.
+  // every query that found a shared job. The request adds an explicit stable
+  // sort but must not add unsupported limit/offset parameters.
   const searchCalls = [];
   const targeted = await fetchHimalayasSearchPages(
     {
@@ -318,13 +326,91 @@ try {
         return parsed.pathname === '/jobs/api/search'
           && parsed.searchParams.has('q')
           && parsed.searchParams.has('page')
+          && parsed.searchParams.get('sort') === 'recent'
           && !parsed.searchParams.has('limit')
           && !parsed.searchParams.has('offset')
           && opts?.redirect === 'error';
       })) {
-    pass('targeted searches use only q/page and never send unsupported search limit/offset');
+    pass('targeted searches use q/page/recent sort and never send unsupported search limit/offset');
   } else {
     fail(`targeted search requests = ${JSON.stringify(searchCalls)}`);
+  }
+
+  // Structured query objects may opt into stable public filters. Exact
+  // duplicates are collapsed, while omitted filters remain omitted.
+  const structuredCalls = [];
+  const structured = await fetchHimalayasSearchPages(
+    {
+      search_queries: [
+        {
+          query: 'data engineer', sort: 'salaryDesc', country: ['Finland', 'Germany'],
+          seniority: ['Entry-level'], employment_type: ['Full Time', 'Internship'],
+        },
+        {
+          query: 'DATA ENGINEER', sort: 'salaryDesc', country: ['FINLAND', 'GERMANY'],
+          seniority: ['ENTRY-LEVEL'], employmentType: ['FULL TIME', 'INTERNSHIP'],
+        },
+      ],
+      search_max_pages: 2,
+      search_max_jobs: 40,
+    },
+    { fetchJson: async (url) => { structuredCalls.push(url); return { offset: 0, limit: 20, totalCount: 0, jobs: [] }; } },
+  );
+  const structuredUrl = new URL(structuredCalls[0]);
+  if (structured.stats.queries.length === 1 && structuredCalls.length === 1
+      && structuredUrl.searchParams.get('q') === 'data engineer'
+      && structuredUrl.searchParams.get('sort') === 'salaryDesc'
+      && structuredUrl.searchParams.get('country') === 'Finland,Germany'
+      && structuredUrl.searchParams.get('seniority') === 'Entry-level'
+      && structuredUrl.searchParams.get('employment_type') === 'Full Time,Internship') {
+    pass('structured Himalayas queries deduplicate and encode supported filters deterministically');
+  } else {
+    fail(`structured search = ${JSON.stringify({ calls: structuredCalls, stats: structured.stats })}`);
+  }
+
+  if (searchCalls.every(({ url }) => {
+    const parsed = new URL(url);
+    return !parsed.searchParams.has('country')
+      && !parsed.searchParams.has('seniority')
+      && !parsed.searchParams.has('employment_type');
+  })) {
+    pass('plain targeted queries do not impose restrictive upstream location or seniority filters');
+  } else {
+    fail(`plain targeted search unexpectedly added filters: ${JSON.stringify(searchCalls)}`);
+  }
+
+  // The approved low-teens query shape gets two pages per family without the
+  // global cap starving the final query (14 * 2 * 20 = 560 raw rows).
+  const familyQueries = [
+    'Python developer', 'junior backend engineer', 'junior software engineer',
+    'graduate software engineer', 'data engineer', 'junior data engineer',
+    'analytics engineer', 'ETL developer', 'machine learning engineer',
+    'AI engineer', 'junior data analyst', 'BI developer', 'working student',
+    'software engineering intern',
+  ];
+  const familyCalls = [];
+  const familySearch = await fetchHimalayasSearchPages(
+    { search_queries: familyQueries, search_max_pages: 2, search_max_jobs: 560 },
+    { fetchJson: async (url) => {
+      familyCalls.push(url);
+      const parsed = new URL(url);
+      const query = parsed.searchParams.get('q');
+      const page = Number(parsed.searchParams.get('page'));
+      const slug = query.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+      return {
+        offset: (page - 1) * 20, limit: 20, totalCount: 40,
+        jobs: Array.from({ length: 20 }, (_, index) => searchRow(`${slug}-${page}-${index}`)),
+      };
+    } },
+  );
+  if (familyCalls.length === 28 && familySearch.jobs.length === 560
+      && familySearch.stats.queryStats.length === 14
+      && familySearch.stats.queryStats.at(-1)?.query === 'software engineering intern'
+      && familySearch.stats.queryStats.every(({ reachedEnd, truncated }) => reachedEnd && !truncated)
+      && familySearch.stats.globalCapHit === false) {
+    pass('14-query two-page search reaches every role family within the derived 560-row cap');
+  } else {
+    fail(`family search bounds = ${JSON.stringify({ calls: familyCalls.length, jobs: familySearch.jobs.length, stats: familySearch.stats })}`);
   }
 
   // A repeated search page stops that query safely instead of walking forever.
@@ -381,6 +467,42 @@ try {
     pass('generic discovery pass uses the browse API with a 20-job cap');
   } else {
     fail(`discovery requests = ${JSON.stringify(discoveryCalls)}`);
+  }
+
+  const bounded = await himalayas.fetch(
+    {
+      name: 'Himalayas', search_queries: ['data engineer'], search_max_pages: 1,
+      search_max_jobs: 20, max_pages: 1, max_jobs: 20,
+    },
+    { fetchJson: async (url) => new URL(url).pathname.endsWith('/search')
+      ? { offset: 0, limit: 20, totalCount: 40, jobs: Array.from({ length: 20 }, (_, index) => searchRow(`bounded-${index}`)) }
+      : { offset: 0, limit: 20, totalCount: 0, jobs: [] } },
+  );
+  const boundedCoverage = providerCoverage(bounded);
+  if (bounded.length === 20 && boundedCoverage?.code === 'bounded_search'
+      && boundedCoverage.reason.includes('search_max_jobs=20')) {
+    pass('global-cap-bounded Himalayas search retains jobs and reports typed partial coverage');
+  } else {
+    fail(`bounded Himalayas coverage = ${JSON.stringify({ jobs: bounded.length, coverage: boundedCoverage })}`);
+  }
+
+  const pageBounded = await himalayas.fetch(
+    {
+      name: 'Himalayas', search_queries: ['data engineer'], search_max_pages: 1,
+      search_max_jobs: 40, max_pages: 1, max_jobs: 20,
+    },
+    { fetchJson: async (url) => new URL(url).pathname.endsWith('/search')
+      ? { offset: 0, limit: 20, totalCount: 40, jobs: Array.from({ length: 20 }, (_, index) => searchRow(`page-bounded-${index}`)) }
+      : { offset: 0, limit: 20, totalCount: 0, jobs: [] } },
+  );
+  const pageBoundedCoverage = providerCoverage(pageBounded);
+  if (pageBounded.length === 20 && pageBoundedCoverage?.code === 'bounded_search'
+      && pageBoundedCoverage.reason.includes('1 of 1 targeted queries')
+      && pageBoundedCoverage.reason.includes('configured page cap')
+      && !pageBoundedCoverage.reason.includes('search_max_jobs')) {
+    pass('per-query page bounds retain jobs and report the distinct aggregate partial cause');
+  } else {
+    fail(`page-bounded Himalayas coverage = ${JSON.stringify({ jobs: pageBounded.length, coverage: pageBoundedCoverage })}`);
   }
 
   const healthyEmpty = await fetchHimalayasPages(

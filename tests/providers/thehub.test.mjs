@@ -9,6 +9,7 @@ try {
   const thehubModule = await import(pathToFileURL(join(ROOT, 'providers/thehub.mjs')).href);
   const thehub = thehubModule.default;
   const { normalizeHubJob } = thehubModule;
+  const { providerCoverage } = await import(pathToFileURL(join(ROOT, 'providers/_result.mjs')).href);
 
   if (thehub.id === 'thehub') pass('thehub.id is "thehub"');
   else fail(`thehub.id is ${JSON.stringify(thehub.id)}`);
@@ -102,7 +103,7 @@ try {
   // Stops at the reported total pages even when every page is full.
   const fullReq = [];
   const fullPage = (page) => response({ docs: Array.from({ length: 15 }, (_, i) => mk(page * 100 + i)), page, pages: 2, limit: 15 });
-  await thehub.fetch(
+  const fullCoverage = await thehub.fetch(
     { name: 'The Hub', max_pages: 10 },
     { fetchJson: async (url) => { const p = Number(new URL(url).searchParams.get('page')); fullReq.push(p); return fullPage(p); } },
   );
@@ -111,10 +112,12 @@ try {
   } else {
     fail(`thehub.fetch() pages-stop requested ${JSON.stringify(fullReq)}`);
   }
+  if (providerCoverage(fullCoverage) === null) pass('thehub.fetch() reports full coverage at the advertised final page');
+  else fail(`thehub.fetch() final-page coverage = ${JSON.stringify(providerCoverage(fullCoverage))}`);
 
   // max_pages cap: only the first page is requested.
   const capReq = [];
-  await thehub.fetch(
+  const capped = await thehub.fetch(
     { name: 'The Hub', max_pages: 1 },
     { fetchJson: async (url) => { capReq.push(url); return response({ docs: Array.from({ length: 15 }, (_, i) => mk(i)), page: 1, pages: 67, limit: 15 }); } },
   );
@@ -122,6 +125,14 @@ try {
     pass('thehub.fetch() honors max_pages (stops at the cap even on a full page)');
   } else {
     fail(`thehub.fetch() max_pages:1 requested ${JSON.stringify(capReq)}`);
+  }
+  const cappedCoverage = providerCoverage(capped);
+  if (capped.length === 15 && cappedCoverage?.code === 'max_pages'
+      && cappedCoverage.pagesFetched === 1 && cappedCoverage.maxPages === 1
+      && cappedCoverage.totalPages === 67) {
+    pass('thehub.fetch() retains capped jobs and reports structured partial coverage');
+  } else {
+    fail(`thehub.fetch() cap coverage = ${JSON.stringify(cappedCoverage)}`);
   }
 
   // A full page with a large `pages` (so neither short-stop nor pages-stop fires)
@@ -165,7 +176,7 @@ try {
   const empty = await thehub.fetch({ name: 'The Hub' }, {
     fetchJson: async () => response({ docs: [], page: 1, pages: 0, total: 0, limit: 15 }),
   });
-  if (Array.isArray(empty) && empty.length === 0) pass('thehub.fetch() treats a valid empty response as healthy empty');
+  if (Array.isArray(empty) && empty.length === 0 && providerCoverage(empty) === null) pass('thehub.fetch() treats a valid empty response as healthy empty with full coverage');
   else fail(`thehub.fetch() healthy empty = ${JSON.stringify(empty)}`);
 
   const network = new Error('network unavailable');

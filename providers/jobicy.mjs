@@ -4,11 +4,11 @@
 import { requiredArray, requireUsableRows } from './_payload.mjs';
 
 // Jobicy provider — board-wide remote-jobs aggregator feed
-// (https://jobicy.com/api/v2/remote-jobs?count=50). Returns { jobs: [...] }.
+// (https://jobicy.com/api/v2/remote-jobs?count=100). Returns { jobs: [...] }.
 //
 // Wire in via a `job_boards:` entry with `provider: jobicy`.
 
-const FEED_URL = 'https://jobicy.com/api/v2/remote-jobs?count=50';
+const FEED_URL = 'https://jobicy.com/api/v2/remote-jobs?count=100';
 
 /** @type {Provider} */
 export default {
