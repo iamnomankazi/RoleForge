@@ -33,6 +33,21 @@ const CANONICAL_REPO = 'https://github.com/santifer/career-ops.git';
 const RAW_VERSION_URL = 'https://raw.githubusercontent.com/santifer/career-ops/main/VERSION';
 const RELEASES_API = 'https://api.github.com/repos/santifer/career-ops/releases/latest';
 
+export const PRIVATE_FORK_UPDATE_POLICY = Object.freeze({
+  customizedPrivateFork: true,
+  automaticUpstreamApply: false,
+  remediation: 'selective reviewed backports',
+});
+
+export function assertAutomaticUpstreamApplyAllowed() {
+  if (PRIVATE_FORK_UPDATE_POLICY.automaticUpstreamApply !== true) {
+    throw new Error(
+      'This is a customized private fork. Automatic upstream application is disabled. '
+      + 'Use selective reviewed backports instead.',
+    );
+  }
+}
+
 // Matches a semver, with or without a leading `v` and an optional
 // Release Please component prefix (e.g. `career-ops-v1.9.0` → `1.9.0`).
 // Anchoring on `(?:^|-)` lets the releases-API fallback parse our tags,
@@ -704,6 +719,8 @@ async function check() {
 // ── APPLY ───────────────────────────────────────────────────────
 
 async function apply() {
+  // Fail before creating locks, backup refs, stashes, or fetching upstream.
+  assertAutomaticUpstreamApplyAllowed();
   const local = localVersion();
   const initialStatusPaths = new Set(gitStatusEntries().map(entry => entry.path));
   const isReexec = process.env.CAREER_OPS_UPDATE_REEXEC === '1';
