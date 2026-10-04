@@ -248,6 +248,15 @@ export function verifyVisibleIdentity(snapshot, candidate) {
       const meaningfulTokens = value.split(' ').filter((token) => token.length >= 3 && !genericCompanyTokens.has(token));
       return meaningfulTokens.length > 0;
     });
+  const corporateSuffixAlias = normalized(candidate?.company)
+    .replace(/\b(?:gmbh|inc|incorporated|llc|ltd|limited|oy|oyj|plc|ag|se|sa|corp|corporation)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (corporateSuffixAlias && corporateSuffixAlias !== company) {
+    const meaningfulTokens = corporateSuffixAlias.split(' ')
+      .filter((token) => token.length >= 3 && !genericCompanyTokens.has(token));
+    if (meaningfulTokens.length > 0) companyAliases.push(corporateSuffixAlias);
+  }
   const matchedCompany = [company, ...companyAliases].find((value) => value && visible.includes(value)) || '';
   const companyMatch = Boolean(matchedCompany);
   const titleMatch = Boolean(title && visible.includes(title));
@@ -289,10 +298,18 @@ export function classifyFormSnapshot(snapshot) {
   const hasResume = descriptors.some((descriptor) => /resume|curriculum vitae|\bcv\b/.test(descriptor));
   const formCount = Number(snapshot?.formCount || 0);
   const pathLooksLikeApplication = /\/(application|apply)(?:[/?#]|$)/i.test(snapshot?.currentUrl || '');
+  const hasTerminalPostControl = (snapshot?.controls || []).some((control) => (
+    control.visible !== false
+    && control.inForm
+    && control.associatedForm
+    && normalized(control.formMethod) === 'post'
+    && /\b(?:submit application|send application|complete application|apply now)\b/.test(normalized(control.text))
+  ));
   const actualForm = !loginRequired && (
     (signalIndexes.size >= 2 && (formCount > 0 || fields.length >= 3))
     || (hasEmail && hasResume)
     || (pathLooksLikeApplication && signalIndexes.size >= 1 && formCount > 0)
+    || (pathLooksLikeApplication && formCount > 0 && fields.length >= 5 && hasTerminalPostControl)
   );
 
   return {
@@ -891,6 +908,41 @@ async function inspectContinuationAttempt(context, page, before, beforeUrl, expe
   };
 }
 
+async function verifiedEmbeddedApplicationFrame(page, snapshot) {
+  let listing;
+  try {
+    listing = new URL(snapshot?.currentUrl || page.url());
+  } catch {
+    return null;
+  }
+  const greenhouseJobId = listing.searchParams.get('gh_jid');
+  if (!greenhouseJobId) return null;
+  const frames = await page.locator('iframe[src]').evaluateAll((nodes) => nodes.map((node) => {
+    const rect = node.getBoundingClientRect();
+    const style = getComputedStyle(node);
+    return {
+      src: node.getAttribute('src') || '',
+      title: node.getAttribute('title') || '',
+      visible: rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden',
+    };
+  })).catch(() => []);
+  for (const frame of frames) {
+    if (!frame.visible || !frame.src) continue;
+    let destination;
+    try {
+      destination = new URL(frame.src, listing);
+    } catch {
+      continue;
+    }
+    if (!/(?:^|\.)greenhouse\.io$/i.test(destination.hostname)) continue;
+    if (destination.pathname !== '/embed/job_app') continue;
+    if (destination.searchParams.get('token') !== greenhouseJobId) continue;
+    if (!isKnownApplicationHost(destination.toString())) continue;
+    return { url: destination.toString(), title: inline(frame.title) || 'Embedded Greenhouse application' };
+  }
+  return null;
+}
+
 export async function followSafeContinuation(context, page, control, scope, {
   observationWindowMs = 4_500,
 } = {}) {
@@ -994,6 +1046,46 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
   let hopLimit = 1;
 
   while (!form.actualForm && !form.loginRequired && hops.length < hopLimit) {
+    const embeddedFrame = await verifiedEmbeddedApplicationFrame(page, snapshot);
+    if (embeddedFrame) {
+      const sourceUrl = snapshot.currentUrl;
+      await page.goto(embeddedFrame.url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      await page.waitForTimeout(Math.min(observationWindowMs, 1_000));
+      snapshot = await collectPageSnapshot(page);
+      form = classifyFormSnapshot(snapshot);
+      identity = verifyVisibleIdentity(snapshot, candidate);
+      compatible = isCompatibleApplicationEntryDestination({
+        listingUrl,
+        applyUrl,
+        currentUrl: snapshot.currentUrl,
+        identity,
+      });
+      hops.push({
+        sourceUrl,
+        destinationUrl: snapshot.currentUrl,
+        tag: 'iframe',
+        text: embeddedFrame.title,
+        controlId: 'verified-embedded-greenhouse-form',
+        duplicateCandidateCount: 1,
+        activationMethod: 'verified_iframe_navigation',
+        siteChromeActions: [...siteChromeActions],
+      });
+      if (!compatible || (!form.actualForm && !form.loginRequired)) {
+        return {
+          page,
+          snapshot,
+          form,
+          identity,
+          compatible,
+          hops,
+          siteChromeActions,
+          reason: !compatible
+            ? `Embedded application destination is incompatible: ${identity.reason}`
+            : 'Verified embedded Greenhouse destination did not expose an application form.',
+        };
+      }
+      break;
+    }
     const scope = {
       listingUrl: snapshot.currentUrl || listingUrl,
       applyUrl,

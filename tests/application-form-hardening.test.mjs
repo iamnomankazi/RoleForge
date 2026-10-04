@@ -7,6 +7,7 @@ import { chromium } from 'playwright';
 import { appendFormPreparationEvidence } from '../application-batch.mjs';
 import {
   buildOperationalFormPlan,
+  inspectOperationalApplicationForm,
   prepareOperationalApplicationForm,
 } from '../application-form-engine.mjs';
 import {
@@ -333,6 +334,28 @@ test('terminal type=button Apply is untouched during automation and normal user 
   await page.close();
 });
 
+test('HRworks form-group labels bind opaque numeric controls and preserve the final anchor', async () => {
+  const page = await browser.newPage();
+  await page.setContent(`<form id="application" method="post">
+    <div class="form-group"><label class="control-label"><span>First name</span>:</label><input name="1-72" placeholder="Mandatory"></div>
+    <div class="form-group"><label class="control-label"><span>Last name</span>:</label><input name="1-81" placeholder="Mandatory"></div>
+    <div class="form-group"><label class="control-label"><span>Email</span>:</label><input name="1-91" placeholder="Mandatory"></div>
+    <div class="form-group"><label class="control-label"><span>Application documents</span>:</label><input name="file" type="file" accept=".pdf"></div>
+    <a class="btn" id="submit-link">Submit application</a>
+  </form>`);
+  const snapshot = await inspectOperationalApplicationForm(page);
+  assert.equal(snapshot.fields.find((field) => field.name === '1-72').questionText, 'First name:');
+  assert.equal(snapshot.fields.find((field) => field.name === '1-72').required, true);
+  const result = await prepareOperationalApplicationForm(page, profile, {}, { context: formContext });
+  assert.equal(await page.locator('[name="1-72"]').inputValue(), profile.candidate.full_name.split(' ')[0]);
+  assert.equal(await page.locator('[name="1-81"]').inputValue(), profile.candidate.full_name.split(' ').at(-1));
+  assert.equal(await page.locator('[name="1-91"]').inputValue(), profile.candidate.email);
+  assert.equal(result.evidence.uploadTopology.mode, 'single_combined');
+  assert.equal(result.evidence.finalAction.detected, true);
+  assert.equal(result.evidence.finalAction.activated, false);
+  await page.close();
+});
+
 test('3–6. authorization and sponsorship are exact Yes/No decisions by verified jurisdiction', () => {
   assert.equal(resolveAuthorizationAnswer(profile, 'work_authorization', { jobCountry: 'Finland' }), 'Yes');
   assert.equal(resolveAuthorizationAnswer(profile, 'sponsorship', { jobCountry: 'Finland' }), 'No');
@@ -622,6 +645,25 @@ test('a newly bound document revision gets one fresh controlled preparation pass
   };
   const result = await prepareOperationalApplicationForm(page, profile, {
     coverLetter: { sha256: 'sha256:new-cover' },
+  }, {
+    context: formContext, previousEvidence: prior, resumeMode: 'process_recovery',
+  });
+  assert.equal(await page.locator('#email').inputValue(), profile.candidate.email);
+  assert.equal(result.evidence.passBudget.controlledResumeUsed, 1);
+  assert.equal(result.evidence.passBudget.artifactRevisionReset, true);
+  await page.close();
+});
+
+test('a newly bound combined document gets one upload pass after topology review', async () => {
+  const page = await browser.newPage();
+  await page.setContent(`<form><label for="email">Email</label><input id="email" required><button type="submit">Submit application</button></form>`);
+  const prior = {
+    attemptLedger: [], answerRecords: [], unresolvedFields: [], uploadedArtifacts: [],
+    uploadTopology: { mode: 'single_combined' },
+    passBudget: { controlledResumeUsed: 2 },
+  };
+  const result = await prepareOperationalApplicationForm(page, profile, {
+    combinedDocument: { sha256: 'sha256:new-combined' },
   }, {
     context: formContext, previousEvidence: prior, resumeMode: 'process_recovery',
   });

@@ -99,7 +99,7 @@ export function buildGroundedCoverLetter(profile, candidate, jdText, cvSelection
     'Dear Hiring Team,',
     `I am applying for the ${candidate.title} role at ${candidate.company}.`,
     narrative.answer,
-    `The job description emphasizes ${requirementText}. I would welcome an interview to discuss the role and the factual examples above.`,
+    `The role calls for ${requirementText}. I would welcome an interview to discuss the role and the factual examples above.`,
     'Thank you for considering my application.',
   ].map((paragraph) => paragraph.replace(/—/g, ',')).filter(Boolean);
   const body = paragraphs.join('\n\n');
@@ -131,7 +131,7 @@ export function buildGroundedCoverLetter(profile, candidate, jdText, cvSelection
       letter: {
         role_title: candidate.title,
         company: candidate.company,
-        date: now.toISOString().slice(0, 10),
+        date: candidateLocalDate(now, profile),
         greeting: paragraphs[0],
         opening: paragraphs[1],
         profile_intro: paragraphs[2],
@@ -148,6 +148,17 @@ export function buildGroundedCoverLetter(profile, candidate, jdText, cvSelection
       },
     },
   };
+}
+
+export function candidateLocalDate(now, profile) {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: profile?.location?.timezone || 'UTC',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const parts = Object.fromEntries(formatter.formatToParts(now).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
 function documentSourceHashes(profile) {

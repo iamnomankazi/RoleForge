@@ -286,7 +286,7 @@ export async function inspectApplicationForm(page) {
           placeholder: element.getAttribute('placeholder') || '',
           required: element.required
             || element.getAttribute('aria-required') === 'true'
-            || /(?:\*\s*(?:\(required\))?|\(required\))/i.test(fieldText),
+            || /(?:\*\s*(?:\(required\))?|\(required\)|\bmandatory\b)/i.test(fieldText),
           disabled: element.disabled || element.getAttribute('aria-disabled') === 'true',
           visible: visible(element),
           autocomplete: element.getAttribute('aria-autocomplete') || element.getAttribute('autocomplete') || '',
@@ -296,7 +296,7 @@ export async function inspectApplicationForm(page) {
           options: element.tagName === 'SELECT' ? [...element.options].map((option) => ({ label: option.textContent.trim(), value: option.value })) : [],
         };
       });
-    const controls = [...document.querySelectorAll('button, input[type="submit"], input[type="button"], a[role="button"]')]
+    const controls = [...document.querySelectorAll('button, input[type="submit"], input[type="button"], a[role="button"], a.btn')]
       .filter(visible)
       .map((element) => ({
         label: textFor(element),

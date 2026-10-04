@@ -167,12 +167,13 @@ export async function inspectOperationalApplicationForm(page) {
       const groupLabel = clean(fieldset?.querySelector(':scope > legend')?.innerText)
         || clean(element.closest('[role="group"], [role="radiogroup"]')?.getAttribute('aria-label'));
       const ownLabel = element.labels ? clean([...element.labels].map((label) => label.innerText).join(' ')) : '';
+      const formGroupLabel = clean(element.closest('.form-group')?.querySelector(':scope > label.control-label')?.innerText);
       const optionLabel = ['radio', 'checkbox'].includes((element.type || '').toLowerCase()) ? ownLabel : '';
       const selected = element.tagName === 'SELECT' ? element.selectedOptions?.[0]?.textContent : '';
       return {
         fieldId: element.getAttribute('data-career-ops-field-id'),
         groupLabel,
-        questionText: groupLabel || ownLabel || element.getAttribute('aria-label') || element.placeholder || element.name || element.id || '',
+        questionText: groupLabel || ownLabel || formGroupLabel || element.getAttribute('aria-label') || element.placeholder || element.name || element.id || '',
         optionLabel,
         maxLength: Number(element.getAttribute('maxlength') || 0) || null,
         minLength: Number(element.getAttribute('minlength') || 0) || null,
@@ -993,7 +994,13 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
     artifacts?.combinedDocument?.sha256,
   ].filter(Boolean));
   const priorUploads = Array.isArray(previousEvidence?.uploadedArtifacts) ? previousEvidence.uploadedArtifacts : [];
-  const artifactSetChanged = priorUploads.some((upload) => upload?.sha256 && !currentArtifactHashes.has(upload.sha256));
+  const newlyBoundCombinedDocument = Boolean(
+    artifacts?.combinedDocument?.sha256
+    && previousEvidence?.uploadTopology?.mode === 'single_combined'
+    && !priorUploads.some((upload) => upload?.sha256 === artifacts.combinedDocument.sha256),
+  );
+  const artifactSetChanged = newlyBoundCombinedDocument
+    || priorUploads.some((upload) => upload?.sha256 && !currentArtifactHashes.has(upload.sha256));
   const effectivePreviousEvidence = artifactSetChanged
     ? {
       ...previousEvidence,

@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { writeImmutableScanRun } from '../scan-candidate-contract.mjs';
 import { createApplicationBatch, loadBatchState } from '../application-batch.mjs';
-import { createDocumentPlan, prepareAndBindDocuments, validateDocumentPlan } from '../application-documents.mjs';
+import { candidateLocalDate, createDocumentPlan, prepareAndBindDocuments, validateDocumentPlan } from '../application-documents.mjs';
 import { buildHtml, coverLetterFilename } from '../generate-cover-letter.mjs';
 import { sha256Canonical } from '../application-integrity.mjs';
 import { loadApplicationProfile, selectApprovedCv } from '../application-profile.mjs';
@@ -54,6 +54,13 @@ function answerHash(value) {
   return `sha256:${createHash('sha256').update(clean).digest('hex')}`;
 }
 
+test('cover-letter date uses the candidate timezone across a UTC date boundary', () => {
+  assert.equal(candidateLocalDate(
+    new Date('2030-12-31T23:30:00.000Z'),
+    { location: { timezone: 'Europe/Helsinki' } },
+  ), '2031-01-01');
+});
+
 test('document plan binds exact JD, approved CV, grounded cover content, and readable filenames', async () => {
   const f = fixture();
   try {
@@ -67,6 +74,8 @@ test('document plan binds exact JD, approved CV, grounded cover content, and rea
     assert.equal(coverLetterFilename('Tesla'), 'tesla_cover_letter.pdf');
     assert.equal(coverLetterFilename('ACME & Sons'), 'acme_sons_cover_letter.pdf');
     assert.match(plan.coverLetter.text, /250K\+/);
+    assert.match(plan.coverLetter.text, /The role calls for/);
+    assert.doesNotMatch(plan.coverLetter.text, /The job description emphasizes/i);
     const html = buildHtml(plan.coverLetter.payload);
     assert.match(html, /font-family: "Times New Roman"/);
     assert.match(html, /<div class="role-title">Cover Letter<\/div>/);

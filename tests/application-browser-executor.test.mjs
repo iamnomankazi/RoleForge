@@ -292,6 +292,14 @@ test('compound company identity accepts only meaningful explicit slash aliases',
   }, candidate).verified, false);
 });
 
+test('visible company identity accepts omission of a legal corporate suffix', () => {
+  const candidate = { company: 'Poppe + Potthoff GmbH', title: 'Junior Data Engineer (m/w/d)' };
+  assert.equal(verifyVisibleIdentity({
+    documentTitle: 'Junior Data Engineer (m/w/d) - Poppe + Potthoff Karriere',
+    bodyText: 'Junior Data Engineer (m/w/d) Application form',
+  }, candidate).verified, true);
+});
+
 test('fresh executor DOM may confirm a delayed safe entry without changing scanner liveness', () => {
   const listingUrl = 'https://www.linkedin.com/jobs/view/4449325899';
   const candidate = { company: 'Fluxion', title: 'Data Scientist / AI Engineer' };
@@ -325,6 +333,19 @@ test('listing pages, login gates, and actual forms remain distinct', () => {
       { type: 'email', text: 'Email', visible: true },
       { type: 'file', text: 'Resume', visible: true },
     ],
+  }).actualForm, true);
+});
+
+test('opaque HRworks apply form is recognized by its bounded POST terminal structure', () => {
+  assert.equal(classifyFormSnapshot({
+    currentUrl: 'https://career.example.test/en/apply?id=47e8ae',
+    bodyText: 'Junior Data Engineer Application form First name Last name Email Mobile number',
+    formCount: 2,
+    fields: Array.from({ length: 8 }, (_, index) => ({ type: 'text', text: `Mandatory field-${index}`, visible: true })),
+    controls: [{
+      tag: 'a', text: 'Submit application', visible: true, inForm: true,
+      associatedForm: true, formMethod: 'post',
+    }],
   }).actualForm, true);
 });
 

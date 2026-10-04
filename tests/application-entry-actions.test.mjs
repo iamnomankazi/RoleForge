@@ -394,6 +394,25 @@ test('company listing may use one verified known-ATS intermediate before the act
   });
 });
 
+test('verified Greenhouse iframe for the exact gh_jid becomes the task page application form', async () => {
+  const listingUrl = 'https://careers.acme.test/jobs/data-engineer?gh_jid=123';
+  const embeddedUrl = 'https://job-boards.eu.greenhouse.io/embed/job_app?for=acme&token=123';
+  await withFixture({
+    [listingUrl]: `<h1>Acme Data Engineer</h1><iframe title="Greenhouse Job Board" src="${embeddedUrl}" style="width:800px;height:600px"></iframe><a href="#apply">Apply Now</a>`,
+    [embeddedUrl]: FORM_HTML,
+  }, async ({ context, page }) => {
+    await page.goto(listingUrl);
+    const result = await followSafeApplicationEntryFlow(
+      context, page, await collectPageSnapshot(page), CANDIDATE, { listingUrl },
+    );
+    assert.equal(result.form.actualForm, true);
+    assert.equal(result.compatible, true);
+    assert.equal(result.page.url(), embeddedUrl);
+    assert.equal(result.hops[0].controlId, 'verified-embedded-greenhouse-form');
+    assert.equal(result.hops[0].activationMethod, 'verified_iframe_navigation');
+  });
+});
+
 test('final form Apply and every submit-type button remain unreachable as entry actions', async () => {
   const formUrl = 'https://careers.acme.test/jobs/data-engineer/application';
   await withFixture({ [formUrl]: FORM_HTML }, async ({ page }) => {
