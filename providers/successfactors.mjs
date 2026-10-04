@@ -1,5 +1,6 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
+import { requiredArray, requireHtmlContract, requireUsableRows } from './_payload.mjs';
 
 // SAP SuccessFactors provider — Recruiting Marketing (RMK, ex-jobs2web) career
 // sites (Career Site Builder's branded job boards). These are the portals big
@@ -322,6 +323,9 @@ async function fetchCsb(entry, cfg, ctx, { probe = false } = {}) {
         firstError ??= error;
         break; // this locale failed (e.g. 307 legacy redirect) — try the next
       }
+      const rawRows = requiredArray(json, 'jobSearchResult', 'successfactors');
+      const rows = parseCsbJobs(json, cfg, locale);
+      requireUsableRows(rawRows, rows, 'successfactors');
       succeededOnce = true;
       if (total === null) {
         total = typeof json?.totalJobs === 'number' ? json.totalJobs : null;
@@ -330,9 +334,8 @@ async function fetchCsb(entry, cfg, ctx, { probe = false } = {}) {
       // parseCsbJobs drops id/title-less records, and a full API page with a
       // few dropped records would otherwise look "short" and stop pagination
       // before reaching later pages that still hold valid jobs.
-      const rawCount = Array.isArray(json?.jobSearchResult) ? json.jobSearchResult.length : 0;
+      const rawCount = rawRows.length;
       if (rawCount === 0) break;
-      const rows = parseCsbJobs(json, cfg, locale);
 
       for (const row of rows) {
         if (seen.has(row.id)) continue;
@@ -349,6 +352,7 @@ async function fetchCsb(entry, cfg, ctx, { probe = false } = {}) {
     }
   }
   if (!probe && !succeededOnce && firstError) throw firstError;
+  if (succeededOnce && firstError) jobs.providerDegraded = true;
   return jobs;
 }
 
@@ -359,11 +363,13 @@ async function fetchRmk(entry, cfg, ctx) {
   const seen = new Set();
   let startrow = 0;
   for (let page = 0; page < MAX_PAGES; page++) {
-    const htmlText = await ctx.fetchText(`${cfg.tileApi}?startrow=${startrow}`, {
+    const htmlText = requireHtmlContract(await ctx.fetchText(`${cfg.tileApi}?startrow=${startrow}`, {
       redirect: 'error',
       headers: { accept: 'text/html' },
-    });
+    }), [/job-tile/i, /^\s*<!doctype\s+html[^>]*>\s*$/i, /\bno\s+(?:jobs|positions|results)\b/i], 'successfactors');
     const tiles = parseTiles(htmlText, cfg.jobBase);
+    const rawTiles = htmlText.match(/class="[^"]*\bjob-tile\b/gi) || [];
+    requireUsableRows(rawTiles, tiles, 'successfactors');
     if (tiles.length === 0) break;
 
     let fresh = 0;

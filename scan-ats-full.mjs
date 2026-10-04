@@ -379,6 +379,8 @@ export async function runSeedScan(seedId, opts, ctx, seenUrls, label) {
     attempted++;
     try {
       jobs = await provider.fetch(entry, ctx);
+      if (!Array.isArray(jobs)) throw new Error(`${provider.id}: fetch() did not return an array`);
+      if (jobs.providerDegraded) errors++;
       succeeded++;
     } catch (err) {
       errors++;
@@ -416,7 +418,7 @@ export async function parallelEach(items, limit, fn, onItemDone = null, shouldSt
       if (shouldStop?.()) return;
       const index = i++;
       inFlight.add(index);
-      try { await fn(items[index]); } finally {
+      try { await fn(items[index], index); } finally {
         inFlight.delete(index);
         done++;
         resumeAt = inFlight.size > 0 ? Math.min(...inFlight) : i;
@@ -512,6 +514,7 @@ async function main() {
   let totalCompaniesScanned = checkpoint?.counters?.totalCompaniesScanned || 0;
   let totalCompaniesAvailable = checkpoint?.counters?.totalCompaniesAvailable || 0;
   let totalErrors = checkpoint?.counters?.totalErrors || 0;
+  const errorsAtStart = totalErrors;
   let totalAttemptedTargets = checkpoint?.counters?.totalAttemptedTargets || 0;
   let totalSuccessfulTargets = checkpoint?.counters?.totalSuccessfulTargets || 0;
   let droppedNoDate = checkpoint?.counters?.droppedNoDate || 0;
@@ -525,6 +528,7 @@ async function main() {
   const datasetStatus = {};
   let unavailableSources = 0;
   let stoppedByOutage = false;
+  let checkpointCanClear = Boolean(checkpoint);
 
   for (const name of opts.ats) {
     if (completedSources.has(name)) continue;
@@ -535,11 +539,13 @@ async function main() {
     const resumingCurrent = checkpoint?.current?.name === name;
     if (!resumingCurrent) totalCompaniesAvailable += list.length;
     if (opts.limit < list.length) capHit = true;
-    const startAt = resumingCurrent ? Number(checkpoint.current.resumeAt) || 0 : 0;
+    const startAt = 0;
     const sampledEntries = sampleCompanies(list, opts.limit, opts.shuffle).map(source.toEntry).filter(Boolean);
-    const entries = resumingCurrent && Array.isArray(checkpoint.current.remainingEntries)
-      ? checkpoint.current.remainingEntries
-      : sampledEntries.slice(startAt);
+    const entries = resumingCurrent && Array.isArray(checkpoint.current.pendingEntries)
+      ? checkpoint.current.pendingEntries
+      : resumingCurrent && Array.isArray(checkpoint.current.remainingEntries)
+        ? checkpoint.current.remainingEntries
+        : sampledEntries;
     totalCompaniesScanned += entries.length;
     log(`\n⚙  ${name} — ${entries.length} companies${status !== 'ok' ? ` (dataset: ${status})` : ''}${startAt ? ` (resuming at ${startAt})` : ''}`);
 
@@ -549,10 +555,13 @@ async function main() {
     let outageCompany = null;
     let lastDone = 0;
     let lastResumeAt = 0;
-    await parallelEach(entries, CONCURRENCY, async (entry) => {
+    const unresolved = new Set(entries.map((_, index) => index));
+    await parallelEach(entries, CONCURRENCY, async (entry, entryIndex) => {
       totalAttemptedTargets++;
       try {
         const jobs = await source.provider.fetch(entry, ctx);
+        if (!Array.isArray(jobs)) throw new Error(`${source.provider.id}: fetch() did not return an array`);
+        if (jobs.providerDegraded) errors++;
         totalSuccessfulTargets++;
         consecutiveResolverFailures = 0;
         if (jobs.workdayNoDateSkip) { noDateSkipCompanies++; noDateSkipJobs += jobs.length; }
@@ -571,6 +580,7 @@ async function main() {
           seenUrls.add(urlKey); // intra-scan dedup
           newOffers.push({ ...job, source: `${name}-full`, dateStatus: job.postedAt ? 'dated' : 'unknown' });
         }
+        unresolved.delete(entryIndex);
       } catch (err) {
         // Mostly defunct boards in the public dataset — expected noise, so the
         // default stays quiet; --verbose surfaces per-board failures.
@@ -602,8 +612,7 @@ async function main() {
           runId: opts.runId,
           current: {
             name,
-            resumeAt: startAt + lastResumeAt,
-            remainingEntries: entries.slice(lastResumeAt),
+            pendingEntries: [...unresolved].sort((a, b) => a - b).map((index) => entries[index]),
           },
           completedSources: [...completedSources],
           counters: { totalCompaniesScanned, totalCompaniesAvailable, totalErrors, totalAttemptedTargets, totalSuccessfulTargets, droppedNoDate },
@@ -613,7 +622,22 @@ async function main() {
       log(`\n  ⛔ stopped ${name}/${outageCompany}: ${RESOLVER_FAILURE_LIMIT} consecutive resolver failures; checkpoint preserved for --resume`);
       break;
     }
-    completedSources.add(name);
+    if (resumingCurrent && unresolved.size > 0) {
+      checkpointCanClear = false;
+      if (!opts.dryRun) {
+        writeAtsCheckpoint({
+          version: 1,
+          runId: opts.runId,
+          current: { name, pendingEntries: [...unresolved].sort((a, b) => a - b).map((index) => entries[index]) },
+          completedSources: [...completedSources],
+          counters: { totalCompaniesScanned, totalCompaniesAvailable, totalErrors, totalAttemptedTargets, totalSuccessfulTargets, droppedNoDate },
+          offers: newOffers,
+        });
+      }
+    } else if (resumingCurrent) {
+      checkpointCanClear = true;
+    }
+    if (!resumingCurrent || unresolved.size === 0) completedSources.add(name);
     log(`\n  done (${errors} unreachable boards skipped)`);
   }
 
@@ -634,16 +658,19 @@ async function main() {
   }
 
   const degradedDataset = Object.values(datasetStatus).some((status) => status !== 'ok');
-  const allUnavailable = !stoppedByOutage && totalSuccessfulTargets === 0
-    && (totalAttemptedTargets > 0 || unavailableSources > 0 || opts.ats.length + opts.seeds.length > 0);
-  const completionStatus = stoppedByOutage
+  const resumeIncomplete = Boolean(checkpoint) && !checkpointCanClear;
+  const noExecutableTargets = !stoppedByOutage && totalAttemptedTargets === 0;
+  const allUnavailable = !stoppedByOutage && totalAttemptedTargets > 0 && totalSuccessfulTargets === 0;
+  const completionStatus = stoppedByOutage || resumeIncomplete
     ? 'paused'
+    : noExecutableTargets
+      ? 'no_executable_targets'
     : allUnavailable
       ? 'failed'
-      : (totalErrors > 0 || degradedDataset || unavailableSources > 0 ? 'partial' : 'completed');
+      : (totalErrors > errorsAtStart || degradedDataset || unavailableSources > 0 ? 'partial' : 'completed');
 
   let offers = newOffers;
-  if (offers.length && opts.liveness && !stoppedByOutage) offers = await filterLive(newOffers);
+  if (offers.length && opts.liveness && !stoppedByOutage && !resumeIncomplete) offers = await filterLive(newOffers);
   offers.sort((a, b) => (b.postedAt || 0) - (a.postedAt || 0));
 
   log(`\n${'━'.repeat(45)}`);
@@ -676,7 +703,7 @@ async function main() {
   // Persist (unless dry-run, or nothing to save).
   let saved = false;
   let immutableRun = null;
-  if (!opts.dryRun && !stoppedByOutage && !allUnavailable) {
+  if (!opts.dryRun && totalSuccessfulTargets > 0 && !stoppedByOutage && !resumeIncomplete) {
     immutableRun = persistFullAtsScanRun({
       runId: opts.runId,
       offers,
@@ -688,7 +715,7 @@ async function main() {
     });
     log(`\nImmutable canonical run: ${immutableRun.runDir}`);
   }
-  if (offers.length && !opts.dryRun && !stoppedByOutage && !allUnavailable) {
+  if (offers.length && !opts.dryRun && totalSuccessfulTargets > 0 && !stoppedByOutage && !resumeIncomplete) {
     // appendToPipeline assumes the file exists (onboarding creates it) — cover fresh setups.
     if (!existsSync(PIPELINE_PATH)) {
       mkdirSync(path.dirname(PIPELINE_PATH), { recursive: true });
@@ -723,7 +750,7 @@ async function main() {
   // The authoritative machine-readable result: lets a caller (e.g. the web)
   // tell a *degraded* scan (capped / stale dataset / undated dropped) apart
   // from a genuinely *empty* one. In --json mode stdout carries ONLY this.
-  if (checkpoint && !opts.dryRun && !stoppedByOutage && !allUnavailable && existsSync(CHECKPOINT_PATH)) unlinkSync(CHECKPOINT_PATH);
+  if (checkpoint && checkpointCanClear && !opts.dryRun && !stoppedByOutage && existsSync(CHECKPOINT_PATH)) unlinkSync(CHECKPOINT_PATH);
 
   if (opts.json) {
     process.stdout.write(JSON.stringify({
@@ -741,6 +768,7 @@ async function main() {
       runId: opts.runId,
       immutableRunDir: immutableRun?.runDir || null,
       stoppedByOutage,
+      checkpointRetained: stoppedByOutage || resumeIncomplete,
       status: completionStatus,
       targetsAttempted: totalAttemptedTargets,
       targetsSucceeded: totalSuccessfulTargets,
@@ -755,17 +783,22 @@ async function main() {
         source: o.source,
       })),
     }) + '\n');
-    if (stoppedByOutage || allUnavailable) process.exitCode = 1;
+    if (stoppedByOutage || resumeIncomplete || allUnavailable || noExecutableTargets) process.exitCode = 1;
     return;
   }
 
-  if (stoppedByOutage) {
+  if (stoppedByOutage || resumeIncomplete) {
     log(`\nSweep paused by resolver outage. Resume with --resume --run-id ${opts.runId}.`);
     process.exitCode = 1;
     return;
   }
   if (allUnavailable) {
     log('\nSweep failed: every selected dataset/provider was unavailable; no completed candidate run was created.');
+    process.exitCode = 1;
+    return;
+  }
+  if (noExecutableTargets) {
+    log('\nSweep produced no executable provider targets; no candidate run was created.');
     process.exitCode = 1;
     return;
   }

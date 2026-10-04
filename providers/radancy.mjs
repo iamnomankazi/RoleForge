@@ -1,5 +1,6 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
+import { requireHtmlContract, requireUsableRows } from './_payload.mjs';
 
 // Radancy (TalentBrew) provider — the career sites Radancy hosts for large
 // employers (careers.munichre.com and its ERGO brands, plus many others). The
@@ -120,15 +121,23 @@ export default {
     const jobs = [];
     const seen = new Set();
     let succeededOnce = false;
+    let degraded = false;
 
     for (let page = 1; page <= maxPages; page++) {
       if (page > 1) await wait(PAGE_DELAY_MS);
       let rows;
       try {
-        const html = await ctx.fetchText(`${listUrl}?p=${page}`, { headers: { accept: 'text/html' } });
+        const html = requireHtmlContract(
+          await ctx.fetchText(`${listUrl}?p=${page}`, { headers: { accept: 'text/html' } }),
+          [/search-results-list__item/i, /^\s*<html>\s*<\/html>\s*$/i, /\bno\s+(?:jobs|positions|results)\b/i],
+          'radancy',
+        );
         rows = parseResults(html, origin);
+        const rawRows = html.split(/<li class="search-results-list__item/).slice(1);
+        requireUsableRows(rawRows, rows, 'radancy');
       } catch (error) {
         if (!succeededOnce) throw error;
+        degraded = true;
         break; // keep jobs collected so far — a transient mid-scan failure shouldn't discard earlier pages
       }
       succeededOnce = true;
@@ -145,6 +154,8 @@ export default {
       if (fresh === 0) break;
       if (jobs.length >= MAX_JOBS) break;
     }
-    return jobs.slice(0, MAX_JOBS);
+    const result = jobs.slice(0, MAX_JOBS);
+    if (degraded) result.providerDegraded = true;
+    return result;
   },
 };

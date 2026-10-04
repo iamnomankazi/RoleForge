@@ -145,7 +145,7 @@ try {
   else fail(`greenhouse.fetch() epoch-0 postedAt = ${JSON.stringify(epochZero[0]?.postedAt)}`);
 
   // Malformed response bodies → empty result, no crash.
-  const emptyCases = [null, {}, { jobs: null }, { jobs: 'nope' }];
+  const emptyCases = [{ jobs: [] }];
   let emptyOk = true;
   for (const body of emptyCases) {
     const out = await greenhouse.fetch(

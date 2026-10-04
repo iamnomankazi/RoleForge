@@ -1,5 +1,6 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
+import { requiredArray, requireUsableRows } from './_payload.mjs';
 
 // Phenom People provider — the "CareerConnect" career sites many large
 // enterprises run (careers.allianz.com and countless others). The search SPA
@@ -151,6 +152,7 @@ export default {
     const seen = new Set();
     let total = null;
     let succeededOnce = false;
+    let degraded = false;
 
     for (let page = 0; page < maxPages; page++) {
       if (page > 0) await wait(PAGE_DELAY_MS);
@@ -186,10 +188,13 @@ export default {
         });
       } catch (error) {
         if (!succeededOnce) throw error;
+        degraded = true;
         break; // keep jobs collected so far — a transient mid-scan failure shouldn't discard earlier pages
       }
-      succeededOnce = true;
+      const rawRows = requiredArray(json, 'refineSearch.data.jobs', 'phenom');
       const { total: pageTotal, rows } = parseRefineSearch(json, cfg);
+      requireUsableRows(rawRows, rows, 'phenom');
+      succeededOnce = true;
       if (total === null) total = pageTotal;
       if (rows.length === 0) break;
 
@@ -207,6 +212,7 @@ export default {
       if (jobs.length >= MAX_JOBS) break;
       if (total !== null && (page + 1) * PAGE_SIZE >= total) break;
     }
+    if (degraded) jobs.providerDegraded = true;
     return jobs;
   },
 };

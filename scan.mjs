@@ -183,8 +183,9 @@ export function buildLocationFilter(locationFilter) {
     const remoteTitle = /\bremote\b/i.test(title) ? ' remote ' : '';
     const lower = `${locationText} ${urlText}${remoteTitle}`.toLowerCase();
     if (!locationText && ![...alwaysAllow, ...allow, ...block].some((keyword) => matches(lower, keyword))) return true;
+    const explicitlyAllowed = alwaysAllow.some((keyword) => keyword !== 'remote' && matches(lower, keyword));
+    if (block.length > 0 && block.some(k => matches(lower, k)) && !explicitlyAllowed) return false;
     if (alwaysAllow.length > 0 && alwaysAllow.some(k => matches(lower, k))) return true;
-    if (block.length > 0 && block.some(k => matches(lower, k))) return false;
     if (allow.length === 0) return true;
     return allow.some(k => matches(lower, k));
   };
@@ -546,6 +547,7 @@ async function searchForNewUrl(page, offer) {
 const PERMANENT_SCAN_HISTORY_STATUSES = new Set([
   'skipped_invalid_url',
   'skipped_blocked_host',
+  'skipped_expired',
 ]);
 
 function daysBetweenIsoDates(start, end) {
@@ -563,7 +565,7 @@ export function shouldDedupScanHistoryRow({ firstSeen, status = 'added' }, { rec
     const cooldownUntil = parts[parts.length - 1];
     return today < cooldownUntil;
   }
-  if (status !== 'added') return true;
+  if (status !== 'added') return false;
   if (recheckAfterDays == null) return true;
   const ageDays = daysBetweenIsoDates(firstSeen, today);
   if (ageDays == null) return true;
@@ -921,12 +923,11 @@ async function verifyOffers(offers, { headedFallback = false, throttleBaseMs = 0
     );
   }
 
-  // Three permanent buckets + one transient passthrough:
-  //   verified  → active pages and transient nav errors (retry next scan)
-  //   expired   → classifier-confirmed dead postings (HTTP 4xx, redirect markers,
-  //               body patterns, listing pages, insufficient content)
-  //   dropped   → page loaded but classifier saw no Apply control. --verify is an
-  //               opt-in stricter filter; keeping these defeats the purpose.
+  // Routing buckets. Only definitive expired and URL-guard failures are
+  // permanent in scan-history; uncertain/no-Apply outcomes remain retryable.
+  //   verified  → active pages and transient uncertainty (retry next scan)
+  //   expired   → 404/410, explicit closure, or authoritative ATS removal
+  //   dropped   → page loaded but no visible Apply control (retryable)
   //   invalid   → up-front URL guard rejections (malformed / non-http / private)
   const verified = [];
   const expired = [];
@@ -979,8 +980,7 @@ async function verifyOffers(offers, { headedFallback = false, throttleBaseMs = 0
         console.log(`  ⛔ invalid   ${offer.company} | ${offer.title} (${reason})`);
       } else if (result === 'uncertain' && code === 'no_apply_control') {
         // Page loaded but classifier could not find an Apply control. Treat like
-        // expired for routing — drop from pipeline AND record in scan-history so
-        // we don't burn a verify cycle on the same URL next scan.
+        // expired for this run's routing, but record a retryable history status.
         dropped.push({ ...offer, reason });
         console.log(`  ⚠️ no-apply  ${offer.company} | ${offer.title} (${reason})`);
       } else {
@@ -1172,9 +1172,12 @@ async function main() {
   const errors = [...resolveErrors];
   const emptyTargets = [];
   let successfulTargets = 0;
+  let failedTargets = 0;
+  let degradedTargets = 0;
 
   const tasks = targets.map(company => async () => {
     let provider = company._provider;
+    let targetDegraded = false;
     const ctx = { ...makeHttpCtx(), ...(sinceMs == null ? {} : { sinceMs }) };
     let sourceName = provider.id === 'local-parser' ? 'local-parser' : `${provider.id}-api`;
     try {
@@ -1192,10 +1195,16 @@ async function main() {
           company: company.name,
           error: `local parser failed, used API fallback: ${parserErr.message}`,
         });
+        targetDegraded = true;
       }
       if (!Array.isArray(jobs)) {
         throw new Error(`${provider.id}: fetch() did not return an array`);
       }
+      if (jobs.providerDegraded) {
+        targetDegraded = true;
+        errors.push({ company: company.name, error: `${provider.id}: partial provider result`, kind: 'partial' });
+      }
+      if (targetDegraded) degradedTargets++;
       successfulTargets++;
       totalFound += jobs.length;
       if (!company._isBoard && jobs.length === 0) {
@@ -1259,9 +1268,8 @@ async function main() {
         // requisition has the same presentation title.
         if (seenCompanyRoles.has(key) && !atsIdentityFromUrl(job.url)) {
           const existingOffer = newOffersByCompanyRole.get(key);
-          if (existingOffer) mergeSourceQueryMetadata(existingOffer, job);
-          totalDupes++;
-          continue;
+          if (existingOffer) existingOffer.possibleDuplicate = true;
+          job.possibleDuplicate = true;
         }
         const cooldownResult = cooldownFilter(job);
         if (cooldownResult.skip) {
@@ -1291,6 +1299,7 @@ async function main() {
         newOffers.push(offer);
       }
     } catch (err) {
+      failedTargets++;
       errors.push({
         company: company.name,
         error: err.message,
@@ -1301,8 +1310,12 @@ async function main() {
 
   await parallelFetch(tasks, CONCURRENCY);
   const attemptedTargets = targets.length;
-  const allFailed = successfulTargets === 0 && (attemptedTargets > 0 || resolveErrors.length > 0);
-  const completionStatus = allFailed ? 'failed' : (errors.length > 0 ? 'partial' : 'completed');
+  const completionStatus = attemptedTargets === 0
+    ? (agentHandoff.length > 0 ? 'handoff_only' : 'no_executable_targets')
+    : successfulTargets === 0
+      ? 'failed'
+      : (failedTargets > 0 || degradedTargets > 0 ? 'partial' : 'completed');
+  const terminalFailure = completionStatus === 'failed' || completionStatus === 'no_executable_targets';
 
   // 5.5. Optional liveness verification — drop expired and guard-rejected postings
   let verifiedOffers = newOffers;
@@ -1336,7 +1349,7 @@ async function main() {
 
   // 6. Write results
   let immutableRun = null;
-  if (!dryRun && !allFailed) {
+  if (!dryRun && successfulTargets > 0) {
     // Immutable authority is committed first. A repeated run ID or incomplete
     // run write fails before legacy pipeline/history outputs can be mutated.
     immutableRun = persistStandardScanRun({
@@ -1349,7 +1362,8 @@ async function main() {
         completion_status: completionStatus,
         targets_attempted: attemptedTargets,
         targets_succeeded: successfulTargets,
-        targets_failed: errors.length,
+        targets_failed: failedTargets,
+        targets_degraded: degradedTargets,
       },
     });
   }
@@ -1378,8 +1392,8 @@ async function main() {
   if (!dryRun && expiredForHistory.length > 0) {
     appendToScanHistory(expiredForHistory, date, 'skipped_expired');
   }
-  // Pages that loaded but had no Apply control: record so we don't re-verify
-  // them next scan, but never let them reach pipeline.md.
+  // Pages that loaded but had no Apply control do not reach this run's pipeline.
+  // Their status remains retryable in shouldDedupScanHistoryRow.
   if (!dryRun && droppedOffers.length > 0) {
     appendToScanHistory(droppedOffers, date, 'skipped_no_apply_control');
   }
@@ -1525,13 +1539,13 @@ async function main() {
     }
   } else if (!dryRun && immutableRun) {
     console.log(`\nImmutable empty scan run: ${immutableRun.runDir}`);
-  } else if (allFailed) {
+  } else if (terminalFailure) {
     console.error('\n❌ Scan failed: every attempted target was unavailable; no completed candidate run was created.');
   }
 
   // Persist this run's counters (#1604) — guarded exactly like the other
   // writes; a --dry-run must leave no trace.
-  if (!dryRun) {
+  if (!dryRun && successfulTargets > 0) {
     await appendPortalHealth(healthRecords);
     appendScanRunSummary({
       timestamp: new Date().toISOString(), status: completionStatus,
@@ -1543,7 +1557,7 @@ async function main() {
     });
   }
 
-  if (allFailed) {
+  if (terminalFailure) {
     process.exitCode = 1;
     return;
   }

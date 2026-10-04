@@ -9,9 +9,10 @@ import {
   buildLocationFilter,
   normalizeUrlForDedup,
   parseSinceDays,
+  shouldDedupScanHistoryRow,
 } from '../scan.mjs';
 import { classifyLiveness } from '../liveness-core.mjs';
-import { resolveAtsApi } from '../liveness-api.mjs';
+import { resolveAtsApi, classifyWorkdayPosting } from '../liveness-api.mjs';
 import { createCachedLookup, isResolverFailure } from '../providers/_dns-cache.mjs';
 import { appendPortalHealth, loadPortalHealth, computeConsecutiveFailures } from '../portal-health.mjs';
 import { parallelEach, writeAtsCheckpoint, loadAtsCheckpoint } from '../scan-ats-full.mjs';
@@ -46,6 +47,7 @@ function standardScanFixture(entries, runId) {
     id: 'fixture',
     async fetch(entry) {
       if (entry.mode === 'throw') throw new Error('fictional provider unavailable');
+      if (entry.mode === 'two') return [1, 2].map((id) => ({ company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/role-' + id, location: 'Helsinki, Finland' }));
       if (entry.mode === 'job') return [{ company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/Role', location: 'Helsinki, Finland' }];
       return [];
     },
@@ -77,9 +79,12 @@ function reverseScanFixture({ resolver = false } = {}) {
   const cache = join(dir, 'data', 'cache', 'ats-companies');
   mkdirSync(providers, { recursive: true });
   mkdirSync(cache, { recursive: true });
-  writeFileSync(join(providers, 'greenhouse.mjs'), `export default {
+  writeFileSync(join(providers, 'greenhouse.mjs'), `import { appendFileSync } from 'node:fs';
+  export default {
     id: 'greenhouse',
-    async fetch() {
+    async fetch(entry) {
+      if (process.env.FIXTURE_ATTEMPTS) appendFileSync(process.env.FIXTURE_ATTEMPTS, entry.name + '\\n');
+      if (process.env.FIXTURE_RECOVER === '1') return [{ company: entry.name, title: 'Engineer', url: 'https://example.test/' + entry.name, location: 'Helsinki, Finland' }];
       const error = new Error('fictional ${resolver ? 'resolver' : 'provider'} outage');
       ${resolver ? "error.code = 'EREFUSED';" : ''}
       throw error;
@@ -89,6 +94,7 @@ function reverseScanFixture({ resolver = false } = {}) {
   const portals = join(dir, 'portals.yml');
   writeFileSync(portals, 'title_filter:\n  positive: [Engineer]\n');
   const checkpoint = join(dir, 'data', 'cache', 'checkpoint.json');
+  const attempts = join(dir, 'attempts.txt');
   const runId = resolver ? 'resolver-paused' : 'providers-failed';
   const result = spawnSync(process.execPath, [
     join(ROOT, 'scan-ats-full.mjs'), '--run-id', runId, '--ats', 'greenhouse', '--json', '--include-undated',
@@ -102,10 +108,11 @@ function reverseScanFixture({ resolver = false } = {}) {
       CAREER_OPS_ATS_CHECKPOINT: checkpoint,
       CAREER_OPS_RESOLVER_FAILURE_LIMIT: '2',
       CAREER_OPS_NO_DNS_CACHE: '1',
+      FIXTURE_ATTEMPTS: attempts,
       DOTENV_CONFIG_QUIET: 'true',
     },
   });
-  return { dir, checkpoint, result, runDir: join(dir, 'output', 'scan-runs', runId) };
+  return { dir, checkpoint, attempts, portals, providers, result, runId, runDir: join(dir, 'output', 'scan-runs', runId) };
 }
 
 test('--since accepts zero and rejects negative or malformed values', () => {
@@ -148,6 +155,27 @@ test('standard scan CLI distinguishes healthy empty, failed, and partial complet
   }
 });
 
+test('standard scan keeps same-title non-ATS postings at distinct canonical URLs', () => {
+  const fixture = standardScanFixture([{ name: 'Acme', mode: 'two' }], 'same-title-distinct-urls');
+  try {
+    assert.equal(fixture.result.status, 0, fixture.result.stderr);
+    const pipeline = readFileSync(fixture.pipeline, 'utf8');
+    assert.match(pipeline, /role-1/);
+    assert.match(pipeline, /role-2/);
+  } finally { rmSync(fixture.dir, { recursive: true, force: true }); }
+});
+
+test('standard scan reports no executable targets without creating a candidate run', () => {
+  const fixture = standardScanFixture([], 'no-targets');
+  try {
+    assert.notEqual(fixture.result.status, 0);
+    assert.match(fixture.result.stdout, /Completion status:\s+no_executable_targets/);
+    assert.equal(existsSync(fixture.runDir), false);
+    assert.equal(readFileSync(fixture.pipeline, 'utf8'), '# Pipeline\n\n## Pending\n');
+    assert.equal(readFileSync(fixture.history, 'utf8'), 'url\tfirst_seen\tportal\ttitle\tcompany\tstatus\tlocation\n');
+  } finally { rmSync(fixture.dir, { recursive: true, force: true }); }
+});
+
 test('reverse ATS CLI fails closed and preserves resolver checkpoints', () => {
   const failed = reverseScanFixture();
   const paused = reverseScanFixture({ resolver: true });
@@ -164,13 +192,63 @@ test('reverse ATS CLI fails closed and preserves resolver checkpoints', () => {
     assert.equal(pausedJson.immutableRunDir, null);
     assert.equal(existsSync(paused.checkpoint), true);
     assert.equal(existsSync(paused.runDir), false);
+    const checkpoint = JSON.parse(readFileSync(paused.checkpoint, 'utf8'));
+    const pending = checkpoint.current.pendingEntries.map((entry) => entry.name).sort();
+    assert.ok(pending.length >= 2);
+    writeFileSync(paused.attempts, '');
+    const failedResume = spawnSync(process.execPath, [
+      join(ROOT, 'scan-ats-full.mjs'), '--resume', '--run-id', paused.runId,
+      '--ats', 'greenhouse', '--json', '--include-undated',
+    ], {
+      cwd: paused.dir,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        CAREER_OPS_PORTALS: paused.portals,
+        CAREER_OPS_ATS_PROVIDERS_DIR: paused.providers,
+        CAREER_OPS_ATS_CHECKPOINT: paused.checkpoint,
+        CAREER_OPS_RESOLVER_FAILURE_LIMIT: '2',
+        CAREER_OPS_NO_DNS_CACHE: '1',
+        DOTENV_CONFIG_QUIET: 'true',
+        FIXTURE_ATTEMPTS: paused.attempts,
+      },
+    });
+    assert.notEqual(failedResume.status, 0);
+    assert.equal(JSON.parse(failedResume.stdout).status, 'paused');
+    assert.equal(existsSync(paused.checkpoint), true);
+    assert.equal(existsSync(paused.runDir), false);
+    writeFileSync(paused.attempts, '');
+    const resumed = spawnSync(process.execPath, [
+      join(ROOT, 'scan-ats-full.mjs'), '--resume', '--run-id', paused.runId,
+      '--ats', 'greenhouse', '--json', '--include-undated',
+    ], {
+      cwd: paused.dir,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        CAREER_OPS_PORTALS: paused.portals,
+        CAREER_OPS_ATS_PROVIDERS_DIR: paused.providers,
+        CAREER_OPS_ATS_CHECKPOINT: paused.checkpoint,
+        CAREER_OPS_RESOLVER_FAILURE_LIMIT: '2',
+        CAREER_OPS_NO_DNS_CACHE: '1',
+        DOTENV_CONFIG_QUIET: 'true',
+        FIXTURE_ATTEMPTS: paused.attempts,
+        FIXTURE_RECOVER: '1',
+      },
+    });
+    assert.equal(resumed.status, 0, resumed.stderr);
+    assert.equal(JSON.parse(resumed.stdout).status, 'completed');
+    const retried = readFileSync(paused.attempts, 'utf8').trim().split(/\r?\n/).sort();
+    assert.deepEqual(retried, pending);
+    assert.equal(existsSync(paused.checkpoint), false);
+    assert.equal(existsSync(paused.runDir), true);
   } finally {
     rmSync(failed.dir, { recursive: true, force: true });
     rmSync(paused.dir, { recursive: true, force: true });
   }
 });
 
-test('location filtering uses word boundaries, URL fallback, and title remote evidence', () => {
+test('location filters use token boundaries and cannot let generic remote bypass blocked geography', () => {
   const boundary = buildLocationFilter({ block: ['land'] });
   assert.equal(boundary('Finland'), true);
   assert.equal(boundary('Land'), false);
@@ -179,7 +257,28 @@ test('location filtering uses word boundaries, URL fallback, and title remote ev
   assert.equal(finland('', 'https://jobs.example/roles/helsinki-finland/123', 'Engineer'), true);
 
   const remote = buildLocationFilter({ always_allow: ['remote'], allow: ['finland'], block: ['spain'] });
-  assert.equal(remote('Madrid, Spain', 'https://jobs.example/123', 'Backend Engineer — Remote Europe'), true);
+  assert.equal(remote('Madrid, Spain', 'https://jobs.example/123', 'Backend Engineer — Remote Europe'), false);
+});
+
+test('location filtering requires explicit allowed-region evidence over blocked geography', () => {
+  const filter = buildLocationFilter({ always_allow: ['remote', 'europe', 'finland'], allow: ['finland', 'europe'], block: ['united states', 'usa', 'spain'] });
+  assert.equal(filter('Remote - United States', '', 'Engineer'), false);
+  assert.equal(filter('Madrid, Spain', '', 'Remote Engineer'), false);
+  assert.equal(filter('Remote Europe', '', 'Engineer'), true);
+  assert.equal(filter('New York, United States; Helsinki, Finland', '', 'Engineer'), true);
+});
+
+test('uncertain liveness remains retryable and Workday 200 requires a posting shape', () => {
+  for (const status of [401, 403, 407, 408, 425, 429, 500, 503]) {
+    assert.equal(classifyLiveness({ status, bodyText: 'gateway' }).result, 'uncertain');
+  }
+  assert.equal(classifyLiveness({ status: 200, bodyText: 'short' }).result, 'uncertain');
+  assert.equal(classifyLiveness({ status: 200, bodyText: 'x'.repeat(500), applyControls: [] }).result, 'uncertain');
+  assert.equal(shouldDedupScanHistoryRow({ firstSeen: '2026-08-01', status: 'skipped_no_apply_control' }), false);
+  assert.equal(shouldDedupScanHistoryRow({ firstSeen: '2026-08-01', status: 'skipped_expired' }), true);
+  assert.equal(classifyWorkdayPosting({}), null);
+  assert.equal(classifyWorkdayPosting({ jobPostingInfo: { title: 'Engineer' } })?.result, 'active');
+  assert.equal(classifyWorkdayPosting({ errorCode: 'JOB_NOT_FOUND' })?.result, 'expired');
 });
 
 test('all transient HTTP 5xx statuses remain uncertain', () => {

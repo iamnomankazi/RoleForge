@@ -1,5 +1,6 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
+import { requiredArray, requireUsableRows } from './_payload.mjs';
 
 // Greenhouse provider — hits the public boards-api JSON endpoint.
 // Handles both explicit `api:` URLs and auto-detection from `careers_url`.
@@ -100,8 +101,9 @@ export default {
     // redirect:'error' prevents SSRF via server-side redirects; combined with
     // assertGreenhouseUrl above it guarantees the final hostname stays in the allowlist.
     const json = /** @type {any} */ (await ctx.fetchJson(apiUrl, { redirect: 'error' }));
-    const jobs = Array.isArray(json?.jobs) ? json.jobs : [];
+    const jobs = requiredArray(json, 'jobs', 'greenhouse');
     const usable = jobs.filter(/** @param {any} j */ j => j.absolute_url);
+    requireUsableRows(jobs, usable, 'greenhouse');
     let officeMap = null;
     if (usable.some(/** @param {any} j */ j => isWorkModelOnly(j.location?.name))) {
       const officesUrl = officesUrlFor(apiUrl);

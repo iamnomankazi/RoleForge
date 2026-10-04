@@ -75,6 +75,10 @@ export function classifyLiveness({ status = 0, finalUrl = '', bodyText = '', app
     return { result: 'expired', code: 'http_gone', reason: `HTTP ${status}` };
   }
 
+  if ([401, 407, 408, 425, 429].includes(status) && !firstMatch(BOT_CHALLENGE_PATTERNS, bodyText)) {
+    return { result: 'uncertain', code: 'access_blocked', reason: `HTTP ${status} (retryable or access restricted)` };
+  }
+
   // Bot/anti-scraping walls — never expired. Check before the content-length and
   // listing-page heuristics, which would otherwise misread the short challenge
   // body as a dead posting. 403/503 are access-blocked signals, not "gone"
@@ -109,11 +113,11 @@ export function classifyLiveness({ status = 0, finalUrl = '', bodyText = '', app
 
   const listingPage = firstMatch(LISTING_PAGE_PATTERNS, bodyText);
   if (listingPage) {
-    return { result: 'expired', code: 'listing_page', reason: `pattern matched: ${listingPage.source}` };
+    return { result: 'uncertain', code: 'listing_page', reason: `listing page shown instead of definitive posting evidence: ${listingPage.source}` };
   }
 
   if (bodyText.trim().length < MIN_CONTENT_CHARS) {
-    return { result: 'expired', code: 'insufficient_content', reason: 'insufficient content — likely nav/footer only' };
+    return { result: 'uncertain', code: 'insufficient_content', reason: 'insufficient content to determine posting state' };
   }
 
   return { result: 'uncertain', code: 'no_apply_control', reason: 'content present but no visible apply control found' };

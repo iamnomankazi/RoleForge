@@ -104,8 +104,26 @@ const ATS_PROVIDERS = [
     },
     api: ({ tenant, shard, site, jobPath }) =>
       `https://${tenant}.${shard}.myworkdayjobs.com/wday/cxs/${tenant}/${site}/job/${jobPath}`,
+    async interpret(res) {
+      let json;
+      try { json = await res.json(); } catch { return null; }
+      return classifyWorkdayPosting(json);
+    },
   },
 ];
+
+export function classifyWorkdayPosting(json) {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return null;
+  const info = json.jobPostingInfo;
+  if (info && typeof info === 'object'
+      && (typeof info.title === 'string' || typeof info.jobDescription === 'string')) {
+    return { result: 'active', code: 'workday_api_ok', reason: 'Workday API returned a structured posting' };
+  }
+  if (/not[_ -]?found|removed|unlisted/i.test(String(json.errorCode || json.error || ''))) {
+    return { result: 'expired', code: 'workday_api_removed', reason: 'Workday API explicitly reports the posting removed' };
+  }
+  return null;
+}
 
 /**
  * Decide liveness for one Ashby posting from its org's job-board API payload.

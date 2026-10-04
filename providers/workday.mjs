@@ -12,6 +12,7 @@
 // and omitted for the unbounded "30+ Days Ago" form.
 
 import { BROWSER_LIKE_USER_AGENT } from './_http.mjs';
+import { requiredArray, requireUsableRows } from './_payload.mjs';
 
 const PAGE_SIZE = 20;
 
@@ -178,6 +179,11 @@ export function parseWorkdayResponse(json, entry) {
   return jobs;
 }
 
+function validateWorkdayPage(json, entry) {
+  const raw = requiredArray(json, 'jobPostings', 'workday');
+  return requireUsableRows(raw, parseWorkdayResponse(json, entry), 'workday');
+}
+
 /** @type {Provider} */
 export default {
   id: 'workday',
@@ -207,7 +213,7 @@ export default {
     const sinceMs = typeof ctx?.sinceMs === 'number' ? ctx.sinceMs : null;
 
     const first = await fetchPageWithRetry(ctx, ep.api, { ...postOpts, body: makeBody(0) });
-    const jobs = parseWorkdayResponse(first, entry);
+    const jobs = validateWorkdayPage(first, entry);
 
     const total = typeof first?.total === 'number' ? first.total : null;
     const firstPostings = Array.isArray(first?.jobPostings) ? first.jobPostings : [];
@@ -272,7 +278,7 @@ export default {
           stopReason = 'fetch-error';
           break;
         }
-        const pageJobs = parseWorkdayResponse(json, entry);
+        const pageJobs = validateWorkdayPage(json, entry);
         jobs.push(...pageJobs);
         if (total === null) {
           const postings = Array.isArray(json?.jobPostings) ? json.jobPostings : [];
@@ -316,6 +322,7 @@ export default {
     // one summary line.
     if (stopReason === 'no-date-skip') jobs.workdayNoDateSkip = true;
 
+    if (stopReason === 'fetch-error') jobs.providerDegraded = true;
     return jobs;
   },
 };

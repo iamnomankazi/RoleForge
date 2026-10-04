@@ -1,5 +1,6 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
+import { requiredArray, requireUsableRows } from './_payload.mjs';
 
 // Arbeitsagentur (Bundesagentur für Arbeit) provider — hits the public Jobsuche
 // REST API (the same endpoint arbeitsagentur.de uses), so it lives in-process
@@ -150,7 +151,9 @@ export default {
         redirect: 'error',
         timeoutMs: 12_000,
       });
-      return Array.isArray(json && json.stellenangebote) ? json.stellenangebote : [];
+      const raw = requiredArray(json, 'stellenangebote', 'arbeitsagentur');
+      requireUsableRows(raw, raw.map(normalizeJob).filter(Boolean), 'arbeitsagentur');
+      return raw;
     };
 
     const byRef = new Map();
@@ -219,6 +222,8 @@ export default {
       throw new Error(`arbeitsagentur: all ${keywords.length} keyword request(s) failed — ${errors[0]}`);
     }
 
-    return [...byRef.values()].map(({ refnr, ...job }) => job);
+    const result = [...byRef.values()].map(({ refnr, ...job }) => job);
+    if (errors.length > 0 && succeeded > 0) result.providerDegraded = true;
+    return result;
   },
 };
