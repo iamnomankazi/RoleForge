@@ -162,7 +162,7 @@ function dropdownValue(semantic, profile) {
   return groundedFieldValue(profile, semantic);
 }
 
-export function buildFormPlan(snapshot, profile, artifacts) {
+export function buildFormPlan(snapshot, profile, artifacts, { candidateId = null } = {}) {
   const actions = [];
   const unresolvedFields = [];
   for (const field of snapshot.fields.filter((item) => item.visible !== false && !item.disabled)) {
@@ -181,23 +181,34 @@ export function buildFormPlan(snapshot, profile, artifacts) {
       continue;
     }
     let value;
+    let unresolvedReason = null;
     if (semantic === 'cover_letter_text' && artifacts.coverLetterTextContent && artifacts.coverLetterTextProvenance) {
-      try {
-        validateNarrativeProvenanceRecord(profile, artifacts.coverLetterTextProvenance, {
-          candidateId: artifacts.coverLetterTextProvenance.candidateId,
-          normalizedQuestion: artifacts.coverLetterTextProvenance.normalizedQuestion,
-          answer: artifacts.coverLetterTextContent,
-        });
-        value = artifacts.coverLetterTextContent;
-      } catch {
-        value = null;
+      const exactCandidateId = clean(candidateId);
+      if (!exactCandidateId) {
+        unresolvedReason = 'Legacy form preparation has no explicit current candidate identity for cover-letter provenance.';
+      } else {
+        try {
+          validateNarrativeProvenanceRecord(profile, artifacts.coverLetterTextProvenance, {
+            candidateId: exactCandidateId,
+            normalizedQuestion: 'cover letter document',
+            answer: artifacts.coverLetterTextContent,
+          });
+          value = artifacts.coverLetterTextContent;
+        } catch (error) {
+          unresolvedReason = `Bound cover-letter provenance is invalid for the current candidate: ${clean(error.message)}`;
+        }
       }
     } else if (semantic === 'free_text') value = null;
     else if (['phone_country', 'country', 'sponsorship', 'work_authorization', 'relocation'].includes(semantic)) value = dropdownValue(semantic, profile);
     else value = groundedFieldValue(profile, semantic);
 
     if (!value) {
-      if (field.required) unresolvedFields.push({ fieldId: field.fieldId, label: field.label, semantic, reason: 'No grounded canonical answer is available.' });
+      if (field.required) unresolvedFields.push({
+        fieldId: field.fieldId,
+        label: field.label,
+        semantic,
+        reason: unresolvedReason || 'No grounded canonical answer is available.',
+      });
       continue;
     }
     if (semantic === 'phone' && snapshot.fields.some((item) => classifyField(item) === 'phone_country')) {
@@ -504,9 +515,9 @@ export async function executeFormPlan(page, plan) {
   return { completed, uploadedArtifacts, committedSelections, unresolvedFields };
 }
 
-export async function reviewApplicationForm(page, profile, artifacts, execution) {
+export async function reviewApplicationForm(page, profile, artifacts, execution, { candidateId = null } = {}) {
   const snapshot = await inspectApplicationForm(page);
-  const plan = buildFormPlan(snapshot, profile, artifacts);
+  const plan = buildFormPlan(snapshot, profile, artifacts, { candidateId });
   const requiredMissing = snapshot.fields.filter((field) => field.visible !== false && field.required && !field.disabled
     && !clean(field.value) && !field.checked && !field.files.length)
     .map((field) => ({ fieldId: field.fieldId, label: field.label, semantic: classifyField(field), reason: 'Required field remains empty.' }));
@@ -540,14 +551,14 @@ export async function reviewApplicationForm(page, profile, artifacts, execution)
   return { snapshot, plan, evidence };
 }
 
-export async function prepareApplicationForm(page, profile, artifacts, { maxPasses = 4 } = {}) {
+export async function prepareApplicationForm(page, profile, artifacts, { maxPasses = 4, candidateId = null } = {}) {
   const aggregate = { completed: [], uploadedArtifacts: [], committedSelections: [], unresolvedFields: [] };
   const completedIds = new Set();
   for (let pass = 0; pass < maxPasses; pass += 1) {
     const snapshot = await inspectApplicationForm(page);
     const gate = classifyUserGate(snapshot);
-    if (gate) return { gate, ...(await reviewApplicationForm(page, profile, artifacts, aggregate)) };
-    const plan = buildFormPlan(snapshot, profile, artifacts);
+    if (gate) return { gate, ...(await reviewApplicationForm(page, profile, artifacts, aggregate, { candidateId })) };
+    const plan = buildFormPlan(snapshot, profile, artifacts, { candidateId });
     const pending = { ...plan, actions: plan.actions.filter((action) => !completedIds.has(action.fieldId)) };
     if (!pending.actions.length) break;
     const result = await executeFormPlan(page, pending);
@@ -560,7 +571,7 @@ export async function prepareApplicationForm(page, profile, artifacts, { maxPass
     aggregate.committedSelections.push(...result.committedSelections);
     aggregate.unresolvedFields.push(...result.unresolvedFields);
   }
-  const reviewed = await reviewApplicationForm(page, profile, artifacts, aggregate);
+  const reviewed = await reviewApplicationForm(page, profile, artifacts, aggregate, { candidateId });
   if (reviewed.evidence.captcha.manualActionRequired) {
     return {
       ...reviewed,
