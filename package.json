@@ -49,7 +49,7 @@
     "application:shared-browser": "node application-shared-browser.mjs",
     "application:submission": "node application-submission.mjs",
     "application:abandon": "node application-abandon.mjs",
-    "test:application-batch": "node --test tests/application-batch.test.mjs tests/application-browser-executor.test.mjs tests/application-shared-browser.test.mjs tests/application-entry-actions.test.mjs tests/application-integrity.test.mjs tests/application-documents.test.mjs tests/application-form-core.test.mjs tests/legacy-queue-importer.test.mjs tests/application-submission.test.mjs",
+    "test:application-batch": "node --test tests/application-batch.test.mjs tests/application-browser-executor.test.mjs tests/application-shared-browser.test.mjs tests/application-entry-actions.test.mjs tests/application-integrity.test.mjs tests/application-documents.test.mjs tests/application-form-core.test.mjs tests/application-form-hardening.test.mjs tests/application-form-time-limits.test.mjs tests/application-evidence-provenance.test.mjs tests/legacy-queue-importer.test.mjs tests/application-submission.test.mjs",
     "test:application-guard": "node --test tests/legacy-application-guard.test.mjs",
     "test:application-integrity": "node --test tests/candidate-identity.test.mjs tests/standard-scan-contract.test.mjs tests/application-batch.test.mjs tests/application-browser-executor.test.mjs tests/application-integrity.test.mjs",
     "test:application-acceptance": "node --test tests/application-acceptance.test.mjs",

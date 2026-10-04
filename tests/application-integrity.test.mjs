@@ -58,6 +58,33 @@ test('Phase 4 validates exact cover-text and combined-document artifact records'
   assert.equal(validateArtifactRecord(combinedRecord, { root, expectedType: 'combined_document' }), combinedRecord);
 }));
 
+test('adding narrative provenance does not change the bound artifact hash or size', () => withRoot((root) => {
+  const path = join(root, 'output', 'Acme Provenance Cover Letter.txt');
+  writeFileSync(path, 'complete grounded letter');
+  const base = createArtifactRecord({ root, artifactType: 'cover_letter_text', filePath: path });
+  const withProvenance = createArtifactRecord({
+    root,
+    artifactType: 'cover_letter_text',
+    filePath: path,
+    narrativeProvenance: {
+      schemaVersion: 1,
+      candidateId: 'cand_v1_fixture',
+      normalizedQuestion: 'cover letter document',
+      answerHash: `sha256:${'3'.repeat(64)}`,
+      wording: 'generated',
+      templateId: 'cover-letter-v1',
+      factualSources: [{
+        sourceClass: 'factual', sourceType: 'cv', sourceId: 'cv.md',
+        sourceHash: `sha256:${'1'.repeat(64)}`, sourceSize: 20,
+        locator: 'lines:2', evidenceIdentity: 'cv:lines:2', evidenceHash: `sha256:${'2'.repeat(64)}`,
+      }],
+    },
+  });
+  assert.equal(withProvenance.sha256, base.sha256);
+  assert.equal(withProvenance.size, base.size);
+  assert.equal(validateArtifactRecord(withProvenance, { root, expectedType: 'cover_letter_text' }), withProvenance);
+}));
+
 test('lowercase underscore artifact filenames remain hash-bound and valid', () => withRoot((root) => {
   const path = join(root, 'output', 'tesla_cover_letter.pdf');
   writeFileSync(path, 'grounded cover letter');

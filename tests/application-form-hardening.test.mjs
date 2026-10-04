@@ -1,8 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { after, before, test } from 'node:test';
-import { resolve } from 'node:path';
 import { chromium } from 'playwright';
 import { appendFormPreparationEvidence } from '../application-batch.mjs';
 import {
@@ -16,25 +13,31 @@ import {
   resolveAuthorizationAnswer,
   validateGroundedNarrative,
 } from '../application-form-policy.mjs';
+import { resolveFactualEvidence } from '../application-evidence.mjs';
+import { attachFactualSources } from './fixtures/application-evidence-profile.mjs';
 const syntheticEvidence = [
   {
+    id: 'fictional-example-warehouse',
     topics: ['data_engineering', 'analytics', 'python_sql'],
-    text: 'In the fictional Example Warehouse project, I validated 250K synthetic inventory records with Python, pandas, SQL, PostgreSQL, Power BI, Tableau, and Excel.',
-    evidence_refs: ['cv.md#fictional-example-warehouse'],
+    provenance: [{ sourceType: 'cv', locator: 'lines:1' }],
   },
   {
+    id: 'fictional-example-vision-lab',
     topics: ['ai_ml'],
-    text: 'In the fictional Example Vision Lab project, I evaluated Vision Transformers with PyTorch and Hugging Face.',
-    evidence_refs: ['cv.md#fictional-example-vision-lab'],
+    provenance: [{ sourceType: 'cv', locator: 'lines:2' }],
   },
   {
+    id: 'fictional-example-api',
     topics: ['software_backend', 'motivation_fit'],
-    text: 'In the fictional Example API project, I built Django APIs with explicit validation and reproducible tests.',
-    evidence_refs: ['cv.md#fictional-example-api'],
+    provenance: [{ sourceType: 'cv', locator: 'lines:3' }],
   },
 ];
-const syntheticCorpus = syntheticEvidence.map((entry) => entry.text).join('\n');
-const profile = {
+const syntheticCorpus = [
+  'In the fictional Example Warehouse project, I validated 250K synthetic inventory records with Python, pandas, SQL, PostgreSQL, Power BI, Tableau, and Excel.',
+  'In the fictional Example Vision Lab project, I evaluated Vision Transformers with PyTorch and Hugging Face.',
+  'In the fictional Example API project, I built Django APIs with explicit validation and reproducible tests.',
+].join('\n');
+const profile = attachFactualSources({
   candidate: {
     full_name: 'Alex Example',
     email: 'alex.example@example.test',
@@ -59,7 +62,7 @@ const profile = {
   articleDigestText: '',
   answerBankText: syntheticCorpus,
   profileModeText: 'Synthetic fixture evidence only.',
-};
+});
 const candidate = {
   candidate_id: `cand_v1_${'a'.repeat(64)}`,
   company: 'Acme Data',
@@ -108,10 +111,6 @@ function field(overrides = {}) {
 
 function plan(fields, context = formContext, artifacts = {}) {
   return buildOperationalFormPlan({ fields, controls }, profile, artifacts, { context });
-}
-
-function sha256(path) {
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
 test('1–2. current location is canonical Example City while preferred location remains manual', () => {
@@ -233,12 +232,22 @@ test('12–14. data-engineering narrative is role-specific, evidence-rich, and l
 
 test('15–16. unsupported claims and unresolved placeholders are rejected', () => {
   assert.throws(
-    () => validateGroundedNarrative('I delivered 99M production records.', profile, ['cv.md']),
-    /unsupported numeric claim/,
+    () => validateGroundedNarrative(
+      'I delivered 99M production records.',
+      profile,
+      [resolveFactualEvidence(profile, { sourceType: 'cv', locator: 'lines:1' })],
+      { candidate },
+    ),
+    /wording not established/,
   );
   assert.equal(containsUnresolvedPlaceholder('I used [tool] on [real project].'), true);
   assert.throws(
-    () => validateGroundedNarrative('I used [related skill].', profile, ['cv.md']),
+    () => validateGroundedNarrative(
+      'I used [related skill].',
+      profile,
+      [resolveFactualEvidence(profile, { sourceType: 'cv', locator: 'lines:1' })],
+      { candidate },
+    ),
     /placeholder/,
   );
 });
@@ -252,6 +261,33 @@ test('17. Data Notice never receives a project paragraph or free text', () => {
   const result = plan([notice]);
   assert.deepEqual(result.actions, []);
   assert.match(result.unresolvedFields[0].reason, /asks for text/);
+});
+
+test('unproven narrative remains review_required while deterministic fields are prepared', async () => {
+  const page = await browser.newPage();
+  await page.setContent(`
+    <form>
+      <label for="email">Email</label><input id="email" type="email" required>
+      <label for="why">Why are you a good fit for this backend role?</label><textarea id="why" required></textarea>
+      <button type="submit">Submit application</button>
+    </form>
+  `);
+  const legacy = {
+    ...profile,
+    formRules: {
+      ...profile.formRules,
+      narrative_evidence: [{
+        id: 'legacy-unproven', topics: ['software_backend'], text: 'Unsupported draft prose.', evidence_refs: ['cv.md'],
+      }],
+    },
+  };
+  const result = await prepareOperationalApplicationForm(page, legacy, {}, { context: formContext });
+  assert.equal(result.gate.state, 'review_required');
+  assert.equal(await page.locator('#email').inputValue(), profile.candidate.email);
+  assert.equal(await page.locator('#why').inputValue(), '');
+  assert.match(result.evidence.unresolvedFields.find((row) => row.semantic === 'custom_narrative').reason, /legacy unproven prose/);
+  assert.equal(result.evidence.finalAction.activated, false);
+  await page.close();
 });
 
 test('19–20. verified fields and verified uploads are preserved without refill or re-upload', () => {
@@ -381,8 +417,7 @@ test('27. append-only form evidence preserves earlier unique passes', () => {
   assert.equal(state.formPreparation.passId, 'pass-2');
 });
 
-test('28–30. final Submit, tracker, and blocking CAPTCHA protections remain untouched', async () => {
-  const trackerBefore = sha256(resolve('data/applications.md'));
+test('28–30. final Submit and blocking CAPTCHA protections remain untouched without reading runtime data', async () => {
   const page = await browser.newPage();
   await page.setContent(`
     <form onsubmit="window.fixtureSubmits=(window.fixtureSubmits||0)+1">
@@ -397,6 +432,5 @@ test('28–30. final Submit, tracker, and blocking CAPTCHA protections remain un
   assert.equal(result.evidence.filledFields.length, 0);
   assert.equal(result.evidence.finalAction.activated, false);
   assert.equal(await page.evaluate(() => window.fixtureSubmits || 0), 0);
-  assert.equal(sha256(resolve('data/applications.md')), trackerBefore);
   await page.close();
 });

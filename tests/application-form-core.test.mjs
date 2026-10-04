@@ -13,6 +13,8 @@ import {
   prepareApplicationForm,
 } from '../application-form-core.mjs';
 import { followSafeContinuation } from '../application-browser-executor.mjs';
+import { createNarrativeProvenanceRecord, resolveFactualEvidence } from '../application-evidence.mjs';
+import { attachFactualSources } from './fixtures/application-evidence-profile.mjs';
 import {
   atsStyleCaptchaFixtures,
   blockingCaptchaOverlayFixture,
@@ -29,7 +31,7 @@ import {
   workdayFixture,
 } from './fixtures/application-form-fixtures.mjs';
 
-const syntheticProfile = {
+const syntheticProfile = attachFactualSources({
   candidate: {
     full_name: 'Alex Example',
     email: 'alex.example@example.test',
@@ -50,11 +52,22 @@ const syntheticProfile = {
   },
   answers: new Map([['why this role?', 'Grounded synthetic fixture cover letter.']]),
   priorApprovedAnswers: [],
-  cvText: 'Synthetic fixture evidence only.',
+  cvText: 'Grounded synthetic fixture cover letter.',
   articleDigestText: '',
   answerBankText: 'Synthetic fixture evidence only.',
   profileModeText: 'Synthetic fixture evidence only.',
-};
+});
+
+function coverProvenance(candidateId = 'fixture-cover') {
+  return createNarrativeProvenanceRecord({
+    candidateId,
+    normalizedQuestion: 'cover letter document',
+    answer: syntheticProfile.cvText,
+    wording: 'generated',
+    templateId: 'cover-letter-v1',
+    factualEvidence: [resolveFactualEvidence(syntheticProfile, { sourceType: 'cv', locator: 'lines:1' })],
+  });
+}
 
 function createFixtureArtifacts() {
   const dir = mkdtempSync(join(tmpdir(), 'career-ops-captcha-form-'));
@@ -67,7 +80,8 @@ function createFixtureArtifacts() {
     artifacts: {
       cv: { resolvedPath: cv, intendedFilename: 'Alex Example Software Backend CV.pdf', sha256: 'sha256:cv' },
       coverLetter: { resolvedPath: cover, intendedFilename: 'Aiven Software Engineer Cover Letter.pdf', sha256: 'sha256:cover' },
-      coverLetterTextContent: 'Grounded fixture cover letter.',
+      coverLetterTextContent: syntheticProfile.cvText,
+      coverLetterTextProvenance: coverProvenance(),
     },
   };
 }
@@ -83,11 +97,11 @@ test('field and final-action semantics cover common ATS patterns', () => {
 
 test('text-only cover fields receive the complete bound letter and one-document fields require an explicit combined artifact', () => {
   const profile = syntheticProfile;
-  const fullLetter = 'Complete detailed cover letter text with exact company and role evidence.';
+  const fullLetter = profile.cvText;
   const textPlan = buildFormPlan({
     fields: [{ fieldId: 'cover-text', tag: 'textarea', type: 'textarea', label: 'Motivation letter', required: true, visible: true }],
     controls: [{ type: 'submit', label: 'Submit', insideApplicationForm: true }],
-  }, profile, { coverLetterTextContent: fullLetter });
+  }, profile, { coverLetterTextContent: fullLetter, coverLetterTextProvenance: coverProvenance() });
   assert.equal(textPlan.actions[0].value, fullLetter);
   const singlePlan = buildFormPlan({
     fields: [{ fieldId: 'one-doc', tag: 'input', type: 'file', label: 'Application document', required: true, visible: true }],
@@ -96,7 +110,7 @@ test('text-only cover fields receive the complete bound letter and one-document 
   assert.ok(singlePlan.unresolvedFields.some((field) => field.semantic === 'single_document_upload'));
 });
 
-test('Greenhouse-style form fills, commits autocomplete, uploads exact files, reviews, and never submits', async () => {
+test('legacy Greenhouse flow fills deterministic fields but leaves draft-only narrative for review and never submits', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'career-ops-form-'));
   const cv = join(dir, 'Alex Example Data Engineering CV.pdf');
   const cover = join(dir, 'Acme Data Engineer Cover Letter.pdf');
@@ -106,14 +120,16 @@ test('Greenhouse-style form fills, commits autocomplete, uploads exact files, re
   const artifacts = {
     cv: { resolvedPath: cv, intendedFilename: 'Alex Example Data Engineering CV.pdf', sha256: 'sha256:cv' },
     coverLetter: { resolvedPath: cover, intendedFilename: 'Acme Data Engineer Cover Letter.pdf', sha256: 'sha256:cover' },
-    coverLetterTextContent: profile.answers.get('why this role?') || profile.answers.get('why this role'),
+    coverLetterTextContent: profile.cvText,
+    coverLetterTextProvenance: coverProvenance(),
   };
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();
     await page.setContent(greenhouseFixture);
     const result = await prepareApplicationForm(page, profile, artifacts);
-    assert.equal(result.evidence.reviewComplete, true);
+    assert.equal(result.evidence.reviewComplete, false);
+    assert.ok(result.evidence.unresolvedFields.some((row) => row.semantic === 'free_text'));
     assert.equal(result.evidence.finalAction.detected, true);
     assert.equal(result.evidence.finalAction.activated, false);
     assert.equal(result.evidence.uploadedArtifacts.length, 2);

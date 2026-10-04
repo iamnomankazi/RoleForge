@@ -29,6 +29,16 @@ function write(root, path, value) {
 function profileFixture(root) {
   write(root, 'config/profile.yml', `candidate:\n  full_name: Alex Example\n  email: alex.example@example.test\n  phone: "+1 202-555-0142"\n  location: Example City, Finland\n  linkedin: https://linkedin.test/alex-example\n  github: https://github.test/alex-example\nlocation:\n  country: Finland\n  city: Example City\n  work_authorization:\n    finland: Authorized to work in Finland on a Finnish student residence permit.\n    outside_finland: Visa or work permit sponsorship is required outside Finland.\ncurrent_status:\n  summary: Graduate student at Example University\n  availability:\n    start: Available immediately\ncompensation:\n  target_range: EUR 50,000-55,000/year\neducation_details:\n  expected_graduation_date: 31/12/2030\nnarrative:\n  banned_phrases: [excited to leverage, cutting-edge, passionate]\ncv:\n  approved_system:\n    master_pdf: output/cv-approved/Alex Example Master CV.pdf\n    role_pdfs:\n      data_engineering: output/cv-approved/Alex Example Data Engineering CV.pdf\n      ai_ml: output/cv-approved/Alex Example AI ML CV.pdf\n      software_backend: output/cv-approved/Alex Example Software Backend CV.pdf\n`);
   write(root, 'cv.md', '# Alex Example\nPython SQL PostgreSQL 250K+ rows ETL Django PyTorch Hugging Face Git Linux');
+  const profilePath = join(root, 'config', 'profile.yml');
+  writeFileSync(profilePath, readFileSync(profilePath, 'utf8').replace('\ncv:', `
+application_form:
+  narrative_evidence:
+    - id: fictional-cv-projects
+      topics: [data_engineering, analytics, python_sql, ai_ml, software_backend, motivation_fit]
+      provenance:
+        - sourceType: cv
+          locator: lines:2
+cv:`));
   write(root, 'modes/_profile.md', '# Application truth rules\nUse only canonical evidence and never invent experience.');
   write(root, 'output/application-answer-bank.md', `# Application Answer Bank\n\n## Tell us about yourself\nI am a Computer Science master's student with practical work across Python, SQL, backend development, data pipelines, and machine learning.\n\n## Why this role?\nThis role fits the work I can defend best: practical Python, SQL, APIs, data handling, debugging, and learning quickly from real systems.\n\n## SQL/data experience\nI built a PostgreSQL data warehouse from about 250K+ synthetic inventory rows, covering cleaning, validation, dimensional modelling, indexes, and reporting.\n\n## Data warehouse project\nI used Python, pandas, PostgreSQL, fact and dimension tables, indexes, and validation on 250K+ synthetic inventory rows.\n\n## Python experience\nI have used Python for ETL, data cleaning, Django backend work, automation, and machine-learning experiments.\n`);
   for (const name of ['Master', 'Data Engineering', 'AI ML', 'Software Backend']) {

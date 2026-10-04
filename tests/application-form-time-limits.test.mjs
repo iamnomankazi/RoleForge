@@ -7,6 +7,7 @@ import {
   executeOperationalFormPlan,
   resolveOperationalFormLimits,
 } from '../application-form-engine.mjs';
+import { attachFactualSources } from './fixtures/application-evidence-profile.mjs';
 
 const fakePage = { evaluate: async () => {} };
 
@@ -116,25 +117,25 @@ test('the session cap preserves completed fields and uploads and marks only pend
 });
 
 test('custom narrative answers are precomputed in the plan before browser execution', () => {
-  const profile = {
+  const profile = attachFactualSources({
     candidate: {},
     location: {},
     currentStatus: {},
     education: {},
     compensation: {},
     answers: new Map(),
-    cvText: 'Grounded backend project evidence.',
+    cvText: 'I built a grounded backend project using APIs and PostgreSQL.',
     articleDigestText: '',
     answerBankText: '',
     profileModeText: '',
     formRules: {
       narrative_evidence: [{
+        id: 'fictional-backend-project',
         topics: ['software_backend'],
-        text: 'I built a grounded backend project using APIs and PostgreSQL.',
-        evidence_refs: ['cv.md#projects'],
+        provenance: [{ sourceType: 'cv', locator: 'lines:1' }],
       }],
     },
-  };
+  });
   const plan = buildOperationalFormPlan({
     fields: [{
       fieldId: 'why',
