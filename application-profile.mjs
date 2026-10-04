@@ -2,6 +2,7 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import yaml from 'js-yaml';
 import { hashFile } from './application-integrity.mjs';
+import { APPLICATION_EVIDENCE_CLASSES } from './application-evidence.mjs';
 
 function readRequired(path, label) {
   if (!existsSync(path)) throw new Error(`Missing canonical ${label}: ${path}`);
@@ -66,6 +67,7 @@ export function loadApplicationProfile(root) {
     answerBankText: answerText,
     answers: parseAnswerBank(answerText),
     sourceFiles,
+    evidenceSourceClasses: { ...APPLICATION_EVIDENCE_CLASSES },
   };
 }
 
@@ -142,7 +144,7 @@ export function groundedFieldValue(profile, semantic, { country = null } = {}) {
       ? profile.location.work_authorization?.finland || null
       : profile.location.work_authorization?.outside_finland || null,
     sponsorship: currentCountry.toLowerCase() === 'finland' ? 'No' : 'Yes',
-    relocation: profile.answers.get('relocation') || null,
+    relocation: profile.formRules?.relocation?.value || null,
   };
   return values[semantic] ?? null;
 }

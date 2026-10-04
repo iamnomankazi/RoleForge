@@ -139,6 +139,7 @@ const SYSTEM_PATHS = [
   'application-batch.mjs',
   'application-browser-executor.mjs',
   'application-documents.mjs',
+  'application-evidence.mjs',
   'application-form-core.mjs',
   'application-form-engine.mjs',
   'application-form-policy.mjs',
