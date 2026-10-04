@@ -34,6 +34,7 @@ import {
   prepareOperationalApplicationForm,
 } from './application-form-engine.mjs';
 import { prepareAndBindCombinedDocument } from './application-documents.mjs';
+import { createConfiguredApplicationReasoningProvider } from './application-reasoning-provider.mjs';
 
 function inline(value) {
   return String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
@@ -93,6 +94,7 @@ export async function prepareFormPassWithEvidence(page, browserContext, contract
   let preparation;
   try {
     const profile = loadApplicationProfile(root);
+    const reasoningProvider = createConfiguredApplicationReasoningProvider(profile);
     const artifacts = {
       ...contract.candidate.artifacts,
       coverLetterTextContent: readFileSync(contract.candidate.artifacts.coverLetterText.resolvedPath, 'utf8'),
@@ -103,6 +105,7 @@ export async function prepareFormPassWithEvidence(page, browserContext, contract
       previousEvidence,
       resumeMode,
       passId,
+      reasoningProvider,
     });
   } finally {
     if (tracing) await browserContext.tracing.stop({ path: tracePath }).catch(() => {});
@@ -949,8 +952,9 @@ async function verifiedEmbeddedApplicationFrame(page, snapshot) {
     return null;
   }
   const greenhouseJobId = listing.searchParams.get('gh_jid');
-  if (!greenhouseJobId) return null;
-  const frames = await page.locator('iframe[src]').evaluateAll((nodes) => nodes.map((node) => {
+  const iframeLocator = page.locator('iframe[src]');
+  if (typeof iframeLocator.evaluateAll !== 'function') return null;
+  const frames = await iframeLocator.evaluateAll((nodes) => nodes.map((node) => {
     const rect = node.getBoundingClientRect();
     const style = getComputedStyle(node);
     return {
@@ -969,7 +973,11 @@ async function verifiedEmbeddedApplicationFrame(page, snapshot) {
     }
     if (!/(?:^|\.)greenhouse\.io$/i.test(destination.hostname)) continue;
     if (destination.pathname !== '/embed/job_app') continue;
-    if (destination.searchParams.get('token') !== greenhouseJobId) continue;
+    const token = destination.searchParams.get('token');
+    const exactListingBacklink = destination.searchParams.get('b');
+    if (!token || (greenhouseJobId
+      ? token !== greenhouseJobId
+      : !exactListingBacklink || !sameUrlIgnoringHash(exactListingBacklink, listing.toString()))) continue;
     if (!isKnownApplicationHost(destination.toString())) continue;
     return { url: destination.toString(), title: inline(frame.title) || 'Embedded Greenhouse application' };
   }

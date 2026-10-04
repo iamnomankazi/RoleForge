@@ -1,5 +1,5 @@
-// tests/providers/echojobs.test.mjs — provider-contract tests for the EchoJobs
-// board-wide JSON aggregator (providers/echojobs.mjs).
+// tests/providers/echojobs.test.mjs — compatibility tests for the retired
+// EchoJobs provider (providers/echojobs.mjs).
 import { pass, fail, ROOT } from '../helpers.mjs';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
@@ -61,44 +61,30 @@ try {
   if (normalizeEchojobsJob({ title: 'X' }) === null) pass('normalizeEchojobsJob drops an item with no url');
   else fail('url-less item should be dropped');
 
-  // fetch() — pagination: accumulates across pages, stops on a short page, and
-  // pins the feed request to echojobs.io with redirect:'error'.
-  const page1 = { jobs: Array.from({ length: 100 }, (_, i) => ({ title: `Job ${i}`, url: `https://jobs.ashbyhq.com/acme/${i}`, company_name: 'Acme' })) };
-  const page2 = { jobs: [{ title: 'Last', url: 'https://jobs.ashbyhq.com/acme/last', company_name: 'Acme' }] };
+  // fetch() — retired immediately; HTTP context methods must never be called.
   const calls = [];
   const ctx = {
     transport: 'http',
-    fetchJson: async (url, options) => {
-      calls.push(url);
-      if (options?.redirect !== 'error') throw new Error(`fetchJson without redirect:'error': ${JSON.stringify(options)}`);
-      if (new URL(url).hostname !== 'echojobs.io') throw new Error(`fetchJson off-host: ${url}`);
-      return new URL(url).searchParams.get('page') === '1' ? page1 : page2;
+    fetchJson: async () => {
+      calls.push('fetchJson');
+      return { status: 429, body: 'Vercel checkpoint' };
     },
-    fetchText: async () => { throw new Error('fetchText should not be called'); },
+    fetchText: async () => {
+      calls.push('fetchText');
+      return 'Vercel checkpoint';
+    },
   };
-  const jobs = await echojobs.fetch({ name: 'EchoJobs', provider: 'echojobs' }, ctx);
-  if (jobs.length === 101) pass('echojobs.fetch() accumulates across pages and stops on the short page (100 + 1)');
-  else fail(`echojobs.fetch() returned ${jobs.length} jobs, expected 101`);
-  if (calls.length === 2) pass('echojobs.fetch() stopped after the short second page (2 requests)');
-  else fail(`echojobs.fetch() made ${calls.length} page requests, expected 2`);
-
-  // max_pages override caps pagination
-  const cappedCalls = [];
-  await echojobs.fetch(
-    { name: 'EchoJobs', provider: 'echojobs', max_pages: 1 },
-    { transport: 'http', fetchJson: async (u) => { cappedCalls.push(u); return page1; }, fetchText: async () => {} },
-  );
-  if (cappedCalls.length === 1) pass('echojobs.fetch() respects max_pages (stops after 1 page)');
-  else fail(`echojobs.fetch() max_pages=1 made ${cappedCalls.length} page calls`);
-
-  // unexpected shape throws
-  let threw = false;
+  let message = '';
   try {
-    await echojobs.fetch({ name: 'EchoJobs', provider: 'echojobs' },
-      { transport: 'http', fetchJson: async () => ({ oops: true }), fetchText: async () => {} });
-  } catch { threw = true; }
-  if (threw) pass('echojobs.fetch() throws on an unexpected API response shape');
-  else fail('echojobs.fetch() should throw when the response has no jobs array');
+    await echojobs.fetch({ name: 'EchoJobs', provider: 'echojobs' }, ctx);
+  } catch (e) { message = e.message; }
+  if (/retired/.test(message) && /HTTP 429/.test(message) && /robots\.txt/.test(message)) {
+    pass('echojobs.fetch() reports the retired feed and its confirmed HTTP 429/robots.txt state');
+  } else {
+    fail(`echojobs.fetch() returned diagnostic ${JSON.stringify(message)}`);
+  }
+  if (calls.length === 0) pass('echojobs.fetch() makes no HTTP context calls, even with a 429 fixture');
+  else fail(`echojobs.fetch() called HTTP context methods: ${JSON.stringify(calls)}`);
 
 } catch (e) {
   fail(`echojobs provider tests crashed: ${e.message}`);

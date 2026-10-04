@@ -276,6 +276,7 @@ export function generateCustomNarrativeAnswer(profile, {
   candidate = {},
   jdText = '',
   maxLength = null,
+  routing = null,
 } = {}) {
   const candidateId = cleanFormText(candidate.candidate_id || candidate.candidateId);
   const normalizedQuestion = normalizeFormQuestion(question);
@@ -294,8 +295,56 @@ export function generateCustomNarrativeAnswer(profile, {
       ...record, answer: validated, reused: true,
     };
   }
-  const requested = requestedNarrativeTopics(question, `${candidate.title || ''}\n${jdText}`);
-  const selected = resolveConfiguredNarrativeEvidence(profile, requested).flatMap((entry) => {
+  const allowedTemplates = new Set(['role-fit-v1', 'role-fit-evidence-only-v1']);
+  const allowedTopics = new Set(['data_engineering', 'analytics', 'python_sql', 'ai_ml', 'software_backend', 'motivation_fit']);
+  if (routing) {
+    if (!allowedTemplates.has(routing.templateId)) throw new Error(`Unsupported narrative routing template: ${routing.templateId}`);
+    if (!Array.isArray(routing.topicIds) || !routing.topicIds.length
+        || routing.topicIds.some((topic) => !allowedTopics.has(topic))) {
+      throw new Error('Narrative routing contains unsupported topics');
+    }
+    if (!Array.isArray(routing.evidenceIds) || !routing.evidenceIds.length) {
+      throw new Error('Narrative routing has no approved evidence identities');
+    }
+  }
+  const requested = routing
+    ? new Set(routing.topicIds)
+    : requestedNarrativeTopics(question, `${candidate.title || ''}\n${jdText}`);
+  const routedEvidenceIds = routing ? new Set(routing.evidenceIds) : null;
+  const resolvedEvidence = resolveConfiguredNarrativeEvidence(profile, requested);
+  if (routedEvidenceIds) {
+    for (const evidenceId of routedEvidenceIds) {
+      if (!resolvedEvidence.some((entry) => entry.configuredEvidenceId === evidenceId)) {
+        throw new Error(`Narrative routing evidence is stale or unavailable: ${evidenceId}`);
+      }
+    }
+    if (!Array.isArray(routing.evidenceBindings) || !routing.evidenceBindings.length) {
+      throw new Error('Narrative routing factual bindings are missing');
+    }
+    const currentBindings = resolvedEvidence
+      .filter((entry) => routedEvidenceIds.has(entry.configuredEvidenceId))
+      .map((entry) => ({
+        configuredEvidenceId: entry.configuredEvidenceId,
+        evidenceIdentity: entry.evidenceIdentity,
+        evidenceHash: entry.evidenceHash,
+        sourceHash: entry.sourceHash,
+      }))
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+    const acceptedBindings = routing.evidenceBindings
+      .map((entry) => ({
+        configuredEvidenceId: entry.configuredEvidenceId,
+        evidenceIdentity: entry.evidenceIdentity,
+        evidenceHash: entry.evidenceHash,
+        sourceHash: entry.sourceHash,
+      }))
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+    if (JSON.stringify(currentBindings) !== JSON.stringify(acceptedBindings)) {
+      throw new Error('Narrative routing factual evidence is stale or mismatched');
+    }
+  }
+  const selected = resolvedEvidence
+    .filter((entry) => !routedEvidenceIds || routedEvidenceIds.has(entry.configuredEvidenceId))
+    .flatMap((entry) => {
     try {
       return [{ ...entry, narrativeText: narrativeReadyEvidenceText(entry.text) }];
     } catch {
@@ -303,8 +352,8 @@ export function generateCustomNarrativeAnswer(profile, {
     }
   });
   if (!selected.length) throw new Error('Configured factual evidence is not narrative-ready');
-  const sentences = [roleFitOpening(candidate), ...selected.map((entry) => entry.narrativeText)].filter(Boolean);
-  let templateId = 'role-fit-v1';
+  let templateId = routing?.templateId || 'role-fit-v1';
+  const sentences = [templateId === 'role-fit-evidence-only-v1' ? null : roleFitOpening(candidate), ...selected.map((entry) => entry.narrativeText)].filter(Boolean);
   let answer = fitSentences(sentences, Number(maxLength) || null);
   let included = selected.filter((entry) => answer.includes(entry.narrativeText));
   if (!included.length && Number(maxLength) > 0) {

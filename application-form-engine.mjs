@@ -21,6 +21,24 @@ import {
   validatePlannedValueForControl,
 } from './application-form-policy.mjs';
 import { validateNarrativeProvenanceRecord } from './application-evidence.mjs';
+import {
+  addPreparedAnswers,
+  boundedProviderCall,
+  buildReasoningCandidate,
+  createReasoningState,
+  createSemanticReasoningRequest,
+  createSemanticVerifierRequest,
+  fieldResolutionKey,
+  makeRepairLedgerEntry,
+  mergeResolutionLedger,
+  publicLiveReasoningField,
+  reasoningEvidence,
+  resolutionForField,
+  semanticFromAnnotation,
+  validateSemanticAnnotationResponse,
+  validateSemanticVerifierResponse,
+  verifierTriggerReasons,
+} from './application-reasoning.mjs';
 
 const MAX_FIELD_ATTEMPTS = 2;
 const MAX_CONTROLLED_RESUMES = 2;
@@ -36,6 +54,11 @@ export const DEFAULT_LIVE_FORM_LIMITS = Object.freeze({
   maxAttempts: MAX_FIELD_ATTEMPTS,
 });
 const DEFAULT_PROGRESSION_SESSION_MS = DEFAULT_LIVE_FORM_LIMITS.sessionMs;
+const REASONABLE_OPTION_MAPPING_CATEGORIES = new Set([
+  'identity_contact', 'current_location', 'work_authorization',
+  'sponsorship_employer_support', 'source_how_heard', 'education',
+  'availability', 'relocation',
+]);
 
 function positiveInteger(value, fallback) {
   const parsed = Number(value);
@@ -93,6 +116,25 @@ function dedupeRows(rows) {
   });
 }
 
+function mergeAnswerRecords(existing = [], additions = []) {
+  const merged = [];
+  const indexByIdentity = new Map();
+  for (const record of [...existing, ...additions]) {
+    const key = [
+      cleanFormText(record?.candidateId),
+      normalizeFormQuestion(record?.normalizedQuestion),
+    ].join('|');
+    const index = indexByIdentity.get(key);
+    if (index === undefined) {
+      indexByIdentity.set(key, merged.length);
+      merged.push(record);
+    } else {
+      merged[index] = record;
+    }
+  }
+  return merged;
+}
+
 function fieldQuestion(field) {
   return cleanFormText(field.questionText || field.groupLabel || field.label);
 }
@@ -126,14 +168,36 @@ function controlAction(field, intended) {
   return 'fill';
 }
 
+function groundedLocationComponents(action) {
+  const combined = cleanFormText(action.locationGrounding?.combined || action.value);
+  const parts = combined.split(',').map((part) => part.trim()).filter(Boolean);
+  return {
+    combined,
+    city: cleanFormText(action.locationGrounding?.city || (parts.length > 1 ? parts[0] : '')),
+    country: cleanFormText(action.locationGrounding?.country || (parts.length > 1 ? parts.at(-1) : '')),
+  };
+}
+
 function groundedLocationMatches(value, action) {
   const normalized = normalizeFormQuestion(value);
   const intended = cleanFormText(action.value);
-  const parts = ['city', 'country'].includes(action.semantic)
-    ? [intended]
-    : intended.split(',').map((part) => part.trim()).filter(Boolean);
+  if (['city', 'country'].includes(action.semantic)) {
+    return Boolean(normalized) && normalized.includes(normalizeFormQuestion(intended));
+  }
+  const grounding = groundedLocationComponents(action);
+  const parts = grounding.combined.split(',').map((part) => part.trim()).filter(Boolean);
   const tokens = parts.map(normalizeFormQuestion).filter(Boolean);
-  return tokens.length > 0 && tokens.every((token) => normalized.includes(token));
+  if (tokens.length > 0 && tokens.every((token) => normalized.includes(token))) return true;
+  return [grounding.city, grounding.country]
+    .map(normalizeFormQuestion)
+    .filter(Boolean)
+    .some((grounded) => normalized === grounded);
+}
+
+function autocompleteQueries(action) {
+  if (action.category !== 'current_location') return [cleanFormText(action.value)].filter(Boolean);
+  const grounding = groundedLocationComponents(action);
+  return [...new Set([grounding.combined, grounding.city, grounding.country].map(cleanFormText).filter(Boolean))];
 }
 
 function isCommitted(field, action) {
@@ -237,7 +301,7 @@ export function inspectOperationalUploadTopology(snapshot) {
   return { mode, reason, fields };
 }
 
-function manualField(field, semantics, reason, missingInformation = null) {
+function manualField(field, semantics, reason, missingInformation = null, reasonCode = null) {
   return {
     fieldId: field.fieldId,
     stableFieldId: stableFieldIdentity(field, semantics),
@@ -245,12 +309,13 @@ function manualField(field, semantics, reason, missingInformation = null) {
     category: semantics.category,
     semantic: semantics.semantic,
     reason,
+    reasonCode,
     missingInformation,
     manualActionRequired: true,
   };
 }
 
-function answerForField(field, semantics, profile, snapshot, artifacts, context) {
+function answerForField(field, semantics, profile, snapshot, artifacts, context, narrativeRouting = null) {
   if (semantics.category === 'custom_motivation_experience_narrative') {
     if (semantics.semantic === 'cover_letter_text' && artifacts.coverLetterTextContent) {
       if (containsUnresolvedPlaceholder(artifacts.coverLetterTextContent)) {
@@ -270,6 +335,7 @@ function answerForField(field, semantics, profile, snapshot, artifacts, context)
       candidate: context.candidate || {},
       jdText: context.jdText || '',
       maxLength: field.maxLength,
+      routing: narrativeRouting,
     });
     return { value: record.answer, answerRecord: record };
   }
@@ -279,15 +345,38 @@ function answerForField(field, semantics, profile, snapshot, artifacts, context)
   };
 }
 
+function resolvedFieldSemantics(field, snapshot, context, semanticResolutions) {
+  const deterministic = classifyFieldSemantics(field);
+  const classification = resolutionForField(
+    semanticResolutions, field, snapshot, context, 'semantic_classification',
+  );
+  if (classification) return {
+    semantics: semanticFromAnnotation(classification.annotation),
+    semanticResolution: classification,
+    narrativeRouting: null,
+  };
+  const narrative = resolutionForField(
+    semanticResolutions, field, snapshot, context, 'narrative_routing',
+  );
+  if (narrative) return {
+    semantics: { category: 'custom_motivation_experience_narrative', semantic: 'custom_narrative' },
+    semanticResolution: narrative,
+    narrativeRouting: narrative.annotation,
+  };
+  return { semantics: deterministic, semanticResolution: null, narrativeRouting: null };
+}
+
 export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
   context = {},
   previousEvidence = null,
+  semanticResolutions = previousEvidence?.reasoning?.semanticResolutions || [],
 } = {}) {
   const actions = [];
   const preservedFields = [];
   const preservedUploads = [];
   const unresolvedFields = [];
   const answerRecords = [];
+  const reasoningCandidates = [];
   const priorAnswers = Array.isArray(previousEvidence?.answerRecords) ? previousEvidence.answerRecords : [];
   const effectiveProfile = { ...profile, priorApprovedAnswers: priorAnswers };
   const hasVerifiedFormKey = Object.prototype.hasOwnProperty.call(snapshot || {}, 'applicationFormId');
@@ -333,7 +422,9 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
   }
 
   for (const field of visibleFields) {
-    const semantics = classifyFieldSemantics(field);
+    const { semantics, semanticResolution, narrativeRouting } = resolvedFieldSemantics(
+      field, snapshot, context, semanticResolutions,
+    );
     const stableFieldId = stableFieldIdentity(field, semantics);
     const base = {
       fieldId: field.fieldId,
@@ -344,6 +435,9 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       name: field.name,
       category: semantics.category,
       semantic: semantics.semantic,
+      resolutionKey: fieldResolutionKey(field, snapshot.applicationFormId),
+      semanticResolutionKind: semanticResolution?.kind || null,
+      narrativeRouting,
     };
 
     if (semantics.category === 'preferred_location') {
@@ -423,13 +517,33 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       continue;
     }
     if (semantics.category === 'unknown') {
-      if (field.required) unresolvedFields.push(manualField(field, semantics, 'Field meaning is genuinely uncertain.'));
+      if (field.required) {
+        const narrativeShape = field.tag === 'textarea' || field.type === 'textarea'
+          || (field.type === 'text' && Number(field.maxLength || 0) >= 120);
+        const conservativeManualControl = field.type === 'checkbox';
+        const kind = narrativeShape ? 'narrative_routing' : 'semantic_classification';
+        unresolvedFields.push(manualField(
+          field,
+          semantics,
+          'Field meaning is genuinely uncertain.',
+          null,
+          conservativeManualControl ? 'unknown_consent_or_declaration'
+            : narrativeShape ? 'unknown_narrative_intent' : 'unknown_field_semantics',
+        ));
+        if (!conservativeManualControl) {
+          reasoningCandidates.push(buildReasoningCandidate(field, snapshot, context, {
+            kind,
+            reasonCode: narrativeShape ? 'unknown_narrative_intent' : 'unknown_field_semantics',
+            profile,
+          }));
+        }
+      }
       continue;
     }
 
     let resolved;
     try {
-      resolved = answerForField(field, semantics, effectiveProfile, snapshot, artifacts, context);
+      resolved = answerForField(field, semantics, effectiveProfile, snapshot, artifacts, context, narrativeRouting);
     } catch (error) {
       unresolvedFields.push(manualField(
         field,
@@ -466,6 +580,49 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       unresolvedFields.push(manualField(field, semantics, 'Authorization and sponsorship controls require an exact Yes or No answer.'));
       continue;
     }
+    const optionResolution = resolutionForField(
+      semanticResolutions, field, snapshot, context, 'option_mapping',
+    );
+    if (optionResolution) {
+      if (optionResolution.annotation.canonicalValueHash !== hashFormValue(value)) {
+        unresolvedFields.push(manualField(
+          field,
+          semantics,
+          'A semantic option mapping no longer matches the grounded canonical answer.',
+          null,
+          'stale_option_mapping',
+        ));
+        continue;
+      }
+      if (optionResolution.annotation.noSemanticMatch === true) {
+        unresolvedFields.push(manualField(
+          field,
+          semantics,
+          'No supplied visible option is semantically equivalent to the grounded canonical answer.',
+          null,
+          'reasoning_option_no_semantic_match',
+        ));
+        continue;
+      }
+      value = optionResolution.annotation.selectedVisibleOption;
+    } else if (field.tag === 'select' && !matchingOption(field, value)) {
+      unresolvedFields.push(manualField(
+        field,
+        semantics,
+        'No exact visible option matches the grounded canonical answer.',
+        null,
+        'grounded_value_option_mismatch',
+      ));
+      if (REASONABLE_OPTION_MAPPING_CATEGORIES.has(semantics.category)) {
+        reasoningCandidates.push(buildReasoningCandidate(field, snapshot, context, {
+          kind: 'option_mapping',
+          reasonCode: 'grounded_value_option_mismatch',
+          canonicalValue: value,
+          profile,
+        }));
+      }
+      continue;
+    }
     const action = controlAction(field, value);
     if (!action) continue;
     const planned = {
@@ -476,6 +633,17 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       retryBudget: 1,
       sourceRef: resolved.answerRecord ? 'candidate-specific-grounded-narrative' : 'config/profile.yml',
     };
+    if (action === 'autocomplete' && semantics.category === 'current_location') {
+      planned.locationGrounding = {
+        city: cleanFormText(canonicalFieldValue(
+          profile, { category: 'current_location', semantic: 'city' }, { field, snapshot, context },
+        )),
+        country: cleanFormText(canonicalFieldValue(
+          profile, { category: 'current_location', semantic: 'country' }, { field, snapshot, context },
+        )),
+        combined: value,
+      };
+    }
     if (isCommitted(field, planned)) {
       preservedFields.push({ ...base, valueHash: planned.valueHash, preserved: true });
     } else {
@@ -513,6 +681,7 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
     preservedUploads,
     unresolvedFields: dedupeRows(unresolvedFields),
     answerRecords,
+    reasoningCandidates,
     finalActions,
     progressionActions,
     ambiguousActions,
@@ -805,42 +974,97 @@ function remainingTimeout(deadlineMs, clock) {
   return remaining;
 }
 
+async function ownedAutocompleteOptions(page, action) {
+  const locator = await exactLocator(page, action);
+  const relationship = await locator.evaluate((element) => ({
+    controls: element.getAttribute('aria-controls') || '',
+    owns: element.getAttribute('aria-owns') || '',
+  }));
+  const ownedIds = [...new Set(
+    `${relationship.controls} ${relationship.owns}`.trim().split(/\s+/).filter(Boolean),
+  )];
+  if (ownedIds.length !== 1) {
+    throw new Error(`Autocomplete option list is not uniquely owned by ${action.semantic}`);
+  }
+  const identifiedElements = page.locator('[id]');
+  const matchingIndexes = await identifiedElements.evaluateAll((elements, ownedId) => elements
+    .map((element, index) => ({ id: element.id, index }))
+    .filter((entry) => entry.id === ownedId)
+    .map((entry) => entry.index), ownedIds[0]);
+  if (matchingIndexes.length !== 1) {
+    throw new Error(`Autocomplete option list is not uniquely associated with ${action.semantic}`);
+  }
+  const listbox = identifiedElements.nth(matchingIndexes[0]);
+  if (await listbox.getAttribute('role') !== 'listbox' || !await listbox.isVisible()) {
+    throw new Error(`Autocomplete option list is not visible for ${action.semantic}`);
+  }
+  return { listboxId: ownedIds[0], options: listbox.getByRole('option') };
+}
+
 async function chooseAutocomplete(page, action, visibleOptions, { deadlineMs, clock }) {
   let locator = await exactLocator(page, action);
-  await locator.focus({ timeout: remainingTimeout(deadlineMs, clock) });
-  await locator.fill('', { timeout: remainingTimeout(deadlineMs, clock) });
-  await locator.pressSequentially(action.value, { delay: 20, timeout: remainingTimeout(deadlineMs, clock) });
-  remainingTimeout(deadlineMs, clock);
-  await page.waitForTimeout(250);
-  let optionLocators = page.getByRole('option');
-  const count = await optionLocators.count();
-  visibleOptions.push(...(await optionLocators.allTextContents()).map(cleanFormText).filter(Boolean));
-  let targetIndex = -1;
-  for (let index = 0; index < count; index += 1) {
-    const label = cleanFormText(await optionLocators.nth(index).innerText().catch(() => ''));
-    const normalized = normalizeFormQuestion(label);
-    if (action.category === 'current_location') {
-      if (groundedLocationMatches(label, action)) {
-        targetIndex = index;
-        break;
-      }
-    } else if (normalizeFormQuestion(label) === normalizeFormQuestion(action.value)) {
-      targetIndex = index;
+  let selectedLabel = null;
+  for (const query of autocompleteQueries(action)) {
+    locator = await exactLocator(page, action);
+    await locator.focus({ timeout: remainingTimeout(deadlineMs, clock) });
+    await locator.fill('', { timeout: remainingTimeout(deadlineMs, clock) });
+    await locator.pressSequentially(query, { delay: 20, timeout: remainingTimeout(deadlineMs, clock) });
+    remainingTimeout(deadlineMs, clock);
+    await page.waitForTimeout(250);
+    const ownedOptions = await ownedAutocompleteOptions(page, action);
+    const optionLocators = ownedOptions.options;
+    const count = await optionLocators.count();
+    let matchingLabel = null;
+    for (let index = 0; index < count; index += 1) {
+      const option = optionLocators.nth(index);
+      const directlyOwned = await option.evaluate(
+        (element, listboxId) => element.closest('[role="listbox"]')?.id === listboxId,
+        ownedOptions.listboxId,
+      ).catch(() => false);
+      if (!directlyOwned || !await option.isVisible()) continue;
+      const label = cleanFormText(await option.innerText().catch(() => ''));
+      if (label) visibleOptions.push(label);
+      const matches = action.category === 'current_location'
+        ? groundedLocationMatches(label, action)
+        : normalizeFormQuestion(label) === normalizeFormQuestion(action.value);
+      if (!matches) continue;
+      matchingLabel = label;
       break;
     }
+    if (matchingLabel) {
+      const liveOwnedOptions = await ownedAutocompleteOptions(page, action);
+      const liveOptionLocators = liveOwnedOptions.options;
+      const liveMatches = [];
+      for (let index = 0; index < await liveOptionLocators.count(); index += 1) {
+        const option = liveOptionLocators.nth(index);
+        const directlyOwned = await option.evaluate(
+          (element, listboxId) => element.closest('[role="listbox"]')?.id === listboxId,
+          liveOwnedOptions.listboxId,
+        ).catch(() => false);
+        if (!directlyOwned || !await option.isVisible()) continue;
+        const label = cleanFormText(await option.innerText().catch(() => ''));
+        if (normalizeFormQuestion(label) === normalizeFormQuestion(matchingLabel)) {
+          liveMatches.push(option);
+        }
+      }
+      if (liveMatches.length !== 1) {
+        throw new Error(`Autocomplete owned option is ambiguous for ${action.semantic}: ${matchingLabel}`);
+      }
+      await liveMatches[0].click({ timeout: remainingTimeout(deadlineMs, clock) });
+      selectedLabel = matchingLabel;
+    }
+    if (selectedLabel) break;
   }
-  if (targetIndex < 0) throw new Error(`Autocomplete has no grounded visible option for ${action.value}`);
-  await optionLocators.nth(targetIndex).click({ timeout: remainingTimeout(deadlineMs, clock) });
+  if (!selectedLabel) throw new Error(`Autocomplete has no grounded visible option for ${action.value}`);
   locator = await exactLocator(page, action);
   await locator.blur({ timeout: remainingTimeout(deadlineMs, clock) });
-  const committed = cleanFormText((await validationState(locator)).value);
-  if (action.category === 'current_location') {
-    const normalized = normalizeFormQuestion(committed);
-    if (!groundedLocationMatches(committed, action)) {
-      throw new Error(`Autocomplete committed an ungrounded location: ${committed || '(empty)'}`);
-    }
-  } else if (normalizeFormQuestion(committed) !== normalizeFormQuestion(action.value)) {
-    throw new Error(`Autocomplete selection was not committed: ${action.value}`);
+  const state = await validationState(locator);
+  const committed = cleanFormText(state.value);
+  if (state.invalid || normalizeFormQuestion(committed) !== normalizeFormQuestion(selectedLabel)) {
+    throw new Error(`Autocomplete selection was not committed: ${selectedLabel}`);
+  }
+  if (action.category === 'current_location' && !groundedLocationMatches(committed, action)) {
+    throw new Error(`Autocomplete committed an ungrounded location: ${committed || '(empty)'}`);
   }
   return committed;
 }
@@ -1129,6 +1353,7 @@ function requiredEmpty(field) {
 export async function reviewOperationalApplicationForm(page, profile, artifacts, execution, {
   context = {},
   previousEvidence = null,
+  reasoningState = null,
   passId,
   resumeMode = 'initial',
 } = {}) {
@@ -1136,7 +1361,11 @@ export async function reviewOperationalApplicationForm(page, profile, artifacts,
   const submissionGuardActiveAtHandoff = await page.evaluate(
     () => Boolean(globalThis.__careerOpsOperationalGuard),
   ).catch(() => null);
-  const plan = buildOperationalFormPlan(snapshot, profile, artifacts, { context, previousEvidence });
+  const plan = buildOperationalFormPlan(snapshot, profile, artifacts, {
+    context,
+    previousEvidence,
+    semanticResolutions: reasoningState?.semanticResolutions,
+  });
   const applicationFields = snapshot.fields.filter((field) => snapshot.applicationFormId
     && field.formId === snapshot.applicationFormId && field.applicationFormOwned !== false);
   const requiredMissing = applicationFields.filter(requiredEmpty).map((field) => {
@@ -1154,13 +1383,19 @@ export async function reviewOperationalApplicationForm(page, profile, artifacts,
     semanticClass: plan.finalActions.map((item) => item.semanticClass).join(' | ') || null,
     activated: snapshot.submitAttempts > 0,
   };
-  const answerRecords = dedupeRows([
-    ...(previousEvidence?.answerRecords || []),
-    ...(plan.answerRecords || []),
-  ].map((row) => ({ ...row, stableFieldId: row.normalizedQuestion })));
+  const answerRecords = mergeAnswerRecords(
+    mergeAnswerRecords(previousEvidence?.answerRecords || [], execution.answerRecords || []),
+    plan.answerRecords || [],
+  );
   const userActionRequired = snapshot.loginGate || snapshot.captcha.manualActionRequired || unresolvedFields.length > 0;
+  const semanticVerification = reasoningState?.semanticVerification || {
+    disposition: 'not_required', triggerReasons: [], findings: [], requestDigest: null, responseDigest: null,
+    repair: { attempted: false, outcome: 'not_attempted', resolutionKey: null },
+  };
+  const deterministicReviewComplete = !userActionRequired && !snapshot.validationErrors.length
+    && finalAction.detected && !finalAction.activated;
   const evidence = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     passId,
     resumeMode,
     inspectedAt: new Date().toISOString(),
@@ -1229,7 +1464,20 @@ export async function reviewOperationalApplicationForm(page, profile, artifacts,
           selectedLabel: field.selectedLabel,
         })),
     },
-    reviewComplete: !userActionRequired && !snapshot.validationErrors.length && finalAction.detected && !finalAction.activated,
+    reasoning: reasoningState ? reasoningEvidence(reasoningState) : {
+      schemaVersion: 1,
+      provider: null,
+      model: null,
+      calls: { fallback: 0, verifier: 0, total: 0 },
+      limits: { fallbackCalls: 3, verifierCalls: 1, totalCalls: 4, repairCycles: 1, timeoutMs: 15000 },
+      semanticResolutions: [],
+      rejectedResolutions: [],
+      preparedAnswerSummary: [],
+    },
+    semanticVerification: structuredClone(semanticVerification),
+    deterministicReviewComplete,
+    reviewComplete: deterministicReviewComplete
+      && ['not_required', 'passed'].includes(semanticVerification.disposition),
   };
   evidence.evidenceHash = digest(evidence);
   return { snapshot, plan, evidence };
@@ -1247,6 +1495,149 @@ export function attachOperationalArtifacts(preparation, artifacts = {}) {
   return { ...preparation, evidence };
 }
 
+async function resolvePlanAmbiguitiesWithReasoning(plan, snapshot, profile, context, reasoningState) {
+  if (!(plan.reasoningCandidates || []).length) return false;
+  if (!reasoningState.provider) {
+    for (const candidate of plan.reasoningCandidates) {
+      reasoningState.rejectedResolutions.push({
+        resolutionKey: candidate.resolutionKey,
+        kind: candidate.kind,
+        reasonCode: 'provider_unavailable',
+      });
+    }
+    return false;
+  }
+  try {
+    const request = createSemanticReasoningRequest(plan.reasoningCandidates);
+    const raw = await boundedProviderCall(reasoningState.provider, 'annotate', request, reasoningState);
+    const accepted = validateSemanticAnnotationResponse(raw, request, {
+      providerIdentity: reasoningState.providerIdentity,
+      profile,
+    });
+    reasoningState.semanticResolutions = mergeResolutionLedger(reasoningState.semanticResolutions, accepted);
+    for (const entry of accepted) {
+      reasoningState.riskReasons.add(entry.kind === 'option_mapping'
+        ? 'nontrivial_option_mapping'
+        : entry.kind === 'narrative_routing'
+          ? 'narrative_semantic_fallback'
+          : 'semantic_fallback_used');
+    }
+    return accepted.length > 0;
+  } catch (error) {
+    reasoningState.rejectedResolutions.push({
+      resolutionKey: null,
+      kind: 'batched_fallback',
+      reasonCode: /budget is exhausted/.test(error.message) ? 'call_budget_exhausted' : 'provider_or_schema_failure',
+      detailDigest: digest(cleanFormText(error.message)),
+    });
+    return false;
+  }
+}
+
+function liveReasoningFields(snapshot, profile, context, semanticResolutions) {
+  return snapshot.fields.filter((field) => snapshot.applicationFormId
+    && field.formId === snapshot.applicationFormId && field.applicationFormOwned !== false
+    && field.visible !== false && !field.disabled).map((field) => {
+    const { semantics } = resolvedFieldSemantics(field, snapshot, context, semanticResolutions);
+    let canonicalValue = null;
+    try {
+      canonicalValue = canonicalFieldValue(profile, semantics, { field, snapshot, context });
+    } catch {}
+    return publicLiveReasoningField(field, snapshot, context, profile, semantics, canonicalValue);
+  });
+}
+
+async function runFinalSemanticVerifier(snapshot, profile, context, reasoningState) {
+  const liveFields = liveReasoningFields(
+    snapshot, profile, context, reasoningState.semanticResolutions,
+  );
+  let request;
+  try {
+    request = createSemanticVerifierRequest(reasoningState, liveFields);
+  } catch (error) {
+    const missingNarrativeText = /lacks transient text/.test(error.message);
+    reasoningState.semanticVerification.disposition = 'review_required';
+    reasoningState.semanticVerification.findings = [{
+      code: missingNarrativeText ? 'transient_narrative_unavailable' : 'ambiguous_live_field_identity',
+      resolutionKey: null,
+      message: missingNarrativeText
+        ? 'Semantic verification requires manual review because prior narrative text was not persisted.'
+        : 'Semantic verification could not bind every live field uniquely.',
+      detailDigest: digest(cleanFormText(error.message)), live: false, repair: null,
+    }];
+    return { repaired: false, reviewRequired: true };
+  }
+  reasoningState.semanticVerification.requestDigest = request.requestDigest;
+  if (!reasoningState.provider) {
+    reasoningState.semanticVerification.disposition = 'review_required';
+    reasoningState.semanticVerification.findings = [{
+      code: 'provider_unavailable', resolutionKey: null,
+      message: 'Semantic verification was required but no configured reasoning provider was available.',
+      live: false, repair: null,
+    }];
+    return { repaired: false, reviewRequired: true };
+  }
+  try {
+    const raw = await boundedProviderCall(reasoningState.provider, 'verify', request, reasoningState);
+    const result = validateSemanticVerifierResponse(raw, request);
+    reasoningState.semanticVerification.responseDigest = result.responseDigest;
+    reasoningState.semanticVerification.findings = result.findings;
+    if (result.disposition === 'pass') {
+      reasoningState.semanticVerification.disposition = 'passed';
+      return { repaired: false, reviewRequired: false };
+    }
+    if (result.findings.length !== 1 || !result.findings[0].repair || !result.findings[0].live) {
+      reasoningState.semanticVerification.disposition = 'review_required';
+      return { repaired: false, reviewRequired: true };
+    }
+    if (reasoningState.semanticVerification.repair.attempted
+        || reasoningState.limits.repairCycles < 1) {
+      reasoningState.semanticVerification.disposition = 'review_required';
+      reasoningState.semanticVerification.repair = {
+        attempted: true, outcome: 'repair_budget_exhausted', resolutionKey: result.findings[0].resolutionKey,
+      };
+      return { repaired: false, reviewRequired: true };
+    }
+    const finding = result.findings[0];
+    const liveField = snapshot.fields.find((field) => (
+      fieldResolutionKey(field, snapshot.applicationFormId) === finding.resolutionKey
+      && field.formId === snapshot.applicationFormId && field.visible !== false && !field.disabled
+    ));
+    if (!liveField) {
+      reasoningState.semanticVerification.disposition = 'review_required';
+      return { repaired: false, reviewRequired: true };
+    }
+    const currentSemantics = resolvedFieldSemantics(
+      liveField, snapshot, context, reasoningState.semanticResolutions,
+    ).semantics;
+    let canonicalValue = null;
+    try { canonicalValue = canonicalFieldValue(profile, currentSemantics, { field: liveField, snapshot, context }); } catch {}
+    const repairCandidate = buildReasoningCandidate(liveField, snapshot, context, {
+      kind: finding.repair.kind,
+      reasonCode: 'final_semantic_verifier_repair',
+      canonicalValue,
+      profile,
+    });
+    const entry = makeRepairLedgerEntry(finding.repair, repairCandidate, request, reasoningState, profile);
+    reasoningState.semanticResolutions = mergeResolutionLedger(reasoningState.semanticResolutions, [entry]);
+    reasoningState.semanticVerification.repair = {
+      attempted: true, outcome: 'accepted_pending_deterministic_execution', resolutionKey: finding.resolutionKey,
+    };
+    return { repaired: true, reviewRequired: false };
+  } catch (error) {
+    reasoningState.semanticVerification.disposition = 'review_required';
+    reasoningState.semanticVerification.findings = [{
+      code: /budget is exhausted/.test(error.message) ? 'call_budget_exhausted' : 'provider_or_schema_failure',
+      resolutionKey: null,
+      message: 'Semantic verification failed closed.',
+      detailDigest: digest(cleanFormText(error.message)),
+      live: false,
+      repair: null,
+    }];
+    return { repaired: false, reviewRequired: true };
+  }
+}
+
 export async function prepareOperationalApplicationForm(page, profile, artifacts, {
   context = {},
   previousEvidence = null,
@@ -1259,6 +1650,7 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
   progressionSessionMs = DEFAULT_PROGRESSION_SESSION_MS,
   transitionStabilityMs = DEFAULT_PROGRESSION_STABILITY_MS,
   waitForTransitionImpl = waitForApplicationStateTransition,
+  reasoningProvider = null,
 } = {}) {
   const effectiveLimits = resolveOperationalFormLimits(profile, limits || {});
   const sessionDeadlineMs = clock() + effectiveLimits.sessionMs;
@@ -1286,12 +1678,21 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
       },
     }
     : previousEvidence;
+  const reasoningState = createReasoningState(profile, reasoningProvider, effectivePreviousEvidence);
   if (resumeMode !== 'initial'
       && Number(effectivePreviousEvidence?.passBudget?.controlledResumeUsed || 0) >= MAX_CONTROLLED_RESUMES) {
     const snapshot = await inspectOperationalApplicationForm(page);
+    reasoningState.semanticVerification.disposition = 'review_required';
+    reasoningState.semanticVerification.findings = [{
+      code: 'controlled_resume_budget_exhausted',
+      resolutionKey: null,
+      message: 'Candidate-wide controlled resume budget is exhausted.',
+      live: false,
+      repair: null,
+    }];
     const evidence = {
       ...effectivePreviousEvidence,
-      schemaVersion: 2,
+      schemaVersion: 3,
       passId,
       resumeMode,
       reviewedAt: new Date().toISOString(),
@@ -1309,6 +1710,9 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
       ]),
       userActionRequired: true,
       browserOpenRequired: true,
+      reasoning: reasoningEvidence(reasoningState),
+      semanticVerification: structuredClone(reasoningState.semanticVerification),
+      deterministicReviewComplete: false,
       reviewComplete: false,
     };
     evidence.evidenceHash = digest({ ...evidence, evidenceHash: undefined });
@@ -1334,6 +1738,7 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
   const progressionDeadlineMs = Math.min(sessionDeadlineMs, clock() + Math.min(progressionSessionMs, effectiveLimits.sessionMs));
   const aggregate = {
     completed: [], uploadedArtifacts: [], committedSelections: [], unresolvedFields: [],
+    answerRecords: [],
     attemptLedger: effectivePreviousEvidence?.attemptLedger || [],
     timeLimits: effectiveLimits, sessionLimitReached: false, precomputedNarrativeCount: 0,
   };
@@ -1363,7 +1768,21 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         break;
       }
 
-      const plan = buildOperationalFormPlan(snapshot, profile, artifacts, { context, previousEvidence: effectivePreviousEvidence });
+      let plan = buildOperationalFormPlan(snapshot, profile, artifacts, {
+        context,
+        previousEvidence: effectivePreviousEvidence,
+        semanticResolutions: reasoningState.semanticResolutions,
+      });
+      const reasoningChangedPlan = await resolvePlanAmbiguitiesWithReasoning(
+        plan, snapshot, profile, context, reasoningState,
+      );
+      if (reasoningChangedPlan) {
+        plan = buildOperationalFormPlan(snapshot, profile, artifacts, {
+          context,
+          previousEvidence: effectivePreviousEvidence,
+          semanticResolutions: reasoningState.semanticResolutions,
+        });
+      }
       const applicationFields = snapshot.fields.filter((field) => snapshot.applicationFormId
         && field.formId === snapshot.applicationFormId && field.applicationFormOwned !== false);
       plan.formFingerprint = digest(applicationFields.map((field) => stableFieldIdentity(field, classifyFieldSemantics(field))));
@@ -1384,11 +1803,17 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         aggregate[key].push(...(execution[key] || []));
       }
       aggregate.attemptLedger = execution.attemptLedger;
+      aggregate.answerRecords = mergeAnswerRecords(aggregate.answerRecords, plan.answerRecords || []);
       aggregate.sessionLimitReached ||= execution.sessionLimitReached;
       aggregate.precomputedNarrativeCount += plan.answerRecords.length;
+      addPreparedAnswers(reasoningState, plan, plan.formFingerprint, snapshot);
+      const triggerReasons = verifierTriggerReasons(reasoningState, plan, aggregate);
+      reasoningState.riskReasons = new Set(triggerReasons);
+      reasoningState.semanticVerification.triggerReasons = triggerReasons;
+      reasoningState.semanticVerification.disposition = triggerReasons.length ? 'pending' : 'not_required';
 
       const reviewed = await reviewOperationalApplicationForm(page, profile, artifacts, aggregate, {
-        context, previousEvidence: effectivePreviousEvidence, passId, resumeMode,
+        context, previousEvidence: effectivePreviousEvidence, reasoningState, passId, resumeMode,
       });
       reviewed.evidence.progression = { ...progression, progressionSubmits: reviewed.snapshot.progressionSubmits || 0 };
       reviewed.evidence.evidenceHash = digest({ ...reviewed.evidence, evidenceHash: undefined });
@@ -1415,7 +1840,90 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         break;
       }
       if (currentPlan.finalActions.length) {
-        outcome = reviewed;
+        if (!reasoningState.riskReasons.size) {
+          outcome = reviewed;
+          break;
+        }
+        const verification = await runFinalSemanticVerifier(
+          currentSnapshot, profile, context, reasoningState,
+        );
+        if (verification.reviewRequired) {
+          const finalReview = await reviewOperationalApplicationForm(page, profile, artifacts, aggregate, {
+            context, previousEvidence: effectivePreviousEvidence, reasoningState, passId, resumeMode,
+          });
+          outcome = {
+            ...finalReview,
+            gate: { state: 'review_required', reason: 'Semantic verification requires human review.' },
+          };
+          break;
+        }
+        if (!verification.repaired) {
+          outcome = await reviewOperationalApplicationForm(page, profile, artifacts, aggregate, {
+            context, previousEvidence: effectivePreviousEvidence, reasoningState, passId, resumeMode,
+          });
+          break;
+        }
+
+        const repairSnapshot = await inspectOperationalApplicationForm(page);
+        const repairPlan = buildOperationalFormPlan(repairSnapshot, profile, artifacts, {
+          context,
+          previousEvidence: effectivePreviousEvidence,
+          semanticResolutions: reasoningState.semanticResolutions,
+        });
+        const liveRepairKey = reasoningState.semanticVerification.repair.resolutionKey;
+        repairPlan.actions = repairPlan.actions.filter((action) => action.resolutionKey === liveRepairKey);
+        repairPlan.formFingerprint = digest(repairSnapshot.fields
+          .filter((field) => repairSnapshot.applicationFormId && field.formId === repairSnapshot.applicationFormId)
+          .map((field) => stableFieldIdentity(field, classifyFieldSemantics(field))));
+        repairPlan.actions = repairPlan.actions.map((action) => ({
+          ...action,
+          batchId: context.batchId || null,
+          candidateId: context.candidate?.candidate_id || null,
+        }));
+        if (repairPlan.actions.length !== 1) {
+          reasoningState.semanticVerification.disposition = 'review_required';
+          reasoningState.semanticVerification.repair.outcome = 'no_unique_deterministic_repair_action';
+          const finalReview = await reviewOperationalApplicationForm(page, profile, artifacts, aggregate, {
+            context, previousEvidence: effectivePreviousEvidence, reasoningState, passId, resumeMode,
+          });
+          outcome = { ...finalReview, gate: { state: 'review_required', reason: 'Semantic repair could not compile to one live deterministic action.' } };
+          break;
+        }
+        const repairExecution = await executeOperationalFormPlanGuarded(page, repairPlan, {
+          previousEvidence: { ...effectivePreviousEvidence, attemptLedger: aggregate.attemptLedger },
+          clock,
+          limits: effectiveLimits,
+          sessionDeadlineMs,
+          performActionImpl,
+        });
+        for (const key of ['completed', 'uploadedArtifacts', 'committedSelections', 'unresolvedFields']) {
+          aggregate[key].push(...(repairExecution[key] || []));
+        }
+        aggregate.attemptLedger = repairExecution.attemptLedger;
+        aggregate.answerRecords = mergeAnswerRecords(aggregate.answerRecords, repairPlan.answerRecords || []);
+        addPreparedAnswers(reasoningState, repairPlan, repairPlan.formFingerprint, repairSnapshot);
+        reasoningState.semanticVerification.repair.outcome = repairExecution.unresolvedFields.length
+          ? 'deterministic_execution_failed'
+          : 'executed_and_fresh_reviewed';
+        reasoningState.semanticVerification.disposition = repairExecution.unresolvedFields.length
+          ? 'review_required'
+          : 'passed';
+        const finalReview = await reviewOperationalApplicationForm(page, profile, artifacts, aggregate, {
+          context, previousEvidence: effectivePreviousEvidence, reasoningState, passId, resumeMode,
+        });
+        if (repairExecution.unresolvedFields.length
+            || finalReview.evidence.unresolvedFields.length
+            || finalReview.evidence.validationErrors.length
+            || !finalReview.evidence.deterministicReviewComplete) {
+          reasoningState.semanticVerification.disposition = 'review_required';
+          reasoningState.semanticVerification.repair.outcome = 'fresh_deterministic_review_failed';
+          const failedReview = await reviewOperationalApplicationForm(page, profile, artifacts, aggregate, {
+            context, previousEvidence: effectivePreviousEvidence, reasoningState, passId, resumeMode,
+          });
+          outcome = { ...failedReview, gate: { state: 'review_required', reason: 'Fresh deterministic review after semantic repair found unresolved or unsafe state.' } };
+        } else {
+          outcome = finalReview;
+        }
         break;
       }
       if (currentPlan.ambiguousActions.length || currentPlan.progressionActions.length !== 1) {
@@ -1496,7 +2004,7 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
 
   if (!outcome.evidence) {
     const reviewed = await reviewOperationalApplicationForm(page, profile, artifacts, aggregate, {
-      context, previousEvidence: effectivePreviousEvidence, passId, resumeMode,
+      context, previousEvidence: effectivePreviousEvidence, reasoningState, passId, resumeMode,
     });
     outcome = { ...reviewed, gate: outcome.gate };
   }

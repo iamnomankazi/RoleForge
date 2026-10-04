@@ -4,7 +4,7 @@
 // boards-api JSON shape, and the guard chain running before any request.
 // (Indirect coverage elsewhere: liveness tests exercise Greenhouse URL
 // resolution; this file tests the provider module itself.)
-import { pass, fail, ROOT } from '../helpers.mjs';
+import { pass, fail, ROOT, captureConsoleErrors } from '../helpers.mjs';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
 
@@ -32,6 +32,43 @@ try {
     fail(`greenhouse.detect(eu) returned ${JSON.stringify(hitEu)}`);
   }
 
+  const hitNestedBoard = greenhouse.detect({
+    name: 'NestedCo',
+    careers_url: 'https://job-boards.eu.greenhouse.io/nested-co/jobs/123',
+  });
+  if (hitNestedBoard && hitNestedBoard.url === 'https://boards-api.greenhouse.io/v1/boards/nested-co/jobs') {
+    pass('greenhouse.detect() keeps resolving a board token from a nested careers path');
+  } else {
+    fail(`greenhouse.detect(nested board) returned ${JSON.stringify(hitNestedBoard)}`);
+  }
+
+  const hitEmbed = greenhouse.detect({
+    name: 'EmbedCo',
+    careers_url: 'https://boards.greenhouse.io/embed/job_board?for=embed-co',
+  });
+  if (hitEmbed && hitEmbed.url === 'https://boards-api.greenhouse.io/v1/boards/embed-co/jobs') {
+    pass('greenhouse.detect() resolves the trusted embed/job_board?for=<token> form');
+  } else {
+    fail(`greenhouse.detect(embed) returned ${JSON.stringify(hitEmbed)}`);
+  }
+
+  const invalidCareersUrls = [
+    'https://job-boards.greenhouse.io.evil.example/acme',
+    'https://boards.greenhouse.io@evil.example/embed/job_board?for=acme',
+    'https://user@boards.greenhouse.io/embed/job_board?for=acme',
+    'https://boards.greenhouse.io:8443/embed/job_board?for=acme',
+    'http://boards.greenhouse.io/embed/job_board?for=acme',
+    'https://boards.greenhouse.io/embed/job_board',
+    'https://boards.greenhouse.io/embed/job_board?for=acme&for=other',
+    'https://boards.greenhouse.io/embed/job_board?for=../other',
+    'https://boards.greenhouse.io/embed/job_board/extra?for=acme',
+  ];
+  if (invalidCareersUrls.every((careers_url) => greenhouse.detect({ name: 'BadUrl', careers_url }) === null)) {
+    pass('greenhouse.detect() rejects hostile authorities, credentials, nondefault ports, and ambiguous embed tokens');
+  } else {
+    fail('greenhouse.detect() accepted an invalid or ambiguous careers_url');
+  }
+
   // detect() — api: takes precedence over careers_url and is used verbatim
   // when its host is on the allowlist.
   const hitApi = greenhouse.detect({
@@ -57,6 +94,13 @@ try {
     pass('greenhouse.detect() returns null for a non-HTTPS api:');
   } else {
     fail('greenhouse.detect() must reject an http:// api:');
+  }
+
+  if (greenhouse.detect({ name: 'Credentialed', api: 'https://user@boards-api.greenhouse.io/v1/boards/acme/jobs' }) === null
+      && greenhouse.detect({ name: 'Port', api: 'https://boards-api.greenhouse.io:8443/v1/boards/acme/jobs' }) === null) {
+    pass('greenhouse.detect() rejects API credentials and nondefault ports');
+  } else {
+    fail('greenhouse.detect() must reject API credentials and nondefault ports');
   }
 
   // detect() — malformed api: URL → null, not a crash.
@@ -91,6 +135,7 @@ try {
         absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/101',
         location: { name: 'Berlin, Germany' },
         first_published: '2026-07-01T09:30:00-04:00',
+        content: '<div><p>Build &amp; ship</p><p><strong>AI</strong> teams</p></div>',
       },
       {
         id: 102,
@@ -102,17 +147,29 @@ try {
     ],
   };
 
-  let capturedUrl = null;
-  let capturedOpts = null;
+  const capturedRequests = [];
   const fetched = await greenhouse.fetch(
     { name: 'Acme', careers_url: 'https://job-boards.greenhouse.io/acme' },
-    { fetchJson: async (url, opts) => { capturedUrl = url; capturedOpts = opts; return sample; } },
+    { fetchJson: async (url, opts) => { capturedRequests.push({ url, opts }); return sample; } },
   );
 
-  if (capturedUrl === 'https://boards-api.greenhouse.io/v1/boards/acme/jobs' && capturedOpts?.redirect === 'error') {
-    pass('greenhouse.fetch() hits the derived boards-api URL with redirect:"error" (SSRF guard)');
+  if (capturedRequests.length === 1
+      && capturedRequests[0]?.url === 'https://boards-api.greenhouse.io/v1/boards/acme/jobs?content=true'
+      && capturedRequests[0]?.opts?.redirect === 'error') {
+    pass('greenhouse.fetch() makes one list request to the derived boards-api URL with redirect:"error"');
   } else {
-    fail(`greenhouse.fetch() url=${JSON.stringify(capturedUrl)} opts=${JSON.stringify(capturedOpts)}`);
+    fail(`greenhouse.fetch() requests=${JSON.stringify(capturedRequests)}`);
+  }
+
+  let configuredListUrl = null;
+  await greenhouse.fetch(
+    { name: 'Configured', api: 'https://boards-api.greenhouse.io/v1/boards/configured/jobs?content=false&source=portal' },
+    { fetchJson: async (url) => { configuredListUrl = url; return { jobs: [] }; } },
+  );
+  if (configuredListUrl === 'https://boards-api.greenhouse.io/v1/boards/configured/jobs?content=true&source=portal') {
+    pass('greenhouse.fetch() forces content=true while preserving other configured list query parameters');
+  } else {
+    fail(`greenhouse.fetch() configured list URL=${JSON.stringify(configuredListUrl)}`);
   }
 
   if (fetched.length === 3)
@@ -123,26 +180,84 @@ try {
       && fetched[0]?.url === 'https://job-boards.greenhouse.io/acme/jobs/101'
       && fetched[0]?.company === 'Acme'
       && fetched[0]?.location === 'Berlin, Germany'
+      && fetched[0]?.description === 'Build & ship AI teams'
       && fetched[0]?.postedAt === Date.parse('2026-07-01T09:30:00-04:00'))
-    pass('greenhouse.fetch() maps title/absolute_url/entry.name/location.name/first_published');
+    pass('greenhouse.fetch() maps canonical fields and converts provider HTML/entities to plain description text');
   else fail(`greenhouse.fetch() row 0 = ${JSON.stringify(fetched[0])}`);
 
-  if (fetched[1]?.title === '' && fetched[1]?.location === '' && fetched[1]?.postedAt === undefined)
-    pass('greenhouse.fetch() defaults missing title/location to "" and omits postedAt when first_published is absent');
+  if (fetched[1]?.title === '' && fetched[1]?.location === '' && fetched[1]?.postedAt === undefined
+      && !Object.hasOwn(fetched[1], 'description'))
+    pass('greenhouse.fetch() preserves absent description and defaults missing title/location/date');
   else fail(`greenhouse.fetch() row 1 = ${JSON.stringify(fetched[1])}`);
 
   if (fetched[2]?.postedAt === undefined)
     pass('greenhouse.fetch() yields undefined postedAt for an unparseable first_published (NaN-safe)');
   else fail(`greenhouse.fetch() row 2 postedAt = ${JSON.stringify(fetched[2]?.postedAt)}`);
 
-  // Epoch-0 first_published must survive (the `|| undefined` trap toEpochMs avoids).
-  const epochZero = await greenhouse.fetch(
+  // Strict date parsing keeps ambiguous, invalid and non-string values unknown,
+  // while a real ISO epoch date remains a valid zero timestamp.
+  const dateCases = await greenhouse.fetch(
     { name: 'Acme', careers_url: 'https://job-boards.greenhouse.io/acme' },
-    { fetchJson: async () => ({ jobs: [{ title: 'Old', absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/1', first_published: '1970-01-01T00:00:00.000Z' }] }) },
+    { fetchJson: async () => ({ jobs: [
+      { title: 'Epoch', absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/1', first_published: '1970-01-01T00:00:00.000Z' },
+      { title: 'Null', absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/2', first_published: null },
+      { title: 'Ambiguous', absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/3', first_published: '01/02/2026' },
+      { title: 'Invalid calendar', absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/4', first_published: '2026-02-30' },
+      { title: 'Numeric', absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/5', first_published: 0 },
+      { title: 'Missing', absolute_url: 'https://job-boards.greenhouse.io/acme/jobs/6' },
+    ] }) },
   );
-  if (epochZero[0]?.postedAt === 0)
-    pass('greenhouse.fetch() preserves a valid epoch-0 first_published as postedAt 0');
-  else fail(`greenhouse.fetch() epoch-0 postedAt = ${JSON.stringify(epochZero[0]?.postedAt)}`);
+  if (dateCases[0]?.postedAt === 0
+      && dateCases.slice(1).every((job) => job.postedAt === undefined))
+    pass('greenhouse.fetch() preserves a valid epoch and omits unusable null, ambiguous, invalid, numeric, or missing dates');
+  else fail(`greenhouse.fetch() strict dates = ${JSON.stringify(dateCases.map((job) => job.postedAt))}`);
+
+  // Offices are fetched once only when a listing has a work-model-only
+  // location; the actual office geography is stable across provider ordering.
+  const officeRequests = [];
+  const enriched = await greenhouse.fetch(
+    { name: 'MultiSite', api: 'https://boards-api.greenhouse.io/v1/boards/multisite/jobs' },
+    { fetchJson: async (url, opts) => {
+      officeRequests.push({ url, opts });
+      if (new URL(url).pathname.endsWith('/jobs')) return { jobs: [
+        { id: 301, title: 'Remote Role', absolute_url: 'https://job-boards.greenhouse.io/multisite/jobs/301', location: { name: 'Remote; Hybrid' } },
+        { id: 302, title: 'Hybrid Role', absolute_url: 'https://job-boards.greenhouse.io/multisite/jobs/302', location: { name: 'Hybrid' } },
+      ] };
+      return { offices: [
+        { name: 'West Office', location: 'Zurich, Switzerland', departments: [{ jobs: [{ id: '301' }, { id: '302' }] }] },
+        { name: 'East Office', location: { city: 'Boston', country: 'US' }, departments: [{ jobs: [{ id: 301 }, { id: 302 }] }], children: [
+          { name: 'Asia Office', location: 'Singapore', departments: [{ jobs: [{ id: 301 }, { id: 302 }] }] },
+        ] },
+      ] };
+    } },
+  );
+  if (officeRequests.length === 2
+      && officeRequests.every((request) => request.opts?.redirect === 'error')
+      && officeRequests[0]?.url === 'https://boards-api.greenhouse.io/v1/boards/multisite/jobs?content=true'
+      && officeRequests[1]?.url === 'https://boards-api.greenhouse.io/v1/boards/multisite/offices'
+      && enriched[0]?.location === 'Remote; Hybrid · Boston, US · Singapore · Zurich, Switzerland'
+      && enriched[1]?.location === 'Hybrid · Boston, US · Singapore · Zurich, Switzerland') {
+    pass('greenhouse.fetch() makes one guarded offices request for multiple jobs and maps nested, multi-site geography in stable order');
+  } else {
+    fail(`greenhouse.fetch() officeRequests=${JSON.stringify(officeRequests)} result=${JSON.stringify(enriched)}`);
+  }
+
+  // Office lookup is optional enrichment: a failure retains all list evidence.
+  const degraded = await captureConsoleErrors(() => greenhouse.fetch(
+    { name: 'OfficeDown', careers_url: 'https://job-boards.greenhouse.io/officedown' },
+    { fetchJson: async (url) => {
+      if (new URL(url).pathname.endsWith('/jobs')) return { jobs: [
+        { id: 302, title: 'Remote Role', absolute_url: 'https://job-boards.greenhouse.io/officedown/jobs/302', location: { name: 'Remote' } },
+      ] };
+      throw new Error('office fixture unavailable');
+    } },
+  ));
+  if (degraded.result.length === 1 && degraded.result[0]?.url === 'https://job-boards.greenhouse.io/officedown/jobs/302'
+      && degraded.result[0]?.location === 'Remote' && degraded.errors.length === 1) {
+    pass('greenhouse.fetch() retains listing rows when optional office enrichment fails');
+  } else {
+    fail(`greenhouse.fetch() degraded result=${JSON.stringify(degraded)}`);
+  }
 
   // Malformed response bodies → empty result, no crash.
   const emptyCases = [{ jobs: [] }];

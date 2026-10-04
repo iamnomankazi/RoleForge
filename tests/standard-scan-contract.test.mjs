@@ -33,8 +33,13 @@ test('standard scan and worker merge share stable canonical identity and immutab
     const canonicalJson = JSON.parse(readFileSync(join(standard.runDir, 'candidates.json'), 'utf8'));
     const [tsvHeader, tsvRow] = readFileSync(join(standard.runDir, 'candidates.tsv'), 'utf8').trim().split(/\r?\n/);
     const provenanceIndex = tsvHeader.split('\t').indexOf('provenance');
-    assert.deepEqual(canonicalJson[0].provenance, [{ input: 'standard-scan', row: 1 }]);
-    assert.equal(tsvRow.split('\t')[provenanceIndex], '[{"input":"standard-scan","row":1}]');
+    assert.deepEqual(canonicalJson[0].provenance, [{
+      input: 'standard-scan', row: 1, source: 'greenhouse', source_queries: ['data'],
+    }]);
+    assert.equal(
+      tsvRow.split('\t')[provenanceIndex],
+      '[{"input":"standard-scan","row":1,"source":"greenhouse","source_queries":["data"]}]',
+    );
     const batch = createApplicationBatch({
       root,
       sourceRunId: 'standard-run',
@@ -45,6 +50,44 @@ test('standard scan and worker merge share stable canonical identity and immutab
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('canonical source IDs and provenance survive aliases, TSV output, and ATS duplicate merges', () => {
+  const board = {
+    company: 'Acme', title: 'Data Engineer', url: 'https://jobs.example.test/acme/data-engineer',
+    atsProvider: 'greenhouse', atsTenant: 'acme', requisitionId: '123',
+    source: 'job-board', sourceId: 'board-123', sourceUrl: 'https://board.example.test/listing/123',
+    sourceQueries: ['data engineering'],
+  };
+  const direct = {
+    company: 'Acme', title: 'Data Engineer', url: 'https://boards.greenhouse.io/acme/jobs/123',
+    provider: 'greenhouse', source: 'greenhouse-api', source_id: 'gh-123',
+    source_url: 'https://boards.greenhouse.io/acme/jobs/123', source_query: 'python',
+  };
+  const merged = mergeCanonicalCandidates([{ name: 'board.json', rows: [board] }, { name: 'direct.json', rows: [direct] }], {
+    runId: 'provenance-run',
+  });
+  assert.equal(merged.candidates.length, 1);
+  assert.equal(merged.duplicates, 1);
+  const candidate = merged.candidates[0];
+  assert.equal(candidate.source, 'job-board');
+  assert.equal(candidate.source_id, 'board-123');
+  assert.equal(candidate.source_url, board.sourceUrl);
+  assert.deepEqual(candidate.source_queries, ['data engineering', 'python']);
+  assert.deepEqual(candidate.provenance, [
+    {
+      input: 'board.json', row: 1, provider: 'greenhouse', source: 'job-board',
+      source_id: 'board-123', source_url: board.sourceUrl, source_queries: ['data engineering'],
+    },
+    {
+      input: 'direct.json', row: 1, provider: 'greenhouse', source: 'greenhouse-api',
+      source_id: 'gh-123', source_url: direct.source_url, source_queries: ['python'],
+    },
+  ]);
+  const tsv = buildCandidatesTsv([candidate]);
+  const [header, row] = tsv.trim().split(/\r?\n/);
+  const cells = row.split('\t');
+  assert.equal(cells[header.split('\t').indexOf('source_id')], 'board-123');
 });
 
 test('candidate TSV keeps primitive arrays readable and structured values lossless', () => {

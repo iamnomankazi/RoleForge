@@ -185,6 +185,27 @@ cover_letter:
 # scan:
 #   extractor: mcp   # mcp (default) | cli
 
+# ── Bounded application semantic reasoning (optional) ──────────────────────
+#
+# The canonical application executor remains deterministic when this is absent
+# or disabled. When enabled, the provider can only return validated semantic
+# annotations and one conditional final review; it never receives browser tools
+# and never supplies candidate facts or submission actions.
+#
+# `codex_exec` uses the local Codex CLI's existing ChatGPT login. It does not
+# require an API key or direct API endpoint. Confirm the configured model with
+# `codex exec -m <model>` before enabling it on a local installation.
+# application_form:
+#   reasoning:
+#     enabled: false
+#     provider: codex_exec
+#     model: "gpt-5.6-luna"
+#     timeout_ms: 30000
+#     max_fallback_calls: 3
+#     max_verifier_calls: 1
+#     max_total_calls: 4
+#     max_repair_cycles: 1
+
 # ── Auto-PDF threshold ──────────────────────────────────────────────────────
 #
 # Auto-PDF threshold during evaluation (used by `/career-ops pipeline` and

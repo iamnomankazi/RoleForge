@@ -1,4 +1,5 @@
 import dns from 'node:dns';
+import { getProviderIpGuardContext, validateLookupResult } from './_ip-guard.mjs';
 
 export const RESOLVER_FAILURE_CODES = new Set(['ENOTIMP', 'EREFUSED', 'ESERVFAIL', 'EAI_AGAIN']);
 
@@ -17,29 +18,57 @@ export function createCachedLookup(realLookup, options = {}) {
   const cache = new Map();
   const inflight = new Map();
 
+  function deliver(waiter, args) {
+    const [error, ...rest] = args;
+    if (!error && waiter.guardContext) {
+      try {
+        validateLookupResult(waiter.hostname, rest, waiter.guardContext);
+      } catch (guardError) {
+        waiter.callback(guardError);
+        return;
+      }
+    }
+    waiter.callback(error, ...rest);
+  }
+
   function lookup(hostname, rawOptions, rawCallback) {
     const callback = typeof rawOptions === 'function' ? rawOptions : rawCallback;
     const opts = typeof rawOptions === 'function' ? {} : (typeof rawOptions === 'number' ? { family: rawOptions } : (rawOptions ?? {}));
     const key = `${hostname}|${opts.family ?? 0}|${opts.all ? 1 : 0}|${opts.hints ?? 0}|${opts.verbatim ?? ''}`;
+    const waiter = { callback, guardContext: getProviderIpGuardContext(), hostname };
     const cached = cache.get(key);
     if (cached && cached.expires > now()) {
-      process.nextTick(callback, ...cached.args);
+      process.nextTick(() => deliver(waiter, cached.args));
       return;
     }
     if (inflight.has(key)) {
-      inflight.get(key).push(callback);
+      inflight.get(key).push(waiter);
       return;
     }
-    inflight.set(key, [callback]);
+    inflight.set(key, [waiter]);
     realLookup(hostname, opts, (error, ...rest) => {
-      const callbacks = inflight.get(key) || [];
+      const waiters = inflight.get(key) || [];
       inflight.delete(key);
-      const ttl = error ? (isResolverFailure(error) ? negativeTtlMs : 0) : ttlMs;
+      let guardPassed = true;
+      if (!error) {
+        const guardedWaiter = waiters.find((entry) => entry.guardContext);
+        if (guardedWaiter) {
+          try {
+            validateLookupResult(hostname, rest, guardedWaiter.guardContext);
+          } catch {
+            guardPassed = false;
+          }
+        }
+      }
+      const ttl = error
+        ? (isResolverFailure(error) ? negativeTtlMs : 0)
+        : (guardPassed ? ttlMs : 0);
       if (ttl > 0) {
         if (cache.size >= maxEntries) cache.delete(cache.keys().next().value);
         cache.set(key, { expires: now() + ttl, args: error ? [error] : [null, ...rest] });
       }
-      for (const waiting of callbacks) waiting(error, ...rest);
+      const args = error ? [error] : [null, ...rest];
+      for (const waiting of waiters) deliver(waiting, args);
     });
   }
   for (const symbol of Object.getOwnPropertySymbols(realLookup)) lookup[symbol] = realLookup[symbol];

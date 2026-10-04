@@ -183,6 +183,9 @@ const scripts = [
   { name: 'verify-portals.mjs --file .tmp-test-missing-portals.yml', expectExit: 0 },
   { name: 'update-system.mjs check', expectExit: 0 },
   { name: 'archive-posting.mjs --help', expectExit: 0 },
+  // Help is side-effect free even when --write is present; test the resolver's
+  // CLI surface without reading or mutating a user's portals.yml.
+  { name: 'discover-ats.mjs --help --write', expectExit: 0 },
 ];
 
 for (const { name, allowFail } of scripts) {

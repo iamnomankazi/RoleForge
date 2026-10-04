@@ -63,6 +63,139 @@ function validateKeywordList(value, path, errors) {
   }
 }
 
+function validateBoundedInteger(value, path, minimum, maximum, errors) {
+  if (value === undefined) return;
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    add(errors, path, `must be an integer from ${minimum} to ${maximum} when set`);
+    return;
+  }
+  if (value < minimum || value > maximum) {
+    add(errors, path, `must be from ${minimum} to ${maximum}`);
+  }
+}
+
+function validateVdabConfig(config, path, errors) {
+  if (config === undefined) return;
+  if (!isObject(config)) {
+    add(errors, `${path}.vdab`, 'vdab must be an object when set');
+    return;
+  }
+
+  if (config.keywords !== undefined) {
+    if (!Array.isArray(config.keywords)) {
+      add(errors, `${path}.vdab.keywords`, 'must be a non-empty array when set');
+    } else if (config.keywords.length === 0) {
+      add(errors, `${path}.vdab.keywords`, 'must contain at least one search term when set');
+    } else {
+      const seen = new Set();
+      for (const [idx, keyword] of config.keywords.entries()) {
+        const keywordPath = `${path}.vdab.keywords[${idx}]`;
+        if (typeof keyword !== 'string' || keyword.trim() === '') {
+          add(errors, keywordPath, 'must be a non-empty string');
+          continue;
+        }
+        if (keyword !== keyword.trim()) {
+          add(errors, keywordPath, 'must be trimmed');
+        }
+        const normalized = keyword.trim().toLowerCase();
+        if (seen.has(normalized)) add(errors, keywordPath, 'duplicates another VDAB keyword');
+        seen.add(normalized);
+      }
+    }
+  }
+
+  validateBoundedInteger(config.days, `${path}.vdab.days`, 1, 1000, errors);
+  validateBoundedInteger(config.size, `${path}.vdab.size`, 1, 100, errors);
+  validateBoundedInteger(config.detailLimit, `${path}.vdab.detailLimit`, 1, 100, errors);
+  if (config.fetchDetails !== undefined && typeof config.fetchDetails !== 'boolean') {
+    add(errors, `${path}.vdab.fetchDetails`, 'must be a boolean when set');
+  }
+}
+
+function validateWorkdayConfig(config, path, errors) {
+  if (config === undefined) return;
+  const workdayPath = `${path}.workday`;
+  if (!isObject(config)) {
+    add(errors, workdayPath, 'workday must be an object when set');
+    return;
+  }
+
+  validateBoundedInteger(config.detailLimit, `${workdayPath}.detailLimit`, 0, 100, errors);
+  if (config.appliedFacets === undefined) return;
+  if (!isObject(config.appliedFacets)) {
+    add(errors, `${workdayPath}.appliedFacets`, 'must be an object mapping facet names to explicit ID arrays');
+    return;
+  }
+
+  const facets = Object.entries(config.appliedFacets);
+  if (facets.length > 20) {
+    add(errors, `${workdayPath}.appliedFacets`, 'must contain no more than 20 facet names');
+  }
+  for (const [facet, ids] of facets) {
+    const facetPath = `${workdayPath}.appliedFacets.${facet}`;
+    if (!facet.trim()) add(errors, facetPath, 'facet name must not be empty');
+    if (facet.length > 200) add(errors, facetPath, 'facet name must not exceed 200 characters');
+    if (!Array.isArray(ids)) {
+      add(errors, facetPath, 'must be an array of explicit string IDs');
+      continue;
+    }
+    if (ids.length === 0) add(errors, facetPath, 'must contain at least one explicit ID when set');
+    if (ids.length > 50) add(errors, facetPath, 'must contain no more than 50 IDs');
+    const seen = new Set();
+    for (const [idx, id] of ids.entries()) {
+      const idPath = `${facetPath}[${idx}]`;
+      if (typeof id !== 'string') {
+        add(errors, idPath, 'must be an explicit string ID');
+        continue;
+      }
+      if (!id.trim()) add(errors, idPath, 'must not be empty');
+      if (id.length > 200) add(errors, idPath, 'must not exceed 200 characters');
+      if (seen.has(id)) add(errors, idPath, 'duplicate explicit ID');
+      seen.add(id);
+    }
+  }
+}
+
+function validateInteramtConfig(config, errors) {
+  if (config.interamt_searches !== undefined) {
+    const searches = config.interamt_searches;
+    if (!Array.isArray(searches)) {
+      add(errors, 'interamt_searches', 'must be a non-empty array when set');
+    } else if (searches.length === 0) {
+      add(errors, 'interamt_searches', 'must contain at least one search when set');
+    } else {
+      if (searches.length > 20) add(errors, 'interamt_searches', 'must contain no more than 20 searches');
+      const seen = new Set();
+      for (const [idx, search] of searches.entries()) {
+        const path = `interamt_searches[${idx}]`;
+        if (!isObject(search)) {
+          add(errors, path, 'must be an object with a was string');
+          continue;
+        }
+        if (typeof search.was !== 'string' || search.was.trim() === '') {
+          add(errors, `${path}.was`, 'must be a non-empty string');
+          continue;
+        }
+        if (search.was !== search.was.trim()) add(errors, `${path}.was`, 'must be trimmed');
+        if (search.was.length > 120) add(errors, `${path}.was`, 'must be at most 120 characters');
+        const normalized = search.was.trim().toLowerCase();
+        if (seen.has(normalized)) add(errors, `${path}.was`, 'duplicates another Interamt search');
+        seen.add(normalized);
+      }
+    }
+  }
+
+  if (config.interamt !== undefined) {
+    if (!isObject(config.interamt)) {
+      add(errors, 'interamt', 'must be an object when set');
+    } else {
+      validateBoundedInteger(config.interamt.max_load_more, 'interamt.max_load_more', 0, 50, errors);
+      validateBoundedInteger(config.interamt.page_timeout_ms, 'interamt.page_timeout_ms', 1, 60000, errors);
+      validateBoundedInteger(config.interamt.wait_timeout_ms, 'interamt.wait_timeout_ms', 1, 30000, errors);
+    }
+  }
+}
+
 function validateParser(parser, path, errors) {
   if (parser === undefined || parser === null) return;
   if (!isObject(parser)) {
@@ -160,6 +293,8 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
     }
   }
 
+  validateInteramtConfig(config, errors);
+
   if (config.experience_policy !== undefined) {
     if (!isObject(config.experience_policy)) {
       add(errors, 'experience_policy', 'experience_policy must be an object');
@@ -217,6 +352,8 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
 
       validateUrl(company.careers_url, `${base}.careers_url`, errors);
       validateUrl(company.api, `${base}.api`, errors);
+      validateVdabConfig(company.vdab, base, errors);
+      validateWorkdayConfig(company.workday, base, errors);
 
       if (company.provider !== undefined) {
         if (typeof company.provider !== 'string' || company.provider.trim() === '') {
@@ -227,6 +364,16 @@ export async function validatePortalsConfig(config, { providerIds = new Set() } 
       }
 
       validateParser(company.parser, `${base}.parser`, errors);
+    }
+  }
+
+  const jobBoards = config.job_boards;
+  if (Array.isArray(jobBoards)) {
+    for (const [idx, board] of jobBoards.entries()) {
+      const base = `job_boards[${idx}]`;
+      if (!isObject(board)) continue;
+      validateVdabConfig(board.vdab, base, errors);
+      validateWorkdayConfig(board.workday, base, errors);
     }
   }
 
@@ -298,7 +445,9 @@ async function main() {
   if (result.errors.length > 0) process.exit(1);
 }
 
-main().catch((err) => {
-  console.error(`validate-portals failed: ${err.message}`);
-  process.exit(1);
-});
+if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+  main().catch((err) => {
+    console.error(`validate-portals failed: ${err.message}`);
+    process.exit(1);
+  });
+}

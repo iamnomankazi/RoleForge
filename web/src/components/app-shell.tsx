@@ -9,7 +9,6 @@ import { MobileNav } from "@/components/mobile-nav";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { JobsProvider } from "@/components/jobs/job-store";
 import { PipelineProvider } from "@/components/pipeline/pipeline-provider";
-import { ApplyProvider } from "@/components/apply/apply-provider";
 import { ExploreProvider } from "@/components/explore/explore-provider";
 import { FirstScoreView } from "@/components/explore/first-score-view";
 import { BetaBanner } from "@/components/beta/beta-banner";
@@ -23,11 +22,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <JobsProvider>
       <PipelineProvider>
-      <ApplyProvider>
-      <ExploreProvider>
-      <MobileNav />
-      <div className="flex min-h-screen">
-        <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col overflow-y-auto border-r border-border bg-surface/30 p-4 md:flex">
+        <ExploreProvider>
+          <MobileNav />
+          <div className="flex min-h-screen">
+            <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col overflow-y-auto border-r border-border bg-surface/30 p-4 md:flex">
           <Link href="/" className="mb-8 flex items-center gap-2.5 px-1">
             <CoMark size={32} />
             <span className={`${instrumentSerif.className} relative -top-px text-2xl font-normal tracking-tight text-landing`}>
@@ -69,14 +67,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <ThemeToggle />
             </div>
           </div>
-        </aside>
-        <main className="flex-1 overflow-x-hidden">{children}</main>
-        <AssistantConsole />
-        <FirstScoreView />
-        <BetaBanner />
-      </div>
-      </ExploreProvider>
-      </ApplyProvider>
+            </aside>
+            <main className="flex-1 overflow-x-hidden">{children}</main>
+            <AssistantConsole />
+            <FirstScoreView />
+            <BetaBanner />
+          </div>
+        </ExploreProvider>
       </PipelineProvider>
     </JobsProvider>
   );

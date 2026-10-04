@@ -33,6 +33,19 @@ const profile = attachFactualSources({
   answers: new Map(), priorApprovedAnswers: [], cvText: 'Synthetic fixture CV evidence.', articleDigestText: '', answerBankText: '', profileModeText: '',
 });
 const context = { batchId: 'fixture-batch', candidate: { candidate_id: `cand_v1_${'a'.repeat(64)}` }, jobCountry: 'Finland', jdText: '' };
+const narrativeCvText = 'In the fictional Warehouse project, I built validated Python and SQL data pipelines.';
+const narrativeProfile = attachFactualSources({
+  ...profile,
+  cvText: narrativeCvText,
+  formRules: {
+    ...profile.formRules,
+    narrative_evidence: [{
+      id: 'warehouse-proof',
+      topics: ['data_engineering', 'python_sql'],
+      provenance: [{ sourceType: 'cv', locator: 'lines:1' }],
+    }],
+  },
+}, { cvText: narrativeCvText });
 
 function artifacts() {
   const dir = mkdtempSync(join(tmpdir(), 'career-ops-progression-'));
@@ -667,6 +680,70 @@ test('realistic four-step form fills, advances three times, and stops before fin
   } finally {
     await run.browser.close();
     rmSync(run.fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test('narrative provenance survives a real step transition after its field leaves the DOM', { timeout: 30_000 }, async () => {
+  const browser = await chromium.launch({ headless: true });
+  let annotateCalls = 0;
+  let verifierCalls = 0;
+  try {
+    const page = await browser.newPage();
+    await page.route('**/application/narrative-step/*', async (route) => {
+      const step = Number(new URL(route.request().url()).pathname.split('/').pop());
+      const body = step === 1
+        ? `<div data-career-ops-wizard><p data-career-ops-step="1" data-career-ops-total-steps="2">Step 1 of 2</p>
+          <form id="application" action="/application/narrative-step/2">
+            <label>Why are you a good fit for this data engineering role?<textarea id="why-fit" required></textarea></label>
+            <button id="continue" type="submit" aria-label="Continue application">Continue</button>
+          </form></div>`
+        : `<div data-career-ops-wizard><p data-career-ops-step="2" data-career-ops-total-steps="2">Step 2 of 2</p>
+          <form id="application" action="/application/submit" method="post">
+            <label>Email<input id="email" type="email" required></label>
+            <button id="final-submit" type="submit">Submit application</button>
+          </form></div><script>document.getElementById('application').addEventListener('submit',event=>{window.fixtureFinalSubmits=(window.fixtureFinalSubmits||0)+1;event.preventDefault();});</script>`;
+      await route.fulfill({ contentType: 'text/html', body: `<!doctype html><html><body>${body}</body></html>` });
+    });
+    await page.goto('https://fixture.career-ops.invalid/application/narrative-step/1');
+    const provider = {
+      identity: { provider: 'fake', model: 'fake-luna' },
+      annotate: async () => { annotateCalls += 1; throw new Error('deterministic narrative must not request annotation'); },
+      verify: async () => { verifierCalls += 1; return { schemaVersion: 1, disposition: 'pass', findings: [] }; },
+    };
+    const result = await prepareOperationalApplicationForm(page, narrativeProfile, {}, {
+      context,
+      reasoningProvider: provider,
+      transitionTimeoutMs: 1_500,
+      progressionSessionMs: 15_000,
+    });
+    assert.equal(result.gate, undefined, JSON.stringify(result.gate));
+    assert.equal(result.evidence.reviewComplete, true);
+    assert.equal(result.evidence.progression.stepsAdvanced, 1);
+    assert.equal(result.evidence.finalAction.detected, true);
+    assert.equal(result.evidence.finalAction.activated, false);
+    assert.equal(await page.locator('#why-fit').count(), 0);
+    assert.equal(await page.locator('#email').inputValue(), profile.candidate.email);
+    assert.equal(await page.evaluate(() => window.fixtureFinalSubmits || 0), 0);
+    assert.equal(annotateCalls, 0);
+    assert.equal(verifierCalls, 1);
+    assert.equal(result.evidence.semanticVerification.disposition, 'passed');
+
+    const records = result.evidence.answerRecords.filter((record) => (
+      record.normalizedQuestion === 'why are you a good fit for this data engineering role'
+    ));
+    assert.equal(records.length, 1);
+    assert.equal(records[0].candidateId, context.candidate.candidate_id);
+    assert.equal(records[0].templateId, 'role-fit-v1');
+    assert.match(records[0].answerHash, /^sha256:[a-f0-9]{64}$/);
+    assert.equal(records[0].factualSources.length, 1);
+    assert.equal(records[0].factualSources[0].configuredEvidenceId, 'warehouse-proof');
+    assert.ok(result.evidence.reasoning.preparedAnswerSummary.some((row) => (
+      row.normalizedQuestion === records[0].normalizedQuestion
+      && row.category === 'custom_motivation_experience_narrative'
+    )));
+    assert.equal(JSON.stringify(result.evidence.reasoning).includes(records[0].answer), false);
+  } finally {
+    await browser.close();
   }
 });
 

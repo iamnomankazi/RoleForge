@@ -52,6 +52,55 @@ function sourceQueries(row) {
   ])];
 }
 
+// Provenance is evidence about where a row came from, not part of candidate
+// identity. Keep the original input/row coordinates and add only source
+// metadata that was actually supplied by that row. Sorting object keys makes
+// duplicate detection deterministic even when equivalent entries arrive with
+// different key insertion order.
+function stableProvenanceValue(value) {
+  if (Array.isArray(value)) return value.map(stableProvenanceValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableProvenanceValue(value[key])]));
+  }
+  return value;
+}
+
+function provenanceKey(value) {
+  try {
+    return JSON.stringify(stableProvenanceValue(value));
+  } catch {
+    return String(value);
+  }
+}
+
+function dedupeProvenance(entries) {
+  const seen = new Set();
+  return entries.filter((entry) => {
+    const key = provenanceKey(entry);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function sourceEvidenceProvenance(row, {
+  inputName,
+  index,
+  sourceId,
+  sourceUrl,
+  queries,
+} = {}) {
+  const entry = { input: inputName, row: index + 1 };
+  const provider = first(row?.provider, row?.atsProvider, row?.ats_provider);
+  const source = first(row?.source);
+  if (provider) entry.provider = provider;
+  if (source) entry.source = source;
+  if (sourceId) entry.source_id = sourceId;
+  if (sourceUrl) entry.source_url = sourceUrl;
+  if (queries.length) entry.source_queries = queries;
+  return entry;
+}
+
 function normalizeSalary(value) {
   if (value == null || value === '') return null;
   if (typeof value === 'object' && !Array.isArray(value)) return value;
@@ -103,8 +152,17 @@ export function normalizeCanonicalCandidate(row, {
   const seniority = list(row?.seniority ?? row?.structuredSeniority ?? row?.structured_seniority);
   const languages = list(row?.languageRequirements ?? row?.language_requirements ?? row?.languages);
   const source = first(row?.source, row?.provider, inputName);
+  const sourceId = first(row?.sourceId, row?.source_id) || null;
+  const sourceUrl = first(row?.sourceUrl, row?.source_url) || null;
   const worker = first(row?.sourceWorker, row?.source_worker, inputName.replace(/\.json$/i, ''));
   const existingProvenance = Array.isArray(row?.provenance) ? row.provenance : [];
+  const currentProvenance = sourceEvidenceProvenance(row, {
+    inputName,
+    index,
+    sourceId,
+    sourceUrl,
+    queries,
+  });
 
   return {
     schema_version: SCAN_CANDIDATE_SCHEMA_VERSION,
@@ -113,11 +171,12 @@ export function normalizeCanonicalCandidate(row, {
     created_at: createdAt || first(row?.created_at, row?.createdAt) || null,
     provider: identity.atsProvider || first(row?.provider, source) || null,
     source,
-    source_url: first(row?.sourceUrl, row?.source_url) || null,
+    source_id: sourceId,
+    source_url: sourceUrl,
     source_worker: worker || null,
     source_query: queries[0] || null,
     source_queries: queries,
-    provenance: existingProvenance.length ? existingProvenance : [{ input: inputName, row: index + 1 }],
+    provenance: dedupeProvenance([...existingProvenance, currentProvenance]),
     company,
     title,
     canonical_url: canonicalUrl,
@@ -290,8 +349,9 @@ export function mergeCanonicalCandidates(inputs, {
       existing.url_aliases = [...new Set([...existing.url_aliases, ...row.url_aliases])];
       existing.source_queries = [...new Set([...existing.source_queries, ...row.source_queries])];
       existing.source_query ||= existing.source_queries[0] || null;
-      existing.provenance.push(...row.provenance);
+      existing.provenance = dedupeProvenance([...existing.provenance, ...row.provenance]);
       existing.source_worker = mergeText(existing.source_worker, row.source_worker);
+      existing.source_id ||= row.source_id;
       existing.source_url ||= row.source_url;
       existing.match_bucket = mergeBucket(existing, row);
       existing.match_reason = mergeText(existing.match_reason, row.match_reason);
@@ -394,7 +454,7 @@ function mdCell(value) {
 
 export const CANDIDATE_TSV_COLUMNS = Object.freeze([
   'schema_version', 'run_id', 'candidate_id', 'created_at', 'provider', 'source', 'source_worker',
-  'source_url', 'source_query', 'source_queries', 'company', 'title', 'canonical_url', 'url', 'original_url',
+  'source_id', 'source_url', 'source_query', 'source_queries', 'company', 'title', 'canonical_url', 'url', 'original_url',
   'resolved_url', 'apply_url', 'url_aliases', 'ats_provider', 'ats_tenant', 'requisition_id',
   'location', 'location_eligibility', 'location_eligibility_code', 'location_eligibility_match',
   'location_eligibility_source', 'remote_restriction',

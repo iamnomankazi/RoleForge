@@ -95,24 +95,53 @@ try {
   }
 
   // fetch() — request shape and normalization from the real posting-api
-  // payload: { jobs: [{ title, jobUrl, location, secondaryLocations, publishedAt, compensation }] }.
+  // payload, including location addresses and available description evidence.
   const sample = {
     jobs: [
       {
         title: 'Head of Applied AI',
         jobUrl: 'https://jobs.ashbyhq.com/acme/1234',
         location: 'Canada',
+        address: { postalAddress: { addressLocality: 'Montréal', addressCountry: 'CANADA' } },
         secondaryLocations: [
-          { location: 'Europe', address: { postalAddress: { addressLocality: 'Berlin', addressCountry: 'Germany' } } },
-          { location: 'Canada' },       // duplicate of the primary — must dedup
+          { location: 'Europe, Germany', address: { postalAddress: { addressLocality: 'Berlin', addressCountry: 'germany' } } },
+          { location: 'canada' },       // case-insensitive duplicate of the primary
           null,                          // malformed secondary — must be skipped
         ],
+        descriptionPlain: 'Applicants in Canada or Europe may apply.',
+        descriptionHtml: '<p>HTML fallback should not replace valid plain text.</p>',
+        workplaceType: 'REMOTE',
+        isRemote: false,
         publishedAt: '2026-07-02T00:00:00.000Z',
         compensation: { interval: '1 YEAR', minValue: 150000, maxValue: 180000, currency: 'usd' },
       },
       {
-        // no title/jobUrl → '' ; no locations → '' ; bad publishedAt → undefined ; no comp → null
-        publishedAt: 'soon',
+        // no title/jobUrl → '' ; no locations → '' ; no publishedAt → undefined ; no comp → null
+        createdAt: '2026-07-02T00:00:00.000Z',
+      },
+      {
+        title: 'HTML described role',
+        jobUrl: 'https://jobs.ashbyhq.com/acme/html',
+        location: 'Stockholm, Sweden',
+        descriptionHtml: '<p>Eligible applicants may be based in <strong>Europe.</strong></p><p>Applicants in <a href="/ca">Canada</a> are also eligible.</p>',
+        isRemote: true,
+        publishedAt: '1970-01-01T00:00:00.000Z',
+      },
+      {
+        title: 'Invalid calendar date',
+        publishedAt: '2026-02-30T00:00:00Z',
+      },
+      {
+        title: 'On-site role',
+        jobUrl: 'https://jobs.ashbyhq.com/acme/onsite',
+        location: 'Copenhagen, Denmark',
+        workplaceType: 'On-site',
+        isRemote: true,
+        publishedAt: '2026-07-02',
+      },
+      {
+        title: 'Unknown timezone role',
+        publishedAt: '2026-07-02T00:00:00-00:00',
       },
     ],
   };
@@ -136,9 +165,9 @@ try {
     fail(`ashby.fetch() opts = ${JSON.stringify(capturedOpts)}`);
   }
 
-  if (fetched.length === 2)
+  if (fetched.length === 6)
     pass('ashby.fetch() returns one normalized row per job');
-  else fail(`ashby.fetch() returned ${fetched.length} rows (expected 2)`);
+  else fail(`ashby.fetch() returned ${fetched.length} rows (expected 6)`);
 
   if (fetched[0]?.title === 'Head of Applied AI'
       && fetched[0]?.url === 'https://jobs.ashbyhq.com/acme/1234'
@@ -148,14 +177,34 @@ try {
     pass('ashby.fetch() maps title/jobUrl/entry.name/publishedAt/compensation');
   else fail(`ashby.fetch() row 0 = ${JSON.stringify(fetched[0])}`);
 
-  if (fetched[0]?.location === 'Canada · Europe · Berlin · Germany')
-    pass('ashby.fetch() folds secondaryLocations (region/locality/country) into location, deduped, " · "-joined');
+  if (fetched[0]?.location === 'Canada · Montréal · Europe, Germany · Berlin · Remote')
+    pass('ashby.fetch() folds primary/secondary geography, Unicode locality, case-insensitive country dedup, and authoritative remote type');
   else fail(`ashby.fetch() row 0 location = ${JSON.stringify(fetched[0]?.location)}`);
 
+  if (fetched[0]?.description === 'Applicants in Canada or Europe may apply.')
+    pass('ashby.fetch() prefers valid descriptionPlain over HTML description evidence');
+  else fail(`ashby.fetch() row 0 description = ${JSON.stringify(fetched[0]?.description)}`);
+
   if (fetched[1]?.title === '' && fetched[1]?.url === '' && fetched[1]?.location === ''
-      && fetched[1]?.salary === null && fetched[1]?.postedAt === undefined)
-    pass('ashby.fetch() tolerates a sparse job (empty strings, null salary, undefined postedAt for a bad date)');
+      && fetched[1]?.salary === null && fetched[1]?.postedAt === undefined && !('description' in fetched[1]))
+    pass('ashby.fetch() tolerates a sparse job and does not infer publishedAt from createdAt');
   else fail(`ashby.fetch() row 1 = ${JSON.stringify(fetched[1])}`);
+
+  if (fetched[2]?.description === 'Eligible applicants may be based in Europe. Applicants in Canada are also eligible.')
+    pass('ashby.fetch() converts HTML descriptions to readable text and preserves eligibility statements');
+  else fail(`ashby.fetch() row 2 description = ${JSON.stringify(fetched[2]?.description)}`);
+
+  if (fetched[2]?.location === 'Stockholm, Sweden · Remote' && fetched[2]?.postedAt === 0)
+    pass('ashby.fetch() uses isRemote only as fallback, retains geography, and preserves the valid epoch date');
+  else fail(`ashby.fetch() row 2 = ${JSON.stringify(fetched[2])}`);
+
+  if (fetched[3]?.postedAt === undefined && fetched[4]?.postedAt === undefined && fetched[5]?.postedAt === undefined)
+    pass('ashby.fetch() omits rolled-over dates, date-only values, and unknown-offset timestamps');
+  else fail(`ashby.fetch() invalid dates = ${JSON.stringify([fetched[3]?.postedAt, fetched[4]?.postedAt, fetched[5]?.postedAt])}`);
+
+  if (fetched[4]?.location === 'Copenhagen, Denmark')
+    pass('ashby.fetch() lets workplaceType override contradictory isRemote');
+  else fail(`ashby.fetch() row 4 location = ${JSON.stringify(fetched[4]?.location)}`);
 
   // Malformed response bodies → [], no crash.
   const emptyCases = [null, {}, { jobs: null }, { jobs: 'nope' }];

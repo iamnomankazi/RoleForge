@@ -1,8 +1,9 @@
 # Supported Job Boards
 
-Career-Ops scans job sources through provider modules in `providers/`. Each
-non-helper `*.mjs` file maps to one supported source. Files prefixed with `_`
-are shared helpers and are not loaded as providers.
+Career-Ops scans job sources through provider modules in `providers/`. Active
+sources are listed below; retired modules remain documented separately when
+legacy configuration needs a clear diagnostic. Files prefixed with `_` are
+shared helpers and are not loaded as providers.
 
 | Board | Type (API / RSS / parser) | Notes |
 | --- | --- | --- |
@@ -21,7 +22,6 @@ are shared helpers and are not loaded as providers.
 | Cornerstone OnDemand | API | Reads hosted CSOD career sites (`<tenant>.csod.com/ux/ats/careersite/...`). The search API wants a bearer token, but the career-site home page embeds an anonymous JWT (no login), so each fetch bootstraps that token then pages the public search API. Point `careers_url` at the csod.com URL (or set `provider: csod`). |
 | Dassault Systèmes | Parser | Single-company provider for `www.3ds.com/careers/jobs` via the public Exalead card-search API (returns Exalead XML, not JSON). Global to 3ds.com, so no per-tenant config. Select with `provider: dassault`. |
 | Deutsche Bahn | Parser | Single-company provider for DB's `db.jobs` careers portal (an Avature front; `jobs.deutschebahngroup.careers` 302-redirects into it) via its server-rendered search endpoint, paginated over plain HTTP. Select with `provider: deutschebahn`. |
-| EchoJobs | API | Reads the board-wide `https://echojobs.io/api/jobs` JSON feed (tech jobs aggregated from company ATS boards). Configure with `provider: echojobs`; paginates `?page=N` up to `max_pages` (default 3), then scanner filters apply. Job URLs point at the original ATS posting. |
 | Gem | API | Per-company ATS provider for public Gem boards, not a global job database. Auto-detects `https://jobs.gem.com/<boardId>` and batches listing/detail requests through Gem's public jobs API. |
 | Get on Board | API | Reads the public `https://www.getonbrd.com/api/v0/categories/programming/jobs` JSON:API feed (remote/LatAm-heavy tech roles). Configure with `provider: getonbrd`; paginates `?page=N` up to `max_pages` (default 3) over the programming category (`expand[]=company`), then scanner filters apply. |
 | Glints | API | Uses Glints' public GraphQL job search endpoint. Configure with `provider: glints`; query and filters can be set on the portal entry. |
@@ -65,3 +65,15 @@ are shared helpers and are not loaded as providers.
 
 When adding a new provider, add a new non-helper module under `providers/` and
 update this table in the same PR.
+
+## Retired sources
+
+### EchoJobs
+
+EchoJobs' board-wide `https://echojobs.io/api/jobs` feed is retired (#2976,
+2026-08-20). The feed and the site's `robots.txt` return a Vercel bot-protection
+checkpoint (HTTP 429), while `robots.txt` disallows `/api`. Career-Ops does not
+work around bot protection. Existing `provider: echojobs` entries still resolve
+for backward compatibility, but the provider fails immediately with this
+diagnostic; remove the entry from `portals.yml`. Historical EchoJobs source and
+scan provenance remains valid in existing artifacts.

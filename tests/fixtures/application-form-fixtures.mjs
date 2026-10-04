@@ -43,7 +43,7 @@ export const greenhouseFixture = shell(`
     <label>Phone country <select name="phone_country" required><option value="">Choose</option><option>Finland</option></select></label>
     <label>Phone number <input name="phone" required></label>
     <label>Country <select id="country" name="country" required><option value="">Choose</option><option>Finland</option></select></label>
-    <div id="city-wrap" hidden><label>City <input id="city" role="combobox" aria-autocomplete="list" required></label><div role="option" id="city-option" hidden>Example City</div></div>
+    <div id="city-wrap" hidden><label>City <input id="city" role="combobox" aria-autocomplete="list" aria-controls="city-options" required></label><div id="city-options" role="listbox"><div role="option" id="city-option" hidden>Example City</div></div></div>
     <label>LinkedIn <input name="linkedin" required></label>
     <label>Why this role? <textarea name="why_role" required></textarea></label>
     <label>Resume / CV <input id="cv" type="file" required></label><span id="cv-name"></span>

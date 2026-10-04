@@ -9,7 +9,6 @@ import { Send, X, Loader2, Settings, RotateCcw, ArrowUpRight, Sparkles } from "l
 import { CoMark } from "@/components/co-mark";
 import { useJobs } from "@/components/jobs/job-store";
 import { usePipeline } from "@/components/pipeline/pipeline-provider";
-import { useApply } from "@/components/apply/apply-provider";
 import { useExplore } from "@/components/explore/explore-provider";
 import { WorkerCard } from "@/components/jobs/worker-card";
 import { dispatch, type ActionCtx, type DoneInfo } from "@/app/actions/registry";
@@ -97,7 +96,7 @@ function describePage(p: string): string {
   if (p === "/analytics") return "Analytics — funnel, score distribution, top companies.";
   if (p === "/cv") return "CV editor (cv.md).";
   if (p === "/config") return "Config — CLI / engine setup.";
-  if (p === "/apply") return "Apply — the form-proxy: the user is reviewing a job application re-rendered in plain language, pre-filled from their CV. You can write/revise answers via setApplyField.";
+  if (p === "/apply") return "Apply — the legacy web Apply executor is disabled; this page is read-only. Posting/report links remain available elsewhere.";
   if (p.startsWith("/jobs/")) return "Watching a running worker / evaluation in progress.";
   return `Route ${p}.`;
 }
@@ -137,15 +136,11 @@ export function AssistantConsole() {
 
   const { jobs, startJob } = useJobs();
   const pipeline = usePipeline();
-  const apply = useApply();
-
-  // refs so the streaming closure always sees the latest jobs/pipeline/apply/cli
+  // refs so the streaming closure always sees the latest jobs/pipeline/cli
   const jobsRef = useRef(jobs);
   jobsRef.current = jobs;
   const pipelineRef = useRef(pipeline);
   pipelineRef.current = pipeline;
-  const applyRef = useRef(apply);
-  applyRef.current = apply;
   const explore = useExplore();
   const exploreRef = useRef(explore);
   exploreRef.current = explore;
@@ -260,11 +255,6 @@ export function AssistantConsole() {
           })
           .catch(() => {});
       },
-      setApplyField: (idOrLabel, value) => applyRef.current.setAnswer(idOrLabel, value),
-      startApply: (u) => {
-        router.push("/apply");
-        setTimeout(() => applyRef.current.open(u), 60);
-      },
       applyExplore: (patch, opts) => exploreRef.current.applyPatch(patch, opts),
       writeProfile: (patch) => {
         fetch("/api/profile", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) })
@@ -321,17 +311,6 @@ export function AssistantConsole() {
       .join(", ")}. To evaluate every pending posting for one company, emit evaluateCompany with just the company name.`;
   }
 
-  // When the user is on /apply, expose the proxy form's fields + current answers
-  // so the assistant can write/revise any answer (setApplyField) on request.
-  function applyContext(): string {
-    const ap = applyRef.current;
-    if (!pathname.startsWith("/apply") || !ap.fields.length) return "";
-    const lines = ap.fields
-      .map((f) => `- ${f.label || f.id}${ap.meta[f.id]?.needsConfirmation ? " (user confirms)" : ""}: ${ap.answers[f.id] ? `"${ap.answers[f.id].slice(0, 240)}"` : "(empty)"}`)
-      .join("\n");
-    return `\n\nAPPLY FORM — the user is filling "${ap.title}". Current answers:\n${lines}\nTo write or revise an answer, emit setApplyField {"field":"<label or id>","value":"<new text>"}. If a change reveals a durable preference or corrected fact, ALSO remember it.`;
-  }
-
   async function send(forced?: string) {
     const text = (forced ?? input).trim();
     if (!text || busy || !cliId) return;
@@ -345,7 +324,7 @@ export function AssistantConsole() {
       const res = await fetch("/api/assistant", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, cliId, history, pageContext: describePage(pathname) + pipelineContext() + applyContext() }),
+        body: JSON.stringify({ message: text, cliId, history, pageContext: describePage(pathname) + pipelineContext() }),
       });
       if (!res.ok || !res.body) {
         const err = await res.json().catch(() => ({}));

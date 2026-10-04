@@ -550,8 +550,8 @@ test('21–24. autocomplete captures options, retries once, preserves other fiel
   await page.setContent(`
     <form>
       <label for="name">First name</label><input id="name" required>
-      <label for="location">Current location</label><input id="location" role="combobox" aria-autocomplete="list" required>
-      <div id="options"></div>
+      <label for="location">Current location</label><input id="location" role="combobox" aria-autocomplete="list" aria-controls="options" required>
+      <div id="options" role="listbox"></div>
       <button type="submit">Submit application</button>
     </form>
     <script>
@@ -580,6 +580,62 @@ test('21–24. autocomplete captures options, retries once, preserves other fiel
   await page.close();
 });
 
+test('location autocomplete uses only its owned listbox while preserving grounded country fallback and commit verification', async () => {
+  const page = await browser.newPage();
+  await page.setContent(`
+    <button id="unrelated-option" type="button" role="option">Finland</button>
+    <form>
+      <label for="location">Location</label><input id="location" role="combobox" aria-autocomplete="list" aria-controls="location-options" required>
+      <div id="location-options" role="listbox"></div>
+      <button type="submit">Submit application</button>
+    </form>
+    <script>
+      const queries = [];
+      let unrelatedClicks = 0;
+      let ownedClicks = 0;
+      const locationInput = document.getElementById('location');
+      const locationOptions = document.getElementById('location-options');
+      document.getElementById('unrelated-option').onclick = () => { unrelatedClicks += 1; };
+      locationInput.addEventListener('input', () => {
+        queries.push(locationInput.value);
+        if (locationInput.value.toLowerCase() !== 'finland') {
+          locationOptions.innerHTML = '<div role="status">No options</div>';
+          return;
+        }
+        locationOptions.innerHTML = '<button id="owned-option" type="button" role="option">Finland</button>';
+        locationOptions.querySelector('[role=option]').onclick = () => {
+          ownedClicks += 1;
+          locationInput.value = 'Finland';
+          locationOptions.innerHTML = '';
+        };
+      });
+      window.locationQueries = () => queries;
+      window.autocompleteClicks = () => ({ unrelatedClicks, ownedClicks });
+    </script>
+  `);
+  const result = await prepareOperationalApplicationForm(page, profile, {}, { context: formContext });
+  const attempts = result.evidence.attemptLedger.filter((row) => row.semantic === 'current_location');
+  assert.equal(attempts.length, 1);
+  assert.equal(attempts[0].success, true);
+  assert.equal(attempts[0].committedValue, 'Finland');
+  assert.ok(attempts[0].visibleOptions.includes('Finland'));
+  assert.ok((await page.evaluate(() => window.locationQueries())).includes('Example City, Finland'));
+  assert.ok((await page.evaluate(() => window.locationQueries())).includes('Finland'));
+  assert.deepEqual(await page.evaluate(() => window.autocompleteClicks()), { unrelatedClicks: 0, ownedClicks: 1 });
+  assert.equal(await page.locator('#location').inputValue(), 'Finland');
+  assert.deepEqual(
+    result.evidence.committedSelections.filter((row) => row.semantic === 'current_location').map((row) => row.label),
+    ['Finland'],
+  );
+  assert.equal(result.evidence.unresolvedFields.some((row) => row.semantic === 'current_location'), false);
+  const verifiedSnapshot = await inspectOperationalApplicationForm(page);
+  const verifiedPlan = buildOperationalFormPlan(verifiedSnapshot, profile, {}, { context: formContext });
+  assert.equal(verifiedPlan.actions.some((row) => row.semantic === 'current_location'), false);
+  assert.equal(verifiedPlan.preservedFields.some((row) => row.semantic === 'current_location'), true);
+  assert.equal(result.evidence.finalAction.activated, false);
+  await page.close();
+});
+
 test('22–25. unresolved location leaves the same browser page open for manual continuation', async () => {
   const page = await browser.newPage();
   await page.setContent(`
@@ -592,6 +648,8 @@ test('22–25. unresolved location leaves the same browser page open for manual 
   `);
   const initial = await prepareOperationalApplicationForm(page, profile, {}, { context: formContext });
   assert.equal(initial.gate.state, 'review_required');
+  assert.ok(initial.evidence.unresolvedFields.some((field) => field.semantic === 'current_location'
+    && field.reason === 'Autocomplete option list is not uniquely owned by current_location'));
   assert.equal(initial.evidence.browserOpenRequired, true);
   assert.equal(page.isClosed(), false);
   const emailBefore = await page.locator('#email').inputValue();

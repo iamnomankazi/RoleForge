@@ -5,7 +5,7 @@
  *
  * Where scan.mjs scans the companies you track in portals.yml, this script
  * inverts the direction: it walks public directories of companies per ATS
- * (Greenhouse, Lever, Ashby, Workday) and surfaces fresh postings that match
+ * (Greenhouse, Lever, Ashby, Workday, iCIMS) and surfaces fresh postings that match
  * your portals.yml `title_filter` / `location_filter` — no manual company
  * curation needed.
  *
@@ -38,6 +38,8 @@ import greenhouse from './providers/greenhouse.mjs';
 import lever from './providers/lever.mjs';
 import ashby from './providers/ashby.mjs';
 import workday from './providers/workday.mjs';
+import icims from './providers/icims.mjs';
+import { providerCoverage } from './providers/_result.mjs';
 import { buildTitleFilter, buildLocationFilter, loadSeenUrls, appendToPipeline, appendToScanHistory, normalizeUrlForDedup, parseSinceDays } from './scan.mjs';
 import { SEED_SOURCES, toPortalEntry } from './seeds/vc-portfolios.mjs';
 import { writeImmutableScanRun } from './scan-candidate-contract.mjs';
@@ -79,7 +81,40 @@ export function entryOnHost(name, careersUrl, isCanonicalHost) {
 
 // Each source: the provider module that does the fetching, plus how to turn a
 // dataset entry into a synthetic PortalEntry the provider can detect/fetch.
-const SOURCES = {
+const DNS_LABEL_RE = /^(?=.{1,63}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
+
+function isDnsHostname(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  return host.length <= 253 && host.split('.').every(label => DNS_LABEL_RE.test(label));
+}
+
+// Build only validated iCIMS hostnames. The source directory contains
+// company slugs rather than canonical tenant hostnames, so keep the ordered
+// alternate as a provider fallback that is used only after a first-page 404.
+export function icimsHostCandidates(value) {
+  const name = String(value ?? '');
+  if (!SLUG_RE.test(name) || /[\r\n]/.test(name)) return [];
+  const slug = name.replace(/^-+/, '').toLowerCase();
+  if (!slug || !SLUG_RE.test(slug)) return [];
+
+  let candidates;
+  if (slug.startsWith('careers-')) {
+    candidates = [slug];
+  } else if (slug.includes('careers')) {
+    candidates = [slug, `careers-${slug}`];
+  } else {
+    candidates = [`careers-${slug}`, slug];
+  }
+
+  return candidates.map((candidate) => {
+    const hostname = `${candidate}.icims.com`;
+    const entry = entryOnHost(name, `https://${hostname}`, host =>
+      host === hostname && isDnsHostname(host) && host.endsWith('.icims.com'));
+    return entry ? new URL(entry.careers_url).hostname : null;
+  }).filter(Boolean);
+}
+
+export const SOURCES = {
   greenhouse: {
     provider: greenhouse,
     dataset: `${DATASET_BASE}/greenhouse_companies.json`,
@@ -113,6 +148,19 @@ const SOURCES = {
         `https://${tenant}.${instance}.myworkdayjobs.com/${site}`,
         h => h === `${tenant}.${instance}.myworkdayjobs.com` && h.endsWith('.myworkdayjobs.com'),
       );
+    },
+  },
+  icims: {
+    provider: icims,
+    dataset: `${DATASET_BASE}/icims_companies.json`,
+    toEntry: (slug) => {
+      const candidates = icimsHostCandidates(slug);
+      if (!candidates.length) return null;
+      return {
+        name: String(slug),
+        careers_url: `https://${candidates[0]}`,
+        ...(candidates.length > 1 ? { fallback_urls: candidates.slice(1).map(host => `https://${host}`) } : {}),
+      };
     },
   },
 };
@@ -295,10 +343,82 @@ async function loadCompanyList(name, url) {
 //   'stale'   — dated, but older than the cutoff → always dropped
 //   'undated' — no usable publish date → dropped by default, kept with --include-undated
 //   'keep'    — dated and within the window
+function isUsablePostingEpoch(postedAt) {
+  return Number.isFinite(postedAt) && Number.isFinite(new Date(postedAt).getTime());
+}
+
+function formatPostingDate(postedAt, fallback = 'n/a') {
+  if (!isUsablePostingEpoch(postedAt)) return fallback;
+  return new Date(postedAt).toISOString().slice(0, 10);
+}
+
 export function classifyPostingDate(job, cutoff) {
-  if (job.postedAt && job.postedAt < cutoff) return 'stale';
-  if (!job.postedAt) return 'undated';
+  const postedAt = job?.postedAt;
+  if (!isUsablePostingEpoch(postedAt)) return 'undated';
+  if (postedAt < cutoff) return 'stale';
   return 'keep';
+}
+
+async function eligibleProviderJobs(jobs, {
+  provider,
+  ctx,
+  cutoff,
+  includeUndated,
+  titleFilter,
+  locationFilter,
+  onUndatedDrop = null,
+}) {
+  const eligible = [];
+  for (const job of jobs) {
+    if (!job.url || !job.title) continue;
+    let dateClass = classifyPostingDate(job, cutoff);
+    if (dateClass === 'stale') continue;
+
+    const titleEligible = titleFilter(job.title, job.company);
+    let locationEligible = locationFilter(job.location, job.url, job.title);
+    if (dateClass === 'undated' && titleEligible && locationEligible && typeof provider?.enrichDate === 'function') {
+      const originalPostedAt = job.postedAt;
+      try {
+        await provider.enrichDate(job, ctx);
+      } catch {
+        // Detail-page failure is not a board-fetch failure. Keep the job
+        // undated and let the existing --include-undated policy decide it.
+        job.postedAt = originalPostedAt;
+      }
+      dateClass = classifyPostingDate(job, cutoff);
+      locationEligible = locationFilter(job.location, job.url, job.title);
+      if (dateClass === 'stale') continue;
+    }
+
+    // Re-check location after a detail lookup, which may reveal a country
+    // restriction that was not present on the search result card.
+    if (dateClass === 'undated' && !includeUndated) {
+      onUndatedDrop?.(job);
+      continue;
+    }
+    if (!titleEligible || !locationEligible) continue;
+    eligible.push({ job, dateStatus: dateClass === 'keep' ? 'dated' : 'unknown' });
+  }
+  return eligible;
+}
+
+function coverageBoard(source, company, coverage) {
+  return {
+    source,
+    company,
+    code: coverage.code,
+    reason: coverage.reason,
+    ...(Number.isInteger(coverage.pagesFetched) ? { pagesFetched: coverage.pagesFetched } : {}),
+    ...(Number.isInteger(coverage.maxPages) ? { maxPages: coverage.maxPages } : {}),
+    ...(Number.isInteger(coverage.totalPages) ? { totalPages: coverage.totalPages } : {}),
+  };
+}
+
+function recordCoverage(coverage, source, company, degradedBoards, cappedBoards) {
+  if (coverage?.status !== 'partial') return;
+  const board = coverageBoard(source, company, coverage);
+  degradedBoards.push(board);
+  if (coverage.code === 'icims_page_cap') cappedBoards.push(board);
 }
 
 // Cap-aware company sampling. Default: the dataset's natural (alphabetical)
@@ -320,7 +440,7 @@ export function sampleCompanies(list, limit, shuffle) {
 // ATS providers that can auto-detect from a careers_url, in probe order.
 // Workday is excluded: its URL format requires a tenant|instance|site triple
 // that can't be derived from a portfolio slug alone.
-const SEED_PROVIDERS = [greenhouse, lever, ashby];
+const SEED_PROVIDERS = [greenhouse, lever, ashby, icims];
 
 /**
  * Scan a VC portfolio seed source and return matching job offers.
@@ -361,6 +481,9 @@ export async function runSeedScan(seedId, opts, ctx, seenUrls, label) {
   let errors = 0;
   let attempted = 0;
   let succeeded = 0;
+  let droppedNoDate = 0;
+  const degradedBoardDetails = [];
+  const cappedBoardDetails = [];
 
   await parallelEach(capped, CONCURRENCY, async (company) => {
     const entry = toPortalEntry(company);
@@ -380,7 +503,6 @@ export async function runSeedScan(seedId, opts, ctx, seenUrls, label) {
     try {
       jobs = await provider.fetch(entry, ctx);
       if (!Array.isArray(jobs)) throw new Error(`${provider.id}: fetch() did not return an array`);
-      if (jobs.providerDegraded) errors++;
       succeeded++;
     } catch (err) {
       errors++;
@@ -389,21 +511,29 @@ export async function runSeedScan(seedId, opts, ctx, seenUrls, label) {
     }
 
     const sourceName = `${seedId}-seed`;
-    for (const job of jobs) {
-      if (!job.url || !job.title) continue;
-      const dateClass = classifyPostingDate(job, cutoff);
-      if (dateClass === 'stale') continue;
-      if (dateClass === 'undated' && !opts.includeUndated) continue;
-      if (!opts.titleFilter(job.title)) continue;
-      if (!opts.locationFilter(job.location, job.url, job.title)) continue;
+    const matches = await eligibleProviderJobs(jobs, {
+      provider,
+      ctx,
+      cutoff,
+      includeUndated: opts.includeUndated,
+      titleFilter: opts.titleFilter,
+      locationFilter: opts.locationFilter,
+      onUndatedDrop: () => { droppedNoDate++; },
+    });
+    if (jobs.providerDegraded) errors++;
+    recordCoverage(providerCoverage(jobs), sourceName, entry.name, degradedBoardDetails, cappedBoardDetails);
+    for (const { job, dateStatus } of matches) {
       const urlKey = normalizeUrlForDedup(job.url);
       if (seenUrls.has(urlKey)) continue;
       seenUrls.add(urlKey);
-      offers.push({ ...job, source: sourceName, dateStatus: job.postedAt ? 'dated' : 'unknown' });
+      offers.push({ ...job, source: sourceName, dateStatus });
     }
   });
 
-  return { offers, errors, total: capped.length, attempted, succeeded, sourceUnavailable: capped.length === 0 };
+  return {
+    offers, errors, total: capped.length, attempted, succeeded, droppedNoDate,
+    degradedBoardDetails, cappedBoardDetails, sourceUnavailable: capped.length === 0,
+  };
 }
 
 // ── Parallel fetch with concurrency limit ───────────────────────────
@@ -518,6 +648,8 @@ async function main() {
   let totalAttemptedTargets = checkpoint?.counters?.totalAttemptedTargets || 0;
   let totalSuccessfulTargets = checkpoint?.counters?.totalSuccessfulTargets || 0;
   let droppedNoDate = checkpoint?.counters?.droppedNoDate || 0;
+  const degradedBoardDetails = Array.isArray(checkpoint?.degradedBoardDetails) ? checkpoint.degradedBoardDetails : [];
+  const cappedBoardDetails = Array.isArray(checkpoint?.cappedBoardDetails) ? checkpoint.cappedBoardDetails : [];
   let capHit = false;
   // Aggregated from providers/workday.mjs's jobs.workdayNoDateSkip tag — see
   // there for why this is a counter instead of a per-company console.error
@@ -561,24 +693,25 @@ async function main() {
       try {
         const jobs = await source.provider.fetch(entry, ctx);
         if (!Array.isArray(jobs)) throw new Error(`${source.provider.id}: fetch() did not return an array`);
-        if (jobs.providerDegraded) errors++;
         totalSuccessfulTargets++;
         consecutiveResolverFailures = 0;
+        const matches = await eligibleProviderJobs(jobs, {
+          provider: source.provider,
+          ctx,
+          cutoff,
+          includeUndated: opts.includeUndated,
+          titleFilter,
+          locationFilter,
+          onUndatedDrop: () => { droppedNoDate++; },
+        });
+        if (jobs.providerDegraded) errors++;
+        recordCoverage(providerCoverage(jobs), name, entry.name, degradedBoardDetails, cappedBoardDetails);
         if (jobs.workdayNoDateSkip) { noDateSkipCompanies++; noDateSkipJobs += jobs.length; }
-        for (const job of jobs) {
-          if (!job.url || !job.title) continue;
-          // Confirmed-stale postings are always dropped. Undated postings are
-          // dropped by default (a reverse scan targets *fresh* roles) but
-          // COUNTED so callers see the gap; --include-undated keeps them, marked.
-          const dateClass = classifyPostingDate(job, cutoff);
-          if (dateClass === 'stale') continue;
-          if (dateClass === 'undated' && !opts.includeUndated) { droppedNoDate++; continue; }
-          if (!titleFilter(job.title)) continue;
-          if (!locationFilter(job.location, job.url, job.title)) continue;
+        for (const { job, dateStatus } of matches) {
           const urlKey = normalizeUrlForDedup(job.url);
           if (seenUrls.has(urlKey)) continue;
           seenUrls.add(urlKey); // intra-scan dedup
-          newOffers.push({ ...job, source: `${name}-full`, dateStatus: job.postedAt ? 'dated' : 'unknown' });
+          newOffers.push({ ...job, source: `${name}-full`, dateStatus });
         }
         unresolved.delete(entryIndex);
       } catch (err) {
@@ -615,7 +748,13 @@ async function main() {
             pendingEntries: [...unresolved].sort((a, b) => a - b).map((index) => entries[index]),
           },
           completedSources: [...completedSources],
-          counters: { totalCompaniesScanned, totalCompaniesAvailable, totalErrors, totalAttemptedTargets, totalSuccessfulTargets, droppedNoDate },
+          counters: {
+            totalCompaniesScanned, totalCompaniesAvailable, totalErrors, totalAttemptedTargets,
+            totalSuccessfulTargets, droppedNoDate,
+            degradedBoards: degradedBoardDetails.length, cappedBoards: cappedBoardDetails.length,
+          },
+          degradedBoardDetails,
+          cappedBoardDetails,
           offers: newOffers,
         });
       }
@@ -630,7 +769,13 @@ async function main() {
           runId: opts.runId,
           current: { name, pendingEntries: [...unresolved].sort((a, b) => a - b).map((index) => entries[index]) },
           completedSources: [...completedSources],
-          counters: { totalCompaniesScanned, totalCompaniesAvailable, totalErrors, totalAttemptedTargets, totalSuccessfulTargets, droppedNoDate },
+          counters: {
+            totalCompaniesScanned, totalCompaniesAvailable, totalErrors, totalAttemptedTargets,
+            totalSuccessfulTargets, droppedNoDate,
+            degradedBoards: degradedBoardDetails.length, cappedBoards: cappedBoardDetails.length,
+          },
+          degradedBoardDetails,
+          cappedBoardDetails,
           offers: newOffers,
         });
       }
@@ -651,6 +796,9 @@ async function main() {
       totalErrors += result.errors || 0;
       totalAttemptedTargets += result.attempted || 0;
       totalSuccessfulTargets += result.succeeded || 0;
+      droppedNoDate += result.droppedNoDate || 0;
+      degradedBoardDetails.push(...(result.degradedBoardDetails || []));
+      cappedBoardDetails.push(...(result.cappedBoardDetails || []));
       if (result.sourceUnavailable) unavailableSources++;
       newOffers.push(...result.offers);
       log(`  done — ${result.total} companies probed, ${result.offers.length} matches (${result.errors} errors)`);
@@ -667,11 +815,14 @@ async function main() {
       ? 'no_executable_targets'
     : allUnavailable
       ? 'failed'
-      : (totalErrors > errorsAtStart || degradedDataset || unavailableSources > 0 ? 'partial' : 'completed');
+      : (totalErrors > errorsAtStart || degradedDataset || unavailableSources > 0 || degradedBoardDetails.length > 0 ? 'partial' : 'completed');
 
   let offers = newOffers;
   if (offers.length && opts.liveness && !stoppedByOutage && !resumeIncomplete) offers = await filterLive(newOffers);
-  offers.sort((a, b) => (b.postedAt || 0) - (a.postedAt || 0));
+  offers.sort((a, b) => (
+    (isUsablePostingEpoch(b.postedAt) ? b.postedAt : 0)
+    - (isUsablePostingEpoch(a.postedAt) ? a.postedAt : 0)
+  ));
 
   log(`\n${'━'.repeat(45)}`);
   log(`Reverse ATS Scan — ${date}`);
@@ -679,14 +830,19 @@ async function main() {
   log(`Companies scanned:  ${totalCompaniesScanned}${capHit ? ` of ${totalCompaniesAvailable} (capped)` : ''}`);
   log(`Targets succeeded:  ${totalSuccessfulTargets}/${totalAttemptedTargets}`);
   log(`Unreachable boards: ${totalErrors}`);
+  if (degradedBoardDetails.length) log(`Degraded boards:     ${degradedBoardDetails.length}`);
+  if (cappedBoardDetails.length) {
+    const capCodes = [...new Set(cappedBoardDetails.map(board => board.code))].join(', ');
+    log(`Capped boards:       ${cappedBoardDetails.length} (${capCodes})`);
+  }
   log(`Completion status:  ${completionStatus}${completionStatus === 'partial' ? ' (degraded)' : ''}`);
-  // noDateSkipJobs is a subset of droppedNoDate, not a separate pool: every
-  // no-postedOn workday posting counted here also hits the per-job undated
-  // filter in the scan loop above and gets dropped there too. Report it as
-  // a breakdown, not a second count — the two aren't additive.
+  // This counts raw listings from boards that stopped further undated
+  // pagination. It is not a subset of droppedNoDate: detail enrichment can
+  // recover dates for some listings before the final date gate. Report it as
+  // raw-listing count labeled separately from the undated-drop total.
   if (droppedNoDate) {
     const breakdown = noDateSkipCompanies
-      ? ` (incl. ${noDateSkipJobs} from ${noDateSkipCompanies} workday companies with no postedOn)`
+      ? ` (${noDateSkipJobs} raw listings returned by ${noDateSkipCompanies} Workday board${noDateSkipCompanies === 1 ? '' : 's'} that stopped undated pagination)`
       : '';
     log(`Undated dropped: ${droppedNoDate}${breakdown}${opts.includeUndated ? '' : '. Use --include-undated to keep'}`);
   }
@@ -695,7 +851,7 @@ async function main() {
   if (offers.length) {
     log('\nNew offers:');
     for (const o of offers) {
-      const posted = o.postedAt ? new Date(o.postedAt).toISOString().slice(0, 10) : 'n/a';
+      const posted = formatPostingDate(o.postedAt);
       log(`  + [${o.source}] ${posted} | ${o.company} | ${o.title} | ${o.location || 'N/A'}\n    ${o.url}`);
     }
   }
@@ -711,6 +867,8 @@ async function main() {
         sources: opts.ats, seeds: opts.seeds, since_days: opts.sinceDays,
         artifact_authority: 'review_only', completion_status: completionStatus,
         targets_attempted: totalAttemptedTargets, targets_succeeded: totalSuccessfulTargets,
+        targets_degraded: degradedBoardDetails.length, targets_capped: cappedBoardDetails.length,
+        degraded_boards: degradedBoardDetails, capped_boards: cappedBoardDetails,
       },
     });
     log(`\nImmutable canonical run: ${immutableRun.runDir}`);
@@ -734,7 +892,7 @@ async function main() {
           `> ${offers.length} jobs | since ${opts.sinceDays}d | ${opts.liveness ? 'liveness ✓' : 'no liveness check'}`,
           '',
           ...offers.map(o => {
-            const posted = o.postedAt ? new Date(o.postedAt).toISOString().slice(0, 10) : 'n/a';
+            const posted = formatPostingDate(o.postedAt);
             return `- [${o.title} @ ${o.company}](${o.url}) — ${o.location || 'N/A'} | ${o.source} | ${posted}`;
           }),
           '',
@@ -761,6 +919,10 @@ async function main() {
       companiesScanned: totalCompaniesScanned,
       capHit,
       datasetStatus,
+      degradedBoards: degradedBoardDetails.length,
+      cappedBoards: cappedBoardDetails.length,
+      degradedBoardDetails,
+      cappedBoardDetails,
       postingsKept: offers.length,
       postingsDroppedNoDate: droppedNoDate,
       unreachableBoards: totalErrors,
@@ -778,8 +940,8 @@ async function main() {
         title: o.title,
         url: o.url,
         location: o.location || null,
-        postedAt: o.postedAt ? new Date(o.postedAt).toISOString().slice(0, 10) : null,
-        dateStatus: o.dateStatus || (o.postedAt ? 'dated' : 'unknown'),
+        postedAt: formatPostingDate(o.postedAt, null),
+        dateStatus: o.dateStatus || (isUsablePostingEpoch(o.postedAt) ? 'dated' : 'unknown'),
         source: o.source,
       })),
     }) + '\n');

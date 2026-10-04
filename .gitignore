@@ -119,3 +119,6 @@ plan/
 
 # Fictional system fixtures must remain trackable past user-data patterns.
 !test-fixtures/**
+agent_docs/
+.codex_workflow_hidden_resources/
+AGENTS.md

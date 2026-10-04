@@ -2,6 +2,7 @@
 import { pass, fail, warn, run, ROOT, captureConsoleErrors } from '../helpers.mjs';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
+import { providerCoverage } from '../../providers/_result.mjs';
 
 console.log('\nProvider — workday');
 
@@ -134,9 +135,8 @@ try {
   if (noLocParsed[2]?.location === 'Remote, Hungary') pass('parseWorkdayResponse prefers locationsText over URL path when present');
   else fail(`parseWorkdayResponse locationsText priority: expected "Remote, Hungary", got ${JSON.stringify(noLocParsed[2]?.location)}`);
 
-  // parseWorkdayResponse — malformed percent-encoding in the URL path segment
-  // must not throw (decodeURIComponent) and must not abort processing of
-  // other job records in the same response.
+  // Malformed percent-encoding in an upstream externalPath is rejected without
+  // throwing or aborting processing of other job records.
   const malformedPathJson = {
     jobPostings: [
       { title: 'Broken Encoding', externalPath: '/job/%E0%A4%A/Broken-Encoding_JR1' },
@@ -145,8 +145,8 @@ try {
   };
   try {
     const malformedParsed = parseWorkdayResponse(malformedPathJson, entry);
-    if (malformedParsed.length === 2 && malformedParsed[1].location === 'Berlin') {
-      pass('parseWorkdayResponse tolerates malformed percent-encoding without dropping other records');
+    if (malformedParsed.length === 1 && malformedParsed[0].location === 'Berlin') {
+      pass('parseWorkdayResponse rejects malformed externalPath encoding without dropping valid records');
     } else {
       fail(`parseWorkdayResponse malformed encoding result = ${JSON.stringify(malformedParsed)}`);
     }
@@ -209,9 +209,10 @@ try {
   // 100-page/2000-job default.
   let hugeWorkdayRequests = 0;
   const { result: fetchedHugeWorkday, errors: capturedWarnings } = await captureConsoleErrors(() =>
-    workday.fetch(entry, mkWorkdayCtx(async () => {
+    workday.fetch(entry, mkWorkdayCtx(async (_url, opts) => {
       hugeWorkdayRequests++;
-      return { total: 1_000_000, jobPostings: Array.from({ length: 20 }, (_, i) => ({ title: `Job ${i}`, externalPath: `/job/board/${i}` })) };
+      const page = JSON.parse(opts.body).offset / 20;
+      return { total: 1_000_000, jobPostings: Array.from({ length: 20 }, (_, i) => ({ title: `Job ${page}-${i}`, externalPath: `/job/board/${page}-${i}` })) };
     })));
   if (hugeWorkdayRequests === 100 && fetchedHugeWorkday.length === 2000) {
     pass('workday.fetch() caps pagination at DEFAULT_MAX_PAGES despite an inflated total');
@@ -223,14 +224,20 @@ try {
   } else {
     fail(`workday fetch cap: expected a truncation warning, got ${JSON.stringify(capturedWarnings)}`);
   }
+  if (providerCoverage(fetchedHugeWorkday)?.code === 'max_pages') {
+    pass('workday page-cap truncation has typed partial coverage');
+  } else {
+    fail(`workday page-cap coverage missing: ${JSON.stringify(providerCoverage(fetchedHugeWorkday))}`);
+  }
 
   // fetch() pagination cap — entry.max_pages raises the cap for a genuinely
   // large tenant (e.g. Deutsche Bank-scale postings)
   let overriddenWorkdayRequests = 0;
   const bigWorkdayEntry = { name: 'BigCo', careers_url: 'https://bigco.wd5.myworkdayjobs.com/careers', max_pages: 80 };
-  const fetchedOverriddenWorkday = await workday.fetch(bigWorkdayEntry, mkWorkdayCtx(async () => {
+  const fetchedOverriddenWorkday = await workday.fetch(bigWorkdayEntry, mkWorkdayCtx(async (_url, opts) => {
     overriddenWorkdayRequests++;
-    return { total: 1_000_000, jobPostings: Array.from({ length: 20 }, (_, i) => ({ title: `Job ${i}`, externalPath: `/job/board/${i}` })) };
+    const page = JSON.parse(opts.body).offset / 20;
+    return { total: 1_000_000, jobPostings: Array.from({ length: 20 }, (_, i) => ({ title: `Job ${page}-${i}`, externalPath: `/job/board/${page}-${i}` })) };
   }));
   if (overriddenWorkdayRequests === 80 && fetchedOverriddenWorkday.length === 1600) {
     pass('workday.fetch() honors entry.max_pages to raise the cap above the default');
@@ -242,9 +249,10 @@ try {
   // override can't turn this into an unbounded scan either.
   let absurdWorkdayRequests = 0;
   const absurdWorkdayEntry = { name: 'AbsurdCo', careers_url: 'https://absurdco.wd5.myworkdayjobs.com/careers', max_pages: 100_000 };
-  const fetchedAbsurdWorkday = await workday.fetch(absurdWorkdayEntry, mkWorkdayCtx(async () => {
+  const fetchedAbsurdWorkday = await workday.fetch(absurdWorkdayEntry, mkWorkdayCtx(async (_url, opts) => {
     absurdWorkdayRequests++;
-    return { total: 10_000_000, jobPostings: Array.from({ length: 20 }, (_, i) => ({ title: `Job ${i}`, externalPath: `/job/board/${i}` })) };
+    const page = JSON.parse(opts.body).offset / 20;
+    return { total: 10_000_000, jobPostings: Array.from({ length: 20 }, (_, i) => ({ title: `Job ${page}-${i}`, externalPath: `/job/board/${page}-${i}` })) };
   }));
   if (absurdWorkdayRequests === 1500 && fetchedAbsurdWorkday.length === 30_000) {
     pass('workday.fetch() caps an absurd entry.max_pages at MAX_PAGES_CAP');
@@ -257,9 +265,10 @@ try {
   for (const invalidMaxPages of [-5, 0, 'abc', NaN, null]) {
     let invalidRequests = 0;
     const invalidEntry = { name: 'InvalidCo', careers_url: 'https://invalidco.wd5.myworkdayjobs.com/careers', max_pages: invalidMaxPages };
-    const fetchedInvalid = await workday.fetch(invalidEntry, mkWorkdayCtx(async () => {
+    const fetchedInvalid = await workday.fetch(invalidEntry, mkWorkdayCtx(async (_url, opts) => {
       invalidRequests++;
-      return { total: 1_000_000, jobPostings: Array.from({ length: 20 }, (_, i) => ({ title: `Job ${i}`, externalPath: `/job/board/${i}` })) };
+      const page = JSON.parse(opts.body).offset / 20;
+      return { total: 1_000_000, jobPostings: Array.from({ length: 20 }, (_, i) => ({ title: `Job ${page}-${i}`, externalPath: `/job/board/${page}-${i}` })) };
     }));
     // Number.isNaN(NaN) is true but JSON.stringify(NaN) === 'null', which would
     // be indistinguishable from the literal `null` case in the log below.
@@ -310,6 +319,11 @@ try {
     pass('workday.fetch() does NOT fire the "raise max_pages" warning on a fetch-error stop');
   } else {
     fail(`workday fetch-error stop should not also warn about max_pages: ${JSON.stringify(flakyWarnings)}`);
+  }
+  if (!flakyWorkdayJobs.providerDegraded && providerCoverage(flakyWorkdayJobs)?.code === 'fetch_error') {
+    pass('workday fetch failure is represented once by typed coverage without the legacy degraded flag');
+  } else {
+    fail(`workday fetch-error coverage mismatch: ${JSON.stringify({ legacy: flakyWorkdayJobs.providerDegraded, coverage: providerCoverage(flakyWorkdayJobs) })}`);
   }
 
   // fetch() retry — a 429 that succeeds on a later attempt is transparent to
@@ -431,10 +445,13 @@ try {
   // (tested separately below) so the fetch actually reaches the cap.
   const noDateSinceMs = nowMs - SINCE_DAYS * 86_400_000;
   const { errors: noDateWarnings } = await captureConsoleErrors(() =>
-    workday.fetch(entry, mkWorkdayCtx(async () => ({
-      total: 1_000_000,
-      jobPostings: Array.from({ length: 20 }, (_, i) => ({ title: `NoDate ${i}`, externalPath: `/job/board/nodate-${i}` })), // no postedOn
-    }), { sinceMs: noDateSinceMs, includeUndated: true })));
+    workday.fetch(entry, mkWorkdayCtx(async (_url, opts) => {
+      const page = JSON.parse(opts.body).offset / 20;
+      return {
+        total: 1_000_000,
+        jobPostings: Array.from({ length: 20 }, (_, i) => ({ title: `NoDate ${page}-${i}`, externalPath: `/job/board/nodate-${page}-${i}` })), // no postedOn
+      };
+    }, { sinceMs: noDateSinceMs, includeUndated: true })));
   if (noDateWarnings.some(w => /truncated at \d+ pages/.test(w))) {
     pass('workday.fetch() cap-hit warning fires in reverse-scan context (tenant has no dates, includeUndated on)');
   } else {
@@ -475,6 +492,11 @@ try {
   } else {
     fail(`workday no-date-skip tag missing: jobs.workdayNoDateSkip = ${JSON.stringify(skipJobs.workdayNoDateSkip)}`);
   }
+  if (providerCoverage(skipJobs)?.code === 'no_date_skip' && !skipJobs.providerDegraded) {
+    pass('workday no-date skip reports typed partial coverage without the legacy fetch-error flag');
+  } else {
+    fail(`workday no-date-skip coverage mismatch: ${JSON.stringify({ legacy: skipJobs.providerDegraded, coverage: providerCoverage(skipJobs) })}`);
+  }
   if (skipWarnings.length === 0) {
     pass('workday.fetch() does not console.error per-company on a no-date-skip (aggregated instead)');
   } else {
@@ -502,10 +524,13 @@ try {
   // e.g. cvshealth-scale): short line, no suspect-cap tag.
   const datedCapSinceMs = nowMs - SINCE_DAYS * 86_400_000;
   const { errors: datedCapWarnings } = await captureConsoleErrors(() =>
-    workday.fetch(entry, mkWorkdayCtx(async () => ({
-      total: 1_000_000,
-      jobPostings: Array.from({ length: 20 }, (_, i) => ({ title: `Fresh ${i}`, externalPath: `/job/board/fresh-${i}`, postedOn: 'Posted Today' })),
-    }), { sinceMs: datedCapSinceMs })));
+    workday.fetch(entry, mkWorkdayCtx(async (_url, opts) => {
+      const page = JSON.parse(opts.body).offset / 20;
+      return {
+        total: 1_000_000,
+        jobPostings: Array.from({ length: 20 }, (_, i) => ({ title: `Fresh ${page}-${i}`, externalPath: `/job/board/fresh-${page}-${i}`, postedOn: 'Posted Today' })),
+      };
+    }, { sinceMs: datedCapSinceMs })));
   if (datedCapWarnings.some(w => /truncated at \d+ pages \(2000 of 1000000 jobs\)/.test(w))) {
     pass('workday.fetch() cap-hit warning reports the short "truncated at N pages" form');
   } else {
@@ -525,10 +550,13 @@ try {
   // results). This exact-match case must carry a distinct, short tag.
   const suspectCapSinceMs = nowMs - SINCE_DAYS * 86_400_000;
   const { errors: suspectCapWarnings } = await captureConsoleErrors(() =>
-    workday.fetch(entry, mkWorkdayCtx(async () => ({
-      total: 2000, // === DEFAULT_MAX_PAGES (100) * PAGE_SIZE (20)
-      jobPostings: Array.from({ length: 20 }, (_, i) => ({ title: `Suspect ${i}`, externalPath: `/job/board/suspect-${i}`, postedOn: 'Posted Today' })),
-    }), { sinceMs: suspectCapSinceMs })));
+    workday.fetch(entry, mkWorkdayCtx(async (_url, opts) => {
+      const page = JSON.parse(opts.body).offset / 20;
+      return {
+        total: 2000, // === DEFAULT_MAX_PAGES (100) * PAGE_SIZE (20)
+        jobPostings: Array.from({ length: 20 }, (_, i) => ({ title: `Suspect ${page}-${i}`, externalPath: `/job/board/suspect-${page}-${i}`, postedOn: 'Posted Today' })),
+      };
+    }, { sinceMs: suspectCapSinceMs })));
   if (suspectCapWarnings.some(w => /\(total may be Workday-capped, not real\)/.test(w))) {
     pass('workday.fetch() cap-hit warning flags a suspected Workday-side total cap when total === maxPages*PAGE_SIZE');
   } else {
@@ -585,6 +613,392 @@ try {
   } else {
     fail(`workday probe should emit no warning, got: ${JSON.stringify(probeWarnings)}`);
   }
+  let failedProbeRequests = 0;
+  try {
+    await workday.fetch(entry, mkWorkdayCtx(async () => {
+      failedProbeRequests++;
+      const error = new Error('liveness request failed');
+      error.status = 503;
+      throw error;
+    }, { maxPages: 1 }));
+  } catch { /* one failed probe is reported to the caller */ }
+  if (failedProbeRequests === 1) {
+    pass('workday liveness maxPages=1 also makes only one request when its first page fails');
+  } else {
+    fail(`workday failed liveness probe retried ${failedProbeRequests} times instead of once`);
+  }
+
+  // Endpoint identity is derived only from strict configured Workday URLs.
+  const workdaySiteHit = workday.detect({
+    name: 'Path Tenant',
+    careers_url: 'https://wd5.myworkdaysite.com/recruiting/path-tenant/careers',
+  });
+  if (workdaySiteHit?.url === 'https://wd5.myworkdaysite.com/wday/cxs/path-tenant/careers/jobs') {
+    pass('workday.detect() resolves configured myworkdaysite recruiting paths to the CXS endpoint');
+  } else {
+    fail(`workday.detect(myworkdaysite) returned ${JSON.stringify(workdaySiteHit)}`);
+  }
+  const workdaySiteJob = parseWorkdayResponse({ jobPostings: [{
+    title: 'Path Job', externalPath: '/job/Finland/Path_1',
+  }] }, { name: 'Path Tenant', careers_url: 'https://wd5.myworkdaysite.com/recruiting/path-tenant/careers' });
+  if (workdaySiteJob[0]?.url === 'https://wd5.myworkdaysite.com/recruiting/path-tenant/careers/job/Finland/Path_1') {
+    pass('parseWorkdayResponse retains configured myworkdaysite recruiting path in job URLs');
+  } else {
+    fail(`myworkdaysite public job URL mismatch: ${JSON.stringify(workdaySiteJob[0]?.url)}`);
+  }
+  const rejectedWorkdayUrls = [
+    'https://user:secret@acme.wd5.myworkdayjobs.com/careers',
+    'https://acme.wd5.myworkdayjobs.com:8443/careers',
+    'https://acme.wd5.myworkdayjobs.com/careers/extra',
+    'https://acme.wd5.myworkdayjobs.com/careers/../other',
+    'https://wd5.myworkdaysite.com/recruiting/path-tenant',
+    'https://wd5.myworkdaysite.com/recruiting/path-tenant/en-US/careers',
+    'https://evil.example/recruiting/path-tenant/careers',
+  ];
+  if (rejectedWorkdayUrls.every((careers_url) => workday.detect({ name: 'Reject', careers_url }) === null)) {
+    pass('workday.detect() rejects credentials, non-default ports, ambiguous paths, and untrusted hosts');
+  } else {
+    fail('workday.detect() accepted an unsafe or ambiguous configured URL');
+  }
+
+  // The configured facet IDs are opaque; the provider forwards them exactly.
+  let capturedFacets = null;
+  await workday.fetch({
+    name: 'Faceted Co',
+    careers_url: 'https://facetedco.wd5.myworkdayjobs.com/careers',
+    workday: { appliedFacets: { '101': ['NYC', 'remote-site'], 'countryIsoCode': ['FI'] } },
+  }, mkWorkdayCtx(async (_url, opts) => {
+    capturedFacets = JSON.parse(opts.body).appliedFacets;
+    return { total: 0, jobPostings: [] };
+  }));
+  if (JSON.stringify(capturedFacets) === JSON.stringify({ '101': ['NYC', 'remote-site'], countryIsoCode: ['FI'] })) {
+    pass('workday.fetch() forwards configured opaque appliedFacets without inference');
+  } else {
+    fail(`workday appliedFacets were changed: ${JSON.stringify(capturedFacets)}`);
+  }
+
+  // Relative labels are anchored, and the unbounded 30+ label remains unknown.
+  const relativeDates = parseWorkdayResponse({ jobPostings: [
+    { title: 'Today', externalPath: '/job/board/today', postedOn: 'Posted Today' },
+    { title: 'Yesterday', externalPath: '/job/board/yesterday', postedOn: 'Posted Yesterday' },
+    { title: 'Old', externalPath: '/job/board/old', postedOn: 'Posted 30+ Days Ago' },
+    { title: 'Unknown suffix', externalPath: '/job/board/unknown', postedOn: 'Posted Today - promoted' },
+  ] }, entry);
+  if (relativeDates[0].postedAt <= Date.now() && relativeDates[0].postedAt >= Date.now() - 1_000
+      && relativeDates[1].postedAt < relativeDates[0].postedAt
+      && relativeDates[2].postedAt === undefined && relativeDates[3].postedAt === undefined) {
+    pass('parseWorkdayResponse keeps relative dates bounded and ambiguous labels unknown');
+  } else {
+    fail(`Workday relative date parsing mismatch: ${JSON.stringify(relativeDates.map((job) => job.postedAt))}`);
+  }
+
+  // Placeholder location lookup uses a trusted CXS detail URL, preserves all
+  // primary/additional/country evidence, recovers a date and decodes HTML text.
+  let detailRequests = [];
+  const detailEntry = {
+    name: 'Detail Co',
+    careers_url: 'https://detailco.wd5.myworkdayjobs.com/en-US/detailco',
+    workday: { detailLimit: 4 },
+  };
+  const detailJobs = await workday.fetch(detailEntry, mkWorkdayCtx(async (url, opts) => {
+    if (opts.method === 'POST') {
+      return { total: 1, jobPostings: [{
+        title: 'Platform Engineer',
+        externalPath: '/job/United-States/Platform-Engineer_JR4',
+        locationsText: '12 Locations',
+        postedOn: 'Posted 30+ Days Ago',
+      }] };
+    }
+    detailRequests.push({ url, opts });
+    return { jobPostingInfo: {
+      startDate: '2026-09-20',
+      location: { descriptor: 'Toronto', country: { descriptor: 'Canada', countryCode: 'CA' } },
+      additionalLocations: [{ descriptor: 'Vancouver', country: { descriptor: 'Canada' } }, 'Remote, Canada'],
+      countryName: 'Canada',
+      jobDescription: '<p>R&amp;D&nbsp; engineer</p>',
+    } };
+  }));
+  if (detailRequests.length === 1
+      && detailRequests[0].url === 'https://detailco.wd5.myworkdayjobs.com/wday/cxs/detailco/detailco/job/United-States/Platform-Engineer_JR4'
+      && detailRequests[0].opts.redirect === 'error'
+      && detailJobs[0].location.includes('Toronto') && detailJobs[0].location.includes('Vancouver')
+      && detailJobs[0].location.includes('Canada') && detailJobs[0].location.includes('CA')
+      && detailJobs[0].postedAt === Date.parse('2026-09-20')
+      && detailJobs[0].description === 'R&D engineer') {
+    pass('workday.fetch() recovers placeholder locations/date/description from trusted detail evidence');
+  } else {
+    fail(`workday detail recovery mismatch: ${JSON.stringify({ detailRequests: detailRequests.map((item) => item.url), job: detailJobs[0] })}`);
+  }
+  if (!JSON.stringify(detailJobs).includes('detailLimit') && !JSON.stringify(detailJobs).includes('externalPath')) {
+    pass('workday detail state and raw posting evidence stay out of job payloads');
+  } else {
+    fail('workday leaked internal detail state into serialized jobs');
+  }
+
+  let pathPlaceholderDetailCalls = 0;
+  const pathPlaceholderJobs = await workday.fetch({
+    name: 'Path Placeholder Co',
+    careers_url: 'https://pathplaceholder.wd5.myworkdayjobs.com/careers',
+  }, mkWorkdayCtx(async (_url, opts) => {
+    if (opts.method === 'POST') return { total: 1, jobPostings: [{
+      title: 'Path Placeholder', externalPath: '/job/Locations/Path_Placeholder',
+    }] };
+    pathPlaceholderDetailCalls++;
+    return { jobPostingInfo: { location: 'Riga, Latvia' } };
+  }));
+  if (pathPlaceholderDetailCalls === 1 && pathPlaceholderJobs[0].location === 'Riga, Latvia') {
+    pass('workday recovers geography when the externalPath itself only says Locations');
+  } else {
+    fail(`workday path placeholder was not enriched: ${JSON.stringify({ calls: pathPlaceholderDetailCalls, job: pathPlaceholderJobs[0] })}`);
+  }
+
+  // The same ctx can serve several boards; each board keeps its own detail
+  // cache and budget, and enrichDate uses the job-bound state after fetch.
+  let sharedCtxDetailUrls = [];
+  const sharedCtx = mkWorkdayCtx(async (url, opts) => {
+    if (opts.method === 'POST') return { total: 1, jobPostings: [{
+      title: 'Undated Job', externalPath: '/job/Remote/Undated_1', locationsText: 'Remote', postedOn: 'Posted 30+ Days Ago',
+    }] };
+    sharedCtxDetailUrls.push(url);
+    return { jobPostingInfo: { startDate: '2026-09-25', location: 'Helsinki, Finland' } };
+  });
+  const firstBoardJobs = await workday.fetch({ name: 'One', careers_url: 'https://one.wd5.myworkdayjobs.com/careers' }, sharedCtx);
+  const secondBoardJobs = await workday.fetch({ name: 'Two', careers_url: 'https://two.wd5.myworkdayjobs.com/careers' }, sharedCtx);
+  await workday.enrichDate(firstBoardJobs[0], sharedCtx);
+  await workday.enrichDate(secondBoardJobs[0], sharedCtx);
+  if (sharedCtxDetailUrls.length === 2
+      && sharedCtxDetailUrls[0].includes('/wday/cxs/one/careers/')
+      && sharedCtxDetailUrls[1].includes('/wday/cxs/two/careers/')
+      && firstBoardJobs[0].postedAt === Date.parse('2026-09-25')
+      && secondBoardJobs[0].postedAt === Date.parse('2026-09-25')) {
+    pass('workday.enrichDate() reuses job-bound board state when scanner ctx is shared across boards');
+  } else {
+    fail(`workday shared-ctx board binding mismatch: ${JSON.stringify({ urls: sharedCtxDetailUrls, first: firstBoardJobs[0], second: secondBoardJobs[0] })}`);
+  }
+
+  // Retries consume the same per-board detail budget. Exhaustion leaves later
+  // jobs intact and makes partial coverage visible exactly once.
+  let boundedDetailAttempts = 0;
+  const boundedDetails = await workday.fetch({
+    name: 'Budget Co',
+    careers_url: 'https://budgetco.wd5.myworkdayjobs.com/careers',
+    workday: { detailLimit: 3 },
+  }, mkWorkdayCtx(async (url, opts) => {
+    if (opts.method === 'POST') return { total: 2, jobPostings: [1, 2].map((n) => ({
+      title: `Job ${n}`, externalPath: `/job/Locations/Job_${n}`, locationsText: '10 Locations',
+    })) };
+    boundedDetailAttempts++;
+    if (boundedDetailAttempts < 3) { const error = new Error('HTTP 503'); error.status = 503; throw error; }
+    return { jobPostingInfo: { startDate: '2026-09-01', location: 'Oulu, Finland' } };
+  }));
+  const boundedCoverage = providerCoverage(boundedDetails);
+  if (boundedDetailAttempts === 3 && boundedDetails.length === 2
+      && boundedDetails[0].postedAt === Date.parse('2026-09-01')
+      && boundedDetails[1].location === '10 Locations'
+      && boundedCoverage?.status === 'partial' && boundedCoverage.code === 'detail_budget') {
+    pass('workday detail retries consume the bounded budget and report visible partial coverage');
+  } else {
+    fail(`workday detail budget mismatch: ${JSON.stringify({ attempts: boundedDetailAttempts, coverage: boundedCoverage, jobs: boundedDetails })}`);
+  }
+
+  let lastBudgetAttemptCalls = 0;
+  const lastBudgetAttemptJobs = await workday.fetch({
+    name: 'Last Attempt Co',
+    careers_url: 'https://lastattemptco.wd5.myworkdayjobs.com/careers',
+    workday: { detailLimit: 1 },
+  }, mkWorkdayCtx(async (_url, opts) => {
+    if (opts.method === 'POST') return { total: 1, jobPostings: [{
+      title: 'One Attempt', externalPath: '/job/Locations/One_Attempt', locationsText: '5 Locations',
+    }] };
+    lastBudgetAttemptCalls++;
+    const error = new Error('HTTP 503');
+    error.status = 503;
+    throw error;
+  }));
+  if (lastBudgetAttemptCalls === 1 && providerCoverage(lastBudgetAttemptJobs)?.code === 'detail_fetch_error') {
+    pass('workday reports a failed final detail HTTP attempt as fetch failure, not budget exhaustion');
+  } else {
+    fail(`workday final detail-attempt classification mismatch: ${JSON.stringify({ attempts: lastBudgetAttemptCalls, coverage: providerCoverage(lastBudgetAttemptJobs) })}`);
+  }
+
+  let zeroLimitDetailCalls = 0;
+  const zeroLimitJobs = await workday.fetch({
+    name: 'No Details Co',
+    careers_url: 'https://nodetailsco.wd5.myworkdayjobs.com/careers',
+    workday: { detailLimit: 0 },
+  }, mkWorkdayCtx(async (_url, opts) => {
+    if (opts.method === 'POST') return { total: 1, jobPostings: [{
+      title: 'No Details', externalPath: '/job/Locations/No_Details', locationsText: '5 Locations',
+    }] };
+    zeroLimitDetailCalls++;
+    return { jobPostingInfo: { location: 'Helsinki' } };
+  }));
+  if (zeroLimitDetailCalls === 0 && providerCoverage(zeroLimitJobs)?.code === 'detail_budget') {
+    pass('workday detailLimit=0 skips HTTP and marks required detail recovery as partial');
+  } else {
+    fail(`workday zero detail limit mismatch: ${JSON.stringify({ detailCalls: zeroLimitDetailCalls, coverage: providerCoverage(zeroLimitJobs) })}`);
+  }
+
+  let refusedDetailAttempts = 0;
+  const refusedDetails = await workday.fetch({
+    name: 'Redirect Co',
+    careers_url: 'https://redirectco.wd5.myworkdayjobs.com/careers',
+    workday: { detailLimit: 10 },
+  }, mkWorkdayCtx(async (_url, opts) => {
+    if (opts.method === 'POST') return { total: 1, jobPostings: [{
+      title: 'Redirected Detail', externalPath: '/job/Locations/Redirected', locationsText: '5 Locations',
+    }] };
+    refusedDetailAttempts++;
+    const error = new Error('redirect refused');
+    error.code = 'ECAREEROPS_REDIRECT_REFUSED';
+    error.redirectRefused = true;
+    throw error;
+  }));
+  if (refusedDetailAttempts === 1 && providerCoverage(refusedDetails)?.code === 'detail_fetch_error') {
+    pass('workday refuses detail redirects without retrying an untrusted target');
+  } else {
+    fail(`workday detail redirect refusal mismatch: ${JSON.stringify({ attempts: refusedDetailAttempts, coverage: providerCoverage(refusedDetails) })}`);
+  }
+
+  let lateDetailAttempts = 0;
+  const lateDetailCtx = mkWorkdayCtx(async (_url, opts) => {
+    if (opts.method === 'POST') return { total: 1, jobPostings: [{
+      title: 'Late Detail', externalPath: '/job/Remote/Late_Detail', locationsText: 'Remote', postedOn: 'Posted 30+ Days Ago',
+    }] };
+    lateDetailAttempts++;
+    const error = new Error('HTTP 404: detail removed');
+    error.status = 404;
+    throw error;
+  });
+  const lateDetailJobs = await workday.fetch({
+    name: 'Late Detail Co', careers_url: 'https://latedetailco.wd5.myworkdayjobs.com/careers',
+  }, lateDetailCtx);
+  const coverageBeforeHook = providerCoverage(lateDetailJobs);
+  await workday.enrichDate(lateDetailJobs[0], lateDetailCtx);
+  if (coverageBeforeHook === null && lateDetailAttempts === 1
+      && providerCoverage(lateDetailJobs)?.code === 'detail_fetch_error') {
+    pass('workday late enrichDate failures attach typed partial coverage to the original jobs array');
+  } else {
+    fail(`workday late enrichment coverage mismatch: ${JSON.stringify({ before: coverageBeforeHook, after: providerCoverage(lateDetailJobs), attempts: lateDetailAttempts })}`);
+  }
+
+  const invalidDateCtx = mkWorkdayCtx(async (_url, opts) => {
+    if (opts.method === 'POST') return { total: 1, jobPostings: [{
+      title: 'Bad Date', externalPath: '/job/Remote/Bad_Date', locationsText: 'Remote', postedOn: 'Posted 30+ Days Ago',
+    }] };
+    return { jobPostingInfo: { startDate: '2026-02-30', date: 'recently' } };
+  });
+  const invalidDateJobs = await workday.fetch({ name: 'Invalid Date Co', careers_url: 'https://invaliddateco.wd5.myworkdayjobs.com/careers' }, invalidDateCtx);
+  await workday.enrichDate(invalidDateJobs[0], invalidDateCtx);
+  if (invalidDateJobs[0].postedAt === undefined) {
+    pass('workday leaves invalid and ambiguous detail dates unknown');
+  } else {
+    fail(`workday accepted an invalid detail date: ${JSON.stringify(invalidDateJobs[0].postedAt)}`);
+  }
+
+  const dateEvidenceJobs = await workday.fetch({
+    name: 'Date Evidence Co',
+    careers_url: 'https://dateevidence.wd5.myworkdayjobs.com/careers',
+  }, mkWorkdayCtx(async (url, opts) => {
+    if (opts.method === 'POST') return { total: 3, jobPostings: [
+      ['Offsetless', 'Posted 30+ Days Ago'],
+      ['Offset', 'Posted 30+ Days Ago'],
+      ['DateOnly', 'Posted 30+ Days Ago'],
+    ].map(([role, postedOn]) => ({
+      title: role, externalPath: `/job/Locations/${role}`, locationsText: '1 Location', postedOn,
+    })) };
+    const startDate = url.includes('/Offsetless') ? '2026-09-20T12:00:00'
+      : url.includes('/Offset') ? '2026-09-20T12:00:00+02:00' : '2026-09-20';
+    return { jobPostingInfo: { startDate, location: 'Helsinki, Finland' } };
+  }));
+  if (dateEvidenceJobs[0].postedAt === undefined
+      && dateEvidenceJobs[1].postedAt === Date.parse('2026-09-20T12:00:00+02:00')
+      && dateEvidenceJobs[2].postedAt === Date.parse('2026-09-20')) {
+    pass('workday rejects offsetless date-times and accepts explicit-offset and date-only evidence');
+  } else {
+    fail(`workday date evidence timezone handling mismatch: ${JSON.stringify(dateEvidenceJobs.map((job) => job.postedAt))}`);
+  }
+
+  const invalidDetailShapeJobs = await workday.fetch({
+    name: 'Invalid Detail Shape Co',
+    careers_url: 'https://invalidshape.wd5.myworkdayjobs.com/careers',
+  }, mkWorkdayCtx(async (_url, opts) => {
+    if (opts.method === 'POST') return { total: 1, jobPostings: [{
+      title: 'Invalid Detail Shape', externalPath: '/job/Locations/Invalid_Shape', locationsText: '4 Locations',
+    }] };
+    return { startDate: '2026-09-20', location: 'Helsinki, Finland' };
+  }));
+  if (invalidDetailShapeJobs[0].postedAt === undefined
+      && invalidDetailShapeJobs[0].location === '4 Locations'
+      && providerCoverage(invalidDetailShapeJobs)?.code === 'detail_invalid') {
+    pass('workday ignores unwrapped detail lookalikes and reports invalid detail evidence');
+  } else {
+    fail(`workday accepted malformed detail evidence: ${JSON.stringify({ job: invalidDetailShapeJobs[0], coverage: providerCoverage(invalidDetailShapeJobs) })}`);
+  }
+
+  // Listing-only liveness checks remain exactly one request and do not spend
+  // the detail budget even when the response contains placeholder geography.
+  let livenessDetails = 0;
+  const placeholderProbe = await workday.fetch(detailEntry, mkWorkdayCtx(async (_url, opts) => {
+    if (opts.method === 'POST') return { total: 100, jobPostings: [{
+      title: 'Probe Job', externalPath: '/job/Remote/Probe', locationsText: 'Multiple Locations',
+    }] };
+    livenessDetails++;
+    return { jobPostingInfo: { location: 'Helsinki' } };
+  }, { maxPages: 1 }));
+  if (placeholderProbe.length === 1 && livenessDetails === 0 && providerCoverage(placeholderProbe) === null) {
+    pass('workday ctx.maxPages=1 avoids detail requests and stays a full one-request liveness probe');
+  } else {
+    fail(`workday liveness detail suppression mismatch: ${JSON.stringify({ details: livenessDetails, coverage: providerCoverage(placeholderProbe) })}`);
+  }
+
+  // Repeated offset pages are structural truncation, not a cap hit; a valid
+  // empty directory is complete, while deadboard/error payloads remain errors.
+  let repeatedCalls = 0;
+  const repeatedJobs = await workday.fetch({ name: 'Repeat', careers_url: 'https://repeat.wd5.myworkdayjobs.com/careers' }, mkWorkdayCtx(async () => {
+    repeatedCalls++;
+    return { total: 100, jobPostings: Array.from({ length: 20 }, (_, i) => ({ title: `Repeat ${i}`, externalPath: `/job/Repeat/Job_${i}` })) };
+  }));
+  if (repeatedCalls === 2 && repeatedJobs.length === 20 && providerCoverage(repeatedJobs)?.code === 'repeated_page') {
+    pass('workday.fetch() stops safely and reports typed coverage when a structural page repeats');
+  } else {
+    fail(`workday repeated-page result mismatch: ${JSON.stringify({ requests: repeatedCalls, jobs: repeatedJobs.length, coverage: providerCoverage(repeatedJobs) })}`);
+  }
+  const emptyBoard = await workday.fetch({ name: 'Empty', careers_url: 'https://empty.wd5.myworkdayjobs.com/careers' }, mkWorkdayCtx(async () => ({ total: 0, jobPostings: [] })));
+  let deadBoardRejected = false;
+  try {
+    await workday.fetch({ name: 'Dead', careers_url: 'https://dead.wd5.myworkdayjobs.com/careers' }, mkWorkdayCtx(async () => ({ errorCode: 'BOARD_NOT_FOUND', total: 0, jobPostings: [] })));
+  } catch { deadBoardRejected = true; }
+  if (emptyBoard.length === 0 && providerCoverage(emptyBoard) === null && deadBoardRejected) {
+    pass('workday distinguishes a complete empty board from an explicit deadboard response');
+  } else {
+    fail(`workday empty/deadboard result mismatch: ${JSON.stringify({ empty: emptyBoard.length, coverage: providerCoverage(emptyBoard), deadBoardRejected })}`);
+  }
+
+  // A mixed page cannot be considered stale just because one row is old.
+  const mixedSince = Date.now() - 3 * 86_400_000;
+  let mixedPageCalls = 0;
+  const mixedPageJobs = await workday.fetch({ name: 'Mixed', careers_url: 'https://mixed.wd5.myworkdayjobs.com/careers', max_pages: 4 }, mkWorkdayCtx(async (_url, opts) => {
+    const page = JSON.parse(opts.body).offset / 20;
+    mixedPageCalls++;
+    const posting = (index, postedOn) => ({ title: `Mixed ${page}-${index}`, externalPath: `/job/Mixed/${page}-${index}`, postedOn });
+    if (page === 0) return { total: 80, jobPostings: Array.from({ length: 20 }, (_, i) => posting(i, 'Posted Today')) };
+    if (page === 1) return { total: 80, jobPostings: [...Array.from({ length: 18 }, (_, i) => posting(i, 'Posted 20 Days Ago')), posting(18, 'Posted Today'), posting(19, 'Posted 30+ Days Ago')] };
+    return { total: 80, jobPostings: Array.from({ length: 20 }, (_, i) => posting(i, 'Posted 20 Days Ago')) };
+  }, { sinceMs: mixedSince, includeUndated: true }));
+  if (mixedPageCalls === 3 && mixedPageJobs.length === 60) {
+    pass('workday since-aware pagination continues across a page with mixed fresh and stale rows');
+  } else {
+    fail(`workday mixed-page early-stop mismatch: ${JSON.stringify({ requests: mixedPageCalls, jobs: mixedPageJobs.length })}`);
+  }
+
+  // Unsafe posting paths are rejected before they can become detail requests.
+  const unsafePosting = parseWorkdayResponse({ jobPostings: [
+    { title: 'Escape', externalPath: '/job/../wday/cxs/other/jobs' },
+    { title: 'Foreign', externalPath: '//evil.example/job/Role' },
+  ] }, entry);
+  if (unsafePosting.length === 0) pass('parseWorkdayResponse rejects traversal and protocol-relative external paths');
+  else fail(`Workday unsafe externalPath accepted: ${JSON.stringify(unsafePosting)}`);
 
 } catch (e) {
   fail(`workday provider tests crashed: ${e.message}`);

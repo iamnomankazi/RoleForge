@@ -1,27 +1,28 @@
-import { Send } from "lucide-react";
-import { ApplyView } from "@/components/apply-view";
-import { ApplyBackdropMount } from "@/components/apply/apply-backdrop-mount";
+import Link from "next/link";
+import { Lock, ArrowLeft } from "lucide-react";
 
 export const dynamic = "force-dynamic";
 
 export default function ApplyPage() {
   return (
-    <div className="relative min-h-screen">
-      {/* full-viewport blurred form wallpaper (behind everything) */}
-      <ApplyBackdropMount />
-      <div className="relative z-10 mx-auto max-w-3xl px-6 py-8">
+    <div className="mx-auto max-w-3xl px-6 py-10">
+      <Link href="/pipeline" className="inline-flex items-center gap-1.5 text-sm text-muted transition-colors hover:text-brand">
+        <ArrowLeft className="size-4" /> Pipeline
+      </Link>
+      <div className="mt-6 rounded-2xl border border-dashed border-border bg-surface/30 px-6 py-8">
         <div className="flex items-center gap-3">
-          <Send className="size-6 text-brand" />
-          <h1 className="font-display text-2xl tracking-tight text-landing">Apply</h1>
+          <Lock className="size-6 text-faint" />
+          <h1 className="font-display text-2xl tracking-tight text-landing">Web Apply unavailable</h1>
         </div>
-        <p className="mt-1.5 max-w-xl text-sm text-muted">
-          career-ops reads the real application form on your machine and re-renders it here in plain language, pre-filled
-          from your CV. You verify every answer — then it fills the real form behind the scenes and you submit it yourself.
-          It never submits for you.
+        <p className="mt-3 max-w-xl text-sm leading-relaxed text-muted">
+          The legacy web Apply execution path is disabled. This page is read-only: it cannot open a browser, read or fill
+          an application form, upload files, invoke an AI apply driver, or perform a final application action.
         </p>
-        <div className="mt-6">
-          <ApplyView />
-        </div>
+        <p className="mt-3 max-w-xl text-sm leading-relaxed text-muted">
+          Use the private root application engine for any future execution. A future web bridge must prove an exact
+          <code className="mx-1 text-foreground">batch_id</code>, exact <code className="mx-1 text-foreground">candidate_id</code>, immutable
+          <code className="mx-1 text-foreground">manifest_scope_hash</code>, successful preflight, and approved artifact hashes before handoff.
+        </p>
       </div>
     </div>
   );

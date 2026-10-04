@@ -52,30 +52,41 @@ import {
   normalizeExperiencePolicy,
 } from './experience-policy.mjs';
 
-try {
-  const { config } = await import('dotenv');
-  config();
-} catch {
-  // dotenv is optional — fall back to process.env if not installed
+async function loadOptionalDotenv() {
+  try {
+    const { config } = await import('dotenv');
+    config();
+  } catch {
+    // dotenv is optional — fall back to process.env if not installed
+  }
 }
 
 const parseYaml = yaml.load;
 
 // ── Config ──────────────────────────────────────────────────────────
 
-const PORTALS_PATH = process.env.CAREER_OPS_PORTALS || 'portals.yml';
-const PROFILE_PATH = process.env.CAREER_OPS_PROFILE || 'config/profile.yml';
 const SCAN_HISTORY_PATH = 'data/scan-history.tsv';
 const PIPELINE_PATH = 'data/pipeline.md';
 const APPLICATIONS_PATH = 'data/applications.md';
 const PROJECT_ROOT = path.dirname(fileURLToPath(import.meta.url));
-const SCAN_ROOT = process.env.CAREER_OPS_SCAN_ROOT ? path.resolve(process.env.CAREER_OPS_SCAN_ROOT) : PROJECT_ROOT;
-const PROVIDERS_DIR = process.env.CAREER_OPS_PROVIDERS_DIR
-  ? path.resolve(process.env.CAREER_OPS_PROVIDERS_DIR)
-  : path.resolve(PROJECT_ROOT, 'providers');
 
-// Ensure required directories exist (fresh setup)
-mkdirSync('data', { recursive: true });
+function resolvePortalsPath() {
+  return process.env.CAREER_OPS_PORTALS || 'portals.yml';
+}
+
+function resolveProfilePath() {
+  return process.env.CAREER_OPS_PROFILE || 'config/profile.yml';
+}
+
+function resolveScanRoot() {
+  return process.env.CAREER_OPS_SCAN_ROOT ? path.resolve(process.env.CAREER_OPS_SCAN_ROOT) : PROJECT_ROOT;
+}
+
+function resolveProvidersDir() {
+  return process.env.CAREER_OPS_PROVIDERS_DIR
+    ? path.resolve(process.env.CAREER_OPS_PROVIDERS_DIR)
+    : path.resolve(PROJECT_ROOT, 'providers');
+}
 
 const CONCURRENCY = 10;
 
@@ -514,6 +525,76 @@ export function buildSalaryFilter(salaryFilter) {
   };
 }
 
+/**
+ * Build the shared, config-driven relevance policy used by all discovery
+ * scanners. The filter order and the missing-description behavior intentionally
+ * match the standard scanner: title, posting age, tier, location, salary,
+ * experience evidence, then content. Experience evidence is attached before
+ * content filtering so canonical review rows retain numeric requirements and
+ * blockers.
+ */
+export function buildScanRelevanceEvaluator(config = {}, { classifyTier = null, sinceMs = null } = {}) {
+  const titleFilter = buildTitleFilter(config.title_filter);
+  const skipTiers = Array.isArray(config.skip_tiers)
+    ? config.skip_tiers.filter(value => typeof value === 'string').map(value => value.toLowerCase())
+    : [];
+  const locationFilter = buildLocationFilter(config.location_filter);
+  const salaryFilter = buildSalaryFilter(config.salary_filter);
+  const experiencePolicy = normalizeExperiencePolicy(config.experience_policy);
+  const contentFilter = buildContentFilter(config.content_filter, { experiencePolicy });
+
+  return (job) => {
+    const titleFilterValue = [
+      job.title,
+      ...(Array.isArray(job.seniority) ? job.seniority : []),
+    ].filter(value => typeof value === 'string').join(' ');
+    if (!titleFilter(titleFilterValue)) return { eligible: false, reason: 'title' };
+
+    if (sinceMs != null && job.postedAt != null) {
+      const postedMs = typeof job.postedAt === 'number' ? job.postedAt : Date.parse(job.postedAt);
+      if (Number.isFinite(postedMs) && postedMs < sinceMs) return { eligible: false, reason: 'posting_age' };
+    }
+
+    if (classifyTier && skipTiers.includes(classifyTier(job.title))) {
+      return { eligible: false, reason: 'tier' };
+    }
+
+    const locationEligibility = locationFilter.classify(job.location, job.url, job.title);
+    job.locationEligibility = locationEligibility.status;
+    job.locationEligibilityCode = locationEligibility.code;
+    job.locationEligibilityMatch = locationEligibility.matched;
+    job.locationEligibilitySource = locationEligibility.source;
+    if (locationEligibility.status === 'ineligible') {
+      return { eligible: false, reason: 'location', locationEligibility };
+    }
+
+    if (!salaryFilter(job.salary)) return { eligible: false, reason: 'salary', locationEligibility };
+
+    const experienceMetadata = classifyExperienceRequirements(job.description, experiencePolicy);
+    if (experienceMetadata) {
+      job.experienceMetadata = experienceMetadata;
+      if (experienceMetadata.numeric_hard_blocker) {
+        const existingBlockers = job.hardBlockers ?? job.hard_blockers;
+        const blockers = Array.isArray(existingBlockers)
+          ? existingBlockers
+          : (existingBlockers ? [existingBlockers] : []);
+        job.hardBlockers = [...new Set([...blockers, experienceMetadata.hard_blocker_reason])];
+      }
+    }
+
+    if (!contentFilter(job.description, matchedTitleKeywords(job.title, config.title_filter))) {
+      return { eligible: false, reason: 'content', locationEligibility, experienceMetadata };
+    }
+    return { eligible: true, reason: null, locationEligibility, experienceMetadata };
+  };
+}
+
+function hasUsablePostingDate(postedAt) {
+  if (typeof postedAt === 'number') return Number.isFinite(postedAt);
+  if (typeof postedAt === 'string') return Number.isFinite(Date.parse(postedAt));
+  return false;
+}
+
 export function companyMatch(jobCompany, windowCompany) {
   const cleanNoSpaces = (str) => String(str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const c1NoSpaces = cleanNoSpaces(jobCompany);
@@ -536,7 +617,7 @@ export function addDays(dateStr, days) {
   return date.toISOString().slice(0, 10);
 }
 
-export function loadReApplyWindows(profilePath = PROFILE_PATH) {
+export function loadReApplyWindows(profilePath = resolveProfilePath()) {
   if (!existsSync(profilePath)) return {};
   try {
     const raw = yaml.load(readFileSync(profilePath, 'utf-8')) || {};
@@ -738,7 +819,7 @@ export function shouldDedupScanHistoryRow({ firstSeen, status = 'added' }, { rec
   return ageDays < recheckAfterDays;
 }
 
-function scanHistoryPolicy(config = {}) {
+export function scanHistoryPolicy(config = {}) {
   const raw = config.scan_history?.recheck_after_days;
   const parsed = Number.parseInt(raw, 10);
   return {
@@ -1067,7 +1148,7 @@ export function generateStandardScanRunId(now = new Date(), pid = process.pid) {
 export function persistStandardScanRun({
   runId,
   offers,
-  root = SCAN_ROOT,
+  root = resolveScanRoot(),
   createdAt = new Date().toISOString(),
   metadata = {},
 }) {
@@ -1233,6 +1314,7 @@ function guardStatusFor(code) {
 }
 
 async function main() {
+  await loadOptionalDotenv();
   const args = process.argv.slice(2);
   const dryRun = args.includes('--dry-run');
   const sinceDays = parseSinceDays(args);
@@ -1263,34 +1345,34 @@ async function main() {
   const filterCompany = companyFlag !== -1 ? args[companyFlag + 1]?.toLowerCase() : null;
 
   // 1. Load providers
-  const providers = await loadProviders(PROVIDERS_DIR);
+  const providersDir = resolveProvidersDir();
+  const providers = await loadProviders(providersDir);
   // Opt-in: merge enabled keyed/auth-gated provider plugins. Returns immediately
   // (no discovery, no dotenv, no process.env mutation) when config/plugins.yml is
   // absent — so a plain scan with no plugins configured stays byte-identical.
-  await mergeProviderPlugins(providers, { root: path.dirname(PROVIDERS_DIR) });
+  await mergeProviderPlugins(providers, { root: path.dirname(providersDir) });
   if (providers.size === 0) {
     console.error('Error: no providers loaded from providers/');
     process.exit(1);
   }
 
   // 2. Read portals.yml
-  if (!existsSync(PORTALS_PATH)) {
+  const portalsPath = resolvePortalsPath();
+  if (!existsSync(portalsPath)) {
     console.error('Error: portals.yml not found. Run onboarding first.');
     process.exit(1);
   }
 
   let rawConfig;
   try {
-    rawConfig = parseYaml(readFileSync(PORTALS_PATH, 'utf-8'));
+    rawConfig = parseYaml(readFileSync(portalsPath, 'utf-8'));
   } catch (err) {
-    console.error(`Error: failed to parse ${PORTALS_PATH}: ${err.message}`);
+    console.error(`Error: failed to parse ${portalsPath}: ${err.message}`);
     process.exit(1);
   }
   const config = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
   const companies = Array.isArray(config.tracked_companies) ? config.tracked_companies : [];
   const boards = Array.isArray(config.job_boards) ? config.job_boards : [];
-  const titleFilter = buildTitleFilter(config.title_filter);
-
   // Seniority tier classifier integration
   let classifyTier = null;
   const skipTiers = Array.isArray(config.skip_tiers)
@@ -1301,11 +1383,10 @@ async function main() {
     classifyTier = mod.classifyTier || mod.default;
   }
 
-  const locationFilter = buildLocationFilter(config.location_filter);
-  const salaryFilter = buildSalaryFilter(config.salary_filter);
   const trustValidator = buildTrustValidator(config.trust_filter);
-  const experiencePolicy = normalizeExperiencePolicy(config.experience_policy);
-  const contentFilter = buildContentFilter(config.content_filter, { experiencePolicy });
+  const evaluateScanRelevance = buildScanRelevanceEvaluator(config, { classifyTier, sinceMs });
+  const enrichmentTitleFilter = buildTitleFilter(config.title_filter);
+  const enrichmentLocationFilter = buildLocationFilter(config.location_filter);
 
   // 3. Resolve a provider for each enabled company / board
   const targets = [];
@@ -1400,7 +1481,9 @@ async function main() {
   const tasks = targets.map(company => async () => {
     let provider = company._provider;
     let targetDegraded = false;
-    const ctx = { ...makeHttpCtx(), ...(sinceMs == null ? {} : { sinceMs }) };
+    // The standard scan retains unknown dates; providers may use this signal to
+    // avoid dropping records before the scanner's authoritative date gate.
+    const ctx = { ...makeHttpCtx(), includeUndated: true, ...(sinceMs == null ? {} : { sinceMs }) };
     let sourceName = provider.id === 'local-parser' ? 'local-parser' : `${provider.id}-api`;
     try {
       let jobs;
@@ -1437,20 +1520,6 @@ async function main() {
       if (!Array.isArray(jobs)) {
         throw new Error(`${provider.id}: fetch() did not return an array`);
       }
-      const coverage = providerCoverage(jobs);
-      if (coverage?.status === 'partial') {
-        targetDegraded = true;
-        if (!degradedTargetHealth.has(company.name)) {
-          degradedTargetHealth.set(company.name, `partial:${coverage.code}`);
-        }
-        degradedDiagnostics.push({
-          company: company.name,
-          error: `${provider.id}: ${coverage.reason}`,
-          kind: 'partial',
-          coverage,
-        });
-      }
-      if (targetDegraded) degradedTargets++;
       successfulTargets++;
       totalFound += jobs.length;
       if (!company._isBoard && jobs.length === 0) {
@@ -1464,55 +1533,38 @@ async function main() {
         job.trustFlags = trustResult.flags;
         job.trustLevel = trustResult.level;
 
-        // Some board APIs expose seniority separately from the visible title
-        // (Himalayas is one example). Apply the same configured title rules to
-        // that metadata so senior/staff/manager rows cannot pass merely because
-        // the public title is neutral; no second preference system is created.
-        const titleFilterValue = [
-          job.title,
-          ...(Array.isArray(job.seniority) ? job.seniority : []),
-        ].filter(value => typeof value === 'string').join(' ');
-        if (!titleFilter(titleFilterValue)) {
-          totalFilteredTitle++;
-          continue;
-        }
-        if (sinceMs != null && job.postedAt != null) {
-          const postedMs = typeof job.postedAt === 'number' ? job.postedAt : Date.parse(job.postedAt);
-          if (Number.isFinite(postedMs) && postedMs < sinceMs) {
-            totalFilteredPostingAge++;
-            continue;
+        // Date detail lookups are opt-in per provider. Run them only for jobs
+        // with no usable date that pass the existing cheap title, tier, and
+        // location checks. Salary/content/experience remain solely in the
+        // authoritative evaluator below because detail data can complete them.
+        if (!hasUsablePostingDate(job.postedAt) && typeof provider?.enrichDate === 'function') {
+          const titleFilterValue = [
+            job.title,
+            ...(Array.isArray(job.seniority) ? job.seniority : []),
+          ].filter(value => typeof value === 'string').join(' ');
+          const titleEligible = enrichmentTitleFilter(titleFilterValue);
+          const tierEligible = !classifyTier || !skipTiers.includes(classifyTier(job.title));
+          const locationEligibility = enrichmentLocationFilter.classify(job.location, job.url, job.title);
+          if (titleEligible && tierEligible && locationEligibility.status !== 'ineligible') {
+            const originalPostedAt = job.postedAt;
+            try {
+              await provider.enrichDate(job, ctx);
+            } catch {
+              // A detail lookup is enrichment, not a board-fetch failure.
+              // Preserve the original unknown-date behavior if it fails.
+              job.postedAt = originalPostedAt;
+            }
           }
         }
-        if (classifyTier && skipTiers.includes(classifyTier(job.title))) {
-          totalFilteredTier++;
-          continue;
-        }
-        const locationEligibility = locationFilter.classify(job.location, job.url, job.title);
-        job.locationEligibility = locationEligibility.status;
-        job.locationEligibilityCode = locationEligibility.code;
-        job.locationEligibilityMatch = locationEligibility.matched;
-        job.locationEligibilitySource = locationEligibility.source;
-        if (locationEligibility.status === 'ineligible') {
-          totalFilteredLocation++;
-          continue;
-        }
-        if (!salaryFilter(job.salary)) {
-          totalFilteredSalary++;
-          continue;
-        }
-        const experienceMetadata = classifyExperienceRequirements(job.description, experiencePolicy);
-        if (experienceMetadata) {
-          job.experienceMetadata = experienceMetadata;
-          if (experienceMetadata.numeric_hard_blocker) {
-            const existingBlockers = job.hardBlockers ?? job.hard_blockers;
-            const blockers = Array.isArray(existingBlockers)
-              ? existingBlockers
-              : (existingBlockers ? [existingBlockers] : []);
-            job.hardBlockers = [...new Set([...blockers, experienceMetadata.hard_blocker_reason])];
-          }
-        }
-        if (!contentFilter(job.description, matchedTitleKeywords(job.title, config.title_filter))) {
-          totalFilteredContent++;
+
+        const relevance = evaluateScanRelevance(job);
+        if (!relevance.eligible) {
+          if (relevance.reason === 'title') totalFilteredTitle++;
+          else if (relevance.reason === 'posting_age') totalFilteredPostingAge++;
+          else if (relevance.reason === 'tier') totalFilteredTier++;
+          else if (relevance.reason === 'location') totalFilteredLocation++;
+          else if (relevance.reason === 'salary') totalFilteredSalary++;
+          else if (relevance.reason === 'content') totalFilteredContent++;
           continue;
         }
         const scanCandidateId = deriveCandidateId(job);
@@ -1560,6 +1612,23 @@ async function main() {
         newOffersByCandidateId.set(scanCandidateId, offer);
         newOffers.push(offer);
       }
+
+      // Providers may discover additional partial coverage while performing
+      // per-job detail lookups, so read the array metadata after enrichment.
+      const coverage = providerCoverage(jobs);
+      if (coverage?.status === 'partial') {
+        targetDegraded = true;
+        if (!degradedTargetHealth.has(company.name)) {
+          degradedTargetHealth.set(company.name, `partial:${coverage.code}`);
+        }
+        degradedDiagnostics.push({
+          company: company.name,
+          error: `${provider.id}: ${coverage.reason}`,
+          kind: 'partial',
+          coverage,
+        });
+      }
+      if (targetDegraded) degradedTargets++;
     } catch (err) {
       failedTargets++;
       errors.push({
@@ -1629,6 +1698,7 @@ async function main() {
       },
     });
   }
+  if (!dryRun && successfulTargets > 0) mkdirSync('data', { recursive: true });
   if (!dryRun && verifiedOffers.length > 0) {
     appendToPipeline(verifiedOffers);
     appendToScanHistory(verifiedOffers, date);

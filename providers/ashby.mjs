@@ -11,6 +11,8 @@
 // Ashby a longer timeout plus a backoff+jitter retry (the backoff spaces
 // requests out to dodge rate-limiting).
 // See .planning/codebase/ashby-scan-abort-diagnosis.md.
+import { htmlToText } from './_html-to-text.mjs';
+
 const ASHBY_TIMEOUT_MS = 30_000;
 const ASHBY_RETRIES = 2;
 
@@ -88,37 +90,102 @@ function sleep(ms, ctx) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// NaN-safe Date.parse — `|| undefined` would also coerce a valid epoch 0.
+// Ashby publishes ISO timestamps. Require an explicit time zone and validate
+// calendar fields before Date.parse(), which otherwise rolls invalid days into
+// the following month.
 function toEpochMs(value) {
-  if (!value) return undefined;
-  const parsed = Date.parse(value);
+  if (typeof value !== 'string') return undefined;
+  const timestamp = value.trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/i.exec(timestamp);
+  if (!match) return undefined;
+
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, , zone] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysPerMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (month < 1 || month > 12 || day < 1 || day > daysPerMonth[month - 1]
+      || hour > 23 || minute > 59 || second > 59) return undefined;
+
+  if (zone.toUpperCase() !== 'Z') {
+    const [offsetHour, offsetMinute] = zone.slice(1).split(':').map(Number);
+    if (zone === '-00:00' || offsetHour > 23 || offsetMinute > 59) return undefined;
+  }
+
+  const parsed = Date.parse(timestamp);
   return Number.isNaN(parsed) ? undefined : parsed;
 }
 
-// Build the full location string from primary + secondary locations.
+// Build the full location string from primary and secondary locations.
 // Ashby's posting-api puts extra hiring regions in `secondaryLocations[]`
-// (each with a region label + a postalAddress). Using only `j.location` drops
-// them, so an EU-eligible role whose PRIMARY label is e.g. "Canada" reads as
-// Canada-only and gets wrongly removed by scan.mjs's location_filter. We fold
-// in each secondary's region, locality, and country so the filter can match
-// (e.g. "Europe", "Berlin", "Germany"). Deduped, joined with " · ".
+// (each with a region label + a postalAddress). The primary address and every
+// secondary address are included so location filtering can see all advertised
+// geography. Duplicate evidence is omitted while its first source spelling is
+// preserved.
 /** @param {any} j */
 function formatLocation(j) {
   const parts = [];
-  if (typeof j.location === 'string' && j.location.trim()) parts.push(j.location.trim());
+  const add = (value, avoidLabelRepeat = false) => {
+    const part = typeof value === 'string' ? value.trim() : '';
+    if (!part) return;
+    const key = part.normalize('NFC').toLowerCase();
+    if (parts.some((existing) => existing.normalize('NFC').toLowerCase() === key)) return;
+    if (avoidLabelRepeat && parts.some((existing) => labelContains(existing, part))) return;
+    parts.push(part);
+  };
+
+  add(j.location);
+  for (const value of postalAddressParts(j)) add(value, true);
   if (Array.isArray(j.secondaryLocations)) {
     for (const s of j.secondaryLocations) {
       if (!s || typeof s !== 'object') continue;
-      if (typeof s.location === 'string' && s.location.trim()) parts.push(s.location.trim());
-      const pa = s.address && s.address.postalAddress;
-      if (pa) {
-        for (const k of ['addressLocality', 'addressCountry']) {
-          if (typeof pa[k] === 'string' && pa[k].trim()) parts.push(pa[k].trim());
-        }
-      }
+      add(s.location);
+      for (const value of postalAddressParts(s)) add(value, true);
     }
   }
+
+  const workplaceType = typeof j.workplaceType === 'string' ? j.workplaceType.trim() : '';
+  const remote = workplaceType
+    ? /(^|[^\p{L}\p{N}])remote($|[^\p{L}\p{N}])/iu.test(workplaceType)
+    : j.isRemote === true;
+  if (remote) add('Remote', true);
+
   return [...new Set(parts)].join(' · ');
+}
+
+function labelContains(label, value) {
+  const normalizedLabel = label.normalize('NFC');
+  const normalizedValue = value.normalize('NFC');
+  const escaped = normalizedValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}($|[^\\p{L}\\p{N}])`, 'iu').test(normalizedLabel);
+}
+
+function postalAddressParts(container) {
+  const postalAddress = container?.address?.postalAddress;
+  if (!postalAddress || typeof postalAddress !== 'object') return [];
+  return ['addressLocality', 'addressCountry']
+    .map((key) => typeof postalAddress[key] === 'string' ? postalAddress[key].trim() : '')
+    .filter(Boolean);
+}
+
+/** @param {any} j */
+function descriptionText(j) {
+  const plain = typeof j.descriptionPlain === 'string' ? j.descriptionPlain.trim() : '';
+  if (plain) return plain;
+
+  const html = typeof j.descriptionHtml === 'string' ? j.descriptionHtml.trim() : '';
+  if (html) return htmlToText(html) || undefined;
+
+  const description = typeof j.description === 'string' ? j.description.trim() : '';
+  if (!description) return undefined;
+  if (/<(?:!?[a-z][\w:-]*|!--)|&lt;\s*\/?\s*[a-z][\w:-]*\b/i.test(description)) {
+    return htmlToText(description) || undefined;
+  }
+  return description;
 }
 
 /** @type {Provider} */
@@ -143,14 +210,20 @@ export default {
       try {
         const json = /** @type {any} */ (await ctx.fetchJson(apiUrl, { timeoutMs: ASHBY_TIMEOUT_MS, redirect: 'error' }));
         const jobs = Array.isArray(json?.jobs) ? json.jobs : [];
-        return jobs.map(/** @param {any} j */ (j) => ({
-          title: j.title || '',
-          url: j.jobUrl || '',
-          company: entry.name,
-          location: formatLocation(j),
-          salary: parseCompensation(j),
-          postedAt: toEpochMs(j.publishedAt),
-        }));
+        return jobs.map(/** @param {any} j */ (j) => {
+          const job = {
+            title: j.title || '',
+            url: j.jobUrl || '',
+            company: entry.name,
+            location: formatLocation(j),
+            salary: parseCompensation(j),
+          };
+          const description = descriptionText(j);
+          if (description) job.description = description;
+          const postedAt = toEpochMs(j.publishedAt);
+          if (postedAt !== undefined) job.postedAt = postedAt;
+          return job;
+        });
       } catch (e) {
         lastErr = e;
       }

@@ -32,6 +32,7 @@ import {
   sha256Canonical,
   validateArtifactRecord,
 } from './application-integrity.mjs';
+import { GENERIC_APPLICATION_CLASSIFICATION_SEMANTICS } from './application-reasoning.mjs';
 
 export const ROOT = dirname(fileURLToPath(import.meta.url));
 export const APPLICATION_BATCH_MANIFEST_SCHEMA_VERSION = 2;
@@ -669,12 +670,126 @@ function validateFormPreparation(value) {
     'answerRecords', 'browserOpenRequired', 'passBudget', 'browserSession',
     'operationalArtifacts', 'uploadTopology', 'captcha',
     'progression',
+    'reasoning', 'semanticVerification', 'deterministicReviewComplete',
   ]), 'form preparation');
-  if (![1, 2].includes(value.schemaVersion)) throw new Error('Unsupported form preparation schema version');
+  if (![1, 2, 3].includes(value.schemaVersion)) throw new Error('Unsupported form preparation schema version');
   for (const key of ['filledFields', 'committedSelections', 'uploadedArtifacts', 'unresolvedFields', 'validationErrors']) {
     if (!Array.isArray(value[key])) throw new Error(`Form preparation ${key} must be an array`);
   }
   if (value.schemaVersion === 2 && (!Array.isArray(value.attemptLedger) || !Array.isArray(value.answerRecords))) throw new Error('Operational form preparation ledger is invalid');
+  if (value.schemaVersion === 3) {
+    if (!Array.isArray(value.attemptLedger) || !Array.isArray(value.answerRecords)) throw new Error('Operational form preparation ledger is invalid');
+    assertKnownFields(value.reasoning || {}, new Set([
+      'schemaVersion', 'provider', 'model', 'calls', 'limits', 'semanticResolutions',
+      'rejectedResolutions', 'preparedAnswerSummary',
+    ]), 'form preparation reasoning');
+    if (value.reasoning?.schemaVersion !== 1
+        || !Array.isArray(value.reasoning?.semanticResolutions)
+        || !Array.isArray(value.reasoning?.rejectedResolutions)
+        || !Array.isArray(value.reasoning?.preparedAnswerSummary)) {
+      throw new Error('Invalid form preparation reasoning evidence');
+    }
+    assertKnownFields(value.reasoning.calls || {}, new Set(['fallback', 'verifier', 'total']), 'reasoning call counters');
+    assertKnownFields(value.reasoning.limits || {}, new Set([
+      'fallbackCalls', 'verifierCalls', 'totalCalls', 'repairCycles', 'timeoutMs',
+    ]), 'reasoning call limits');
+    const counters = value.reasoning.calls || {};
+    const limits = value.reasoning.limits || {};
+    if (![counters.fallback, counters.verifier, counters.total].every((item) => Number.isInteger(item) && item >= 0)
+        || ![limits.fallbackCalls, limits.verifierCalls, limits.totalCalls, limits.repairCycles, limits.timeoutMs]
+          .every((item) => Number.isInteger(item) && item >= 0)
+        || limits.fallbackCalls > 3 || limits.verifierCalls > 1 || limits.totalCalls > 4
+        || limits.repairCycles > 1 || limits.timeoutMs < 1 || limits.timeoutMs > 30000
+        || counters.fallback > 3 || counters.verifier > 1 || counters.total > 4
+        || counters.fallback > limits.fallbackCalls || counters.verifier > limits.verifierCalls
+        || counters.total > limits.totalCalls) {
+      throw new Error('Reasoning call counters or limits exceed the safety ceiling');
+    }
+    for (const entry of value.reasoning.semanticResolutions) {
+      assertKnownFields(entry, new Set([
+        'schemaVersion', 'batchId', 'candidateId', 'applicationFormId', 'resolutionKey',
+        'questionDigest', 'controlType', 'kind', 'optionsDigest', 'annotation',
+        'provider', 'model', 'requestDigest', 'responseDigest',
+      ]), 'semantic resolution record');
+      if (entry.schemaVersion !== 1 || !['semantic_classification', 'option_mapping', 'narrative_routing'].includes(entry.kind)
+          || !String(entry.resolutionKey || '').startsWith('resolution:')) {
+        throw new Error('Invalid semantic resolution record');
+      }
+      const annotationFields = entry.kind === 'semantic_classification'
+        ? new Set(['semantic'])
+        : entry.kind === 'option_mapping'
+          ? new Set(['canonicalValueHash', 'selectedVisibleOption', 'noSemanticMatch'])
+          : new Set(['templateId', 'topicIds', 'evidenceIds', 'evidenceBindings']);
+      assertKnownFields(entry.annotation || {}, annotationFields, 'semantic resolution annotation');
+      if (entry.kind === 'semantic_classification'
+          && !GENERIC_APPLICATION_CLASSIFICATION_SEMANTICS.includes(entry.annotation.semantic)) {
+        throw new Error('Invalid semantic classification resolution');
+      }
+      if (entry.kind === 'option_mapping') {
+        const refused = entry.annotation.noSemanticMatch === true;
+        const selected = typeof entry.annotation.selectedVisibleOption === 'string';
+        if (refused === selected || (entry.annotation.noSemanticMatch !== undefined && !refused)) {
+          throw new Error('Invalid option mapping resolution disposition');
+        }
+      }
+      if (entry.kind === 'narrative_routing') {
+        if (!Array.isArray(entry.annotation.topicIds) || !Array.isArray(entry.annotation.evidenceIds)
+            || !Array.isArray(entry.annotation.evidenceBindings)) {
+          throw new Error('Invalid narrative routing resolution');
+        }
+        for (const binding of entry.annotation.evidenceBindings) {
+          assertKnownFields(binding, new Set([
+            'configuredEvidenceId', 'evidenceIdentity', 'evidenceHash', 'sourceHash',
+          ]), 'narrative reasoning evidence binding');
+        }
+      }
+    }
+    for (const entry of value.reasoning.rejectedResolutions) {
+      assertKnownFields(entry, new Set([
+        'resolutionKey', 'kind', 'reasonCode', 'detailDigest',
+      ]), 'rejected semantic resolution');
+    }
+    for (const entry of value.reasoning.preparedAnswerSummary) {
+      assertKnownFields(entry, new Set([
+        'resolutionKey', 'stableFieldId', 'normalizedQuestion', 'category', 'semantic',
+        'committedValue', 'committedValueHash', 'selectedVisibleLabel', 'evidenceIds',
+        'stepFingerprint',
+      ]), 'prepared answer summary');
+      if (!String(entry.resolutionKey || '').startsWith('resolution:') || !Array.isArray(entry.evidenceIds)) {
+        throw new Error('Invalid prepared answer summary');
+      }
+    }
+    assertKnownFields(value.semanticVerification || {}, new Set([
+      'disposition', 'triggerReasons', 'findings', 'requestDigest', 'responseDigest', 'repair',
+    ]), 'semantic verification evidence');
+    if (!['not_required', 'pending', 'passed', 'review_required'].includes(value.semanticVerification?.disposition)
+        || !Array.isArray(value.semanticVerification?.triggerReasons)
+        || !Array.isArray(value.semanticVerification?.findings)) {
+      throw new Error('Invalid semantic verification disposition');
+    }
+    assertKnownFields(value.semanticVerification?.repair || {}, new Set([
+      'attempted', 'outcome', 'resolutionKey',
+    ]), 'semantic verification repair');
+    for (const finding of value.semanticVerification.findings) {
+      assertKnownFields(finding, new Set([
+        'code', 'resolutionKey', 'message', 'detailDigest', 'live', 'repair',
+      ]), 'semantic verification finding');
+      if (finding.repair != null) {
+        const allowedRepair = finding.repair.kind === 'semantic_classification'
+          ? new Set(['resolutionKey', 'kind', 'semantic'])
+          : finding.repair.kind === 'option_mapping'
+            ? new Set(['resolutionKey', 'kind', 'canonicalValueHash', 'selectedVisibleOption'])
+            : finding.repair.kind === 'narrative_routing'
+              ? new Set(['resolutionKey', 'kind', 'templateId', 'topicIds', 'evidenceIds'])
+              : null;
+        if (!allowedRepair) throw new Error('Unsupported semantic verifier repair kind');
+        assertKnownFields(finding.repair, allowedRepair, 'semantic verifier repair annotation');
+      }
+    }
+    if (typeof value.deterministicReviewComplete !== 'boolean') {
+      throw new Error('Form preparation deterministic review disposition is missing');
+    }
+  }
   if (!Number.isInteger(value.requiredFieldCount) || value.requiredFieldCount < 0) {
     throw new Error('Form preparation required field count is invalid');
   }
@@ -712,7 +827,9 @@ function validateFormPreparation(value) {
     }
   }
   if (value.reviewComplete && (value.unresolvedFields.length || value.validationErrors.length
-      || value.userActionRequired || value.finalAction?.activated !== false)) {
+      || value.userActionRequired || value.finalAction?.detected !== true || value.finalAction?.activated !== false
+      || (value.schemaVersion === 3 && (!value.deterministicReviewComplete
+        || !['not_required', 'passed'].includes(value.semanticVerification?.disposition))))) {
     throw new Error('Completed form preparation contains unresolved or unsafe evidence');
   }
 }

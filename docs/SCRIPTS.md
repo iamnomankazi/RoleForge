@@ -258,6 +258,15 @@ Each URL gets a verdict: `active`, `expired`, or `uncertain` with a reason.
 
 Zero-token portal scanner. Runs configured local parsers for SSR/static career pages and hits ATS APIs (Greenhouse, Ashby, Lever) directly — no LLM tokens consumed. Reads `portals.yml`, writes one immutable canonical run under `output/scan-runs/<run-id>/`, then updates legacy pipeline/history compatibility outputs. Supply `--run-id <safe-id>` when an external workflow needs a predetermined identity; otherwise a collision-safe ID is generated. `--dry-run` writes nothing.
 
+Workday tenant entries may set `workday.detailLimit` to bound per-posting detail
+lookups (default 20, range 0–100; `0` disables detail lookups). Optional
+`workday.appliedFacets` maps facet names to explicit opaque string IDs copied
+from that tenant's Workday board. It is omitted by default, so no facets are
+sent unless configured. Validation allows up to 20 facets, 1–50 IDs per facet,
+and 200 characters per facet name or ID. Standard scans keep unknown dates and
+may enrich eligible undated postings before applying the usual date, location,
+and content filters again.
+
 `or:scan` and `scan:full` are specialized discovery entrypoints. Their output does not imply full standard complete-scan policy parity or final review authority. For a complete canonical review, use the standard scanner and the final-review-authority handoff workflow documented in `modes/scan.md`.
 
 ### Merging parallel discovery outputs
@@ -399,6 +408,39 @@ npm run scan
 
 ---
 
+## discover:ats
+
+Resolve a company list to public ATS boards that the existing provider layer can
+read. The resolver checks Greenhouse, Ashby, and Lever first, then supported
+long-tail providers. It counts a board only when its real provider fetch returns
+at least one valid job record; empty boards, malformed responses, refused
+redirects, and transient failures remain visible as unresolved results.
+
+```bash
+npm run discover:ats -- --in companies.yml
+npm run discover:ats -- --in companies.yml --vendors gh,ashby,lever
+npm run discover:ats -- Stripe Ramp Mollie
+npm run discover:ats -- --in companies.yml --write
+```
+
+The input file uses a `companies:` list with a required `name` and optional
+`slug`, `website`, or `workday` hint. Workday needs an HTTPS board URL or
+`workday: { tenant, site, instance? }`; omitting the instance checks only the
+eight configured common instances. An invalid explicit instance fails instead
+of falling back to those probes.
+
+Runs preview by default and prints confirmed entries under `pendingEntries`.
+Only `--write` modifies the user-owned `portals.yml`. Before writing, the
+command validates the current configuration, deduplicates names and canonical
+provider board identities across `tracked_companies` and `job_boards`, verifies
+the edited YAML, and uses an atomic write while preserving the existing text.
+Repeated writes are idempotent.
+
+**Exit codes:** `0` preview or write completed, `1` invalid arguments/input,
+invalid or unreadable portals configuration, or an atomic-write failure.
+
+---
+
 ## scan:full
 
 Reverse ATS discovery scanner. Where `scan.mjs` scans the companies you track in `portals.yml`, this inverts the direction: it walks public directories of companies per ATS (Greenhouse, Lever, Ashby, Workday) and surfaces fresh postings matching your `portals.yml` `title_filter` / `location_filter` — no manual company curation. Company directories come from the public [job-board-aggregator](https://github.com/Feashliaa/job-board-aggregator) dataset, cached in `data/cache/` for 24 hours.
@@ -416,6 +458,23 @@ node scan-ats-full.mjs --run-id <id> --md-out notes/scans
 ```
 
 **Exit codes:** `0` scan completed, `1` configuration error (no portals.yml, unknown `--ats` source) or fatal scan error.
+
+---
+
+## scan:interamt
+
+Runs the standalone Interamt search configured by `interamt_searches` in `portals.yml`. The command uses the normal title/location filters and writes an immutable canonical review run under `output/scan-runs/`; it does not append to `data/pipeline.md` or `data/scan-history.tsv`.
+
+```bash
+npm run scan:interamt -- --dry-run
+npm run scan:interamt -- --keyword "Softwareentwicklung"
+npm run scan:interamt -- --keyword "Informatik" --keyword "Data Engineering"
+npm run scan:interamt -- --help
+```
+
+Each `interamt_searches` entry uses `{ was: "..." }`. If no explicit searches are configured, the command falls back to `profile.target_roles.primary`. Optional request bounds live under `interamt`: `max_load_more` (0-50, default 10), `page_timeout_ms` (1-60000, default 15000), and `wait_timeout_ms` (1-30000, default 10000). Repeated `--keyword` values replace configured searches. Help and dry-run do not write scan output.
+
+**Exit codes:** `0` scan or dry-run completed, `1` invalid arguments/configuration or fatal scan error.
 
 ---
 

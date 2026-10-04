@@ -28,8 +28,8 @@ Open http://localhost:3000. The app reads the career-ops checkout it lives in
   write back through the core's own scripts.
 - **Explore** — the free reverse-ATS scan with an honest partial-dataset
   indicator, plus AI-assisted discovery (bring your own CLI/keys).
-- **Apply** — assisted form prefill with a hard rule inherited from the core:
-  **it never submits for you** — you always press the button.
+- **Apply** — the legacy web Apply executor is retired in Phase 1A. The route is
+  read-only and reports still expose their original posting links.
 - **Today / Analytics / CV / Config** — action queue, funnel, CV editing with
   preview, settings.
 
@@ -37,8 +37,14 @@ Open http://localhost:3000. The app reads the career-ops checkout it lives in
 
 - **Local-first:** the local web app runs entirely on your machine — no cloud,
   no account needed. Your CV and data stay in your own files.
-- **Never auto-submits:** the apply flow drafts and prefills; submitting is
-  always a human action.
+- **Legacy Apply is fail-closed:** `/api/apply/session`, `/api/apply/prefill`,
+  `/api/apply/fill`, and `/api/apply/drive` return a terminal disabled response
+  and cannot launch a browser,
+  mutate a form, upload files, invoke an AI driver, or perform a final action.
+- **Future authority seam:** any later web bridge must provide the exact
+  `batch_id`, exact `candidate_id`, immutable `manifest_scope_hash`, successful
+  preflight, and approved artifact hashes before handing off to the private root
+  application engine. That bridge is not implemented here.
 - **Additive:** the web is isolated from the core's packaging, CI and release
   automation. The CLI works exactly the same without it.
 

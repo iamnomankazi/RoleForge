@@ -1,45 +1,29 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
 
-// EchoJobs provider — board-wide public JSON feed of tech jobs aggregated from
-// company ATS boards (https://echojobs.io/api/jobs). Public, zero-auth, paginated
-// (`?page=N&per_page=M`). The broad feed is fetched so scan.mjs's title_filter
-// gates on the configured titles; pages are pulled until one comes back short or
-// the page cap is reached (default 3, override with `max_pages`).
+// EchoJobs provider — RETIRED (#2976, 2026-08-20). The board-wide public JSON
+// feed this provider read (https://echojobs.io/api/jobs) no longer serves
+// listings: the feed and robots.txt return a Vercel bot-protection checkpoint
+// (HTTP 429), and the site's robots.txt disallows /api. Career-Ops does not
+// work around bot protection, so this provider is retired rather than repaired.
 //
-// Each row's `url` is the ORIGINAL ATS posting (e.g. jobs.ashbyhq.com/…), so —
-// unlike the feed host — job URLs are not pinned to echojobs.io; only the feed
-// fetch is host-locked. The url is display-only and never server-fetched here.
+// Keep explicit `provider: echojobs` routing so an old portal entry fails with
+// a clear diagnostic instead of appearing unmatched. detect() remains
+// explicit-only, so an EchoJobs URL or name never automatically selects it.
+// fetch() throws before touching the HTTP context. Remove a legacy entry from
+// portals.yml after seeing the diagnostic.
 //
-// Wire in via a `job_boards:` entry with `provider: echojobs`.
+// normalizeEchojobsJob() remains unchanged for compatibility with historical
+// feed records and their scan provenance.
 
 const FEED_BASE = 'https://echojobs.io/api/jobs';
-const TRUSTED_HOST = 'echojobs.io';
-const PER_PAGE = 100;
-const DEFAULT_MAX_PAGES = 3;
-const MAX_PAGES_CAP = 50;
 
-/** @param {string} url */
-function assertEchojobsUrl(url) {
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch {
-    throw new Error(`echojobs: invalid URL: ${url}`);
-  }
-  if (parsed.protocol !== 'https:') throw new Error(`echojobs: URL must use HTTPS: ${url}`);
-  if (parsed.hostname !== TRUSTED_HOST) {
-    throw new Error(`echojobs: untrusted hostname "${parsed.hostname}" — must be ${TRUSTED_HOST}`);
-  }
-  return url;
-}
-
-/** Resolve the page cap: a positive integer `max_pages` on the entry, capped. */
-function resolveMaxPages(entry) {
-  const v = entry?.max_pages;
-  if (Number.isInteger(v) && v > 0) return Math.min(v, MAX_PAGES_CAP);
-  return DEFAULT_MAX_PAGES;
-}
+// Update tests/providers/echojobs.test.mjs if this diagnostic changes.
+const RETIRED_MESSAGE =
+  'echojobs: this feed is retired — echojobs.io/api/jobs is behind bot protection ' +
+  '(HTTP 429, Vercel checkpoint) and robots.txt disallows /api (#2976). ' +
+  'Career-Ops does not work around bot protection. Remove `provider: echojobs` from ' +
+  'portals.yml. See docs/SUPPORTED_JOB_BOARDS.md.';
 
 /**
  * Normalize a single EchoJobs feed item. Exported for tests.
@@ -107,28 +91,7 @@ export default {
     return entry?.provider === 'echojobs' ? { url: FEED_BASE } : null;
   },
 
-  async fetch(entry, ctx) {
-    const maxPages = resolveMaxPages(entry);
-    const fallbackCompany = entry?.name;
-    const out = [];
-
-    for (let page = 1; page <= maxPages; page++) {
-      // Validate the URL actually fetched (not just a constant) so the host pin
-      // is meaningful, then redirect:'error' blocks SSRF via server-side
-      // redirects — together they keep every page request on echojobs.io.
-      const url = assertEchojobsUrl(`${FEED_BASE}?per_page=${PER_PAGE}&page=${page}`);
-      const json = /** @type {any} */ (await ctx.fetchJson(url, { redirect: 'error' }));
-      if (!json || !Array.isArray(json.jobs)) {
-        throw new Error(
-          `echojobs: unexpected API response on page ${page} — expected { jobs: [...] }, got keys: [${json ? Object.keys(json).join(', ') : 'null'}]`,
-        );
-      }
-      for (const j of json.jobs) {
-        const normalized = normalizeEchojobsJob(j, fallbackCompany);
-        if (normalized) out.push(normalized);
-      }
-      if (json.jobs.length < PER_PAGE) break; // short page → last page reached
-    }
-    return out;
+  async fetch() {
+    throw new Error(RETIRED_MESSAGE);
   },
 };

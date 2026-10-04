@@ -571,6 +571,14 @@ search_queries:
 #   max_pages: 100         # optional page cap (20 jobs/page, default 100, max 1500) —
 #                          # raise it for a tenant with 2000+ open postings (a warning
 #                          # is logged if the cap truncates real results)
+#   # Optional detail lookup limit: 0 disables lookups; default is 20, max 100.
+#   workday:
+#     detailLimit: 20
+#     # Omit appliedFacets for the default unfiltered request. If needed, supply
+#     # only facet names and opaque IDs copied from this tenant's Workday board.
+#     # Each facet accepts 1-50 IDs; at most 20 facets, 200 characters per ID/name.
+#     # appliedFacets:
+#     #   "<facet-name>": ["<explicit-id>"]
 #   enabled: true
 #
 # - name: Example Avature Co
@@ -724,11 +732,6 @@ search_queries:
 #
 # - name: Jobicy
 #   provider: jobicy
-#   enabled: true
-#
-# - name: EchoJobs                        # tech jobs aggregated from company ATS boards
-#   provider: echojobs
-#   max_pages: 3                          # 100 jobs/page; raise for deeper coverage
 #   enabled: true
 #
 # - name: Hacker News "Who is hiring?"    # monthly "Ask HN: Who is hiring?" thread
@@ -1609,6 +1612,42 @@ tracked_companies:
     notes: "Istanbul. E-commerce marketplace (Doğuş Group)."
     enabled: false
 
+  # Tenant-scoped API adapters. Replace only with the tenant's real public
+  # URL or opaque identifier supplied by that employer; placeholders are .invalid.
+  # Eightfold URL format: https://<tenant>.eightfold.ai/careers[?domain=<brand>]
+  - name: Eightfold (configure tenant)
+    provider: eightfold
+    careers_url: https://tenant.invalid/careers
+    # domain: <optional brand/domain scope>
+    enabled: false
+    notes: "Disabled placeholder — configure the real Eightfold tenant host and optional domain before enabling."
+
+  # Oracle URL format: https://<tenant>.fa[.<region>][.ocs].oraclecloud[1-99].com/hcmUI/CandidateExperience/<lang>/sites/<site>/jobs
+  - name: Oracle Recruiting Cloud (configure tenant)
+    provider: oraclecloud
+    careers_url: https://tenant.invalid/hcmUI/CandidateExperience/en/sites/CX_1/jobs
+    # siteNumber: <site supplied by the tenant>; locationId: <optional numeric location>
+    enabled: false
+    notes: "Disabled placeholder — configure the real Oracle Candidate Experience URL before enabling."
+
+  # Jobvite XML feed: https://app.jobvite.com/CompanyJobs/Xml.aspx?c=<companyEId>
+  - name: Jobvite (configure tenant)
+    provider: jobvite
+    careers_url: https://tenant.invalid/jobs
+    # company_eid: <opaque companyEId from the current Jobvite board>
+    enabled: false
+    notes: "Disabled placeholder — configure the real Jobvite board URL or company_eid before enabling."
+
+  # iCIMS career sites are tenant-hosted under *.icims.com. A fallback host is
+  # attempted only when the primary host returns 404 on its first search page.
+  - name: iCIMS (configure tenant)
+    provider: icims
+    careers_url: https://tenant.invalid/jobs
+    fallback_urls:
+      - https://fallback.invalid/jobs
+    enabled: false
+    notes: "Disabled placeholder — replace with the employer's real public iCIMS URL before enabling."
+
 # ── Job Boards ────────────────────────────────────────────────────────
 # Multi-employer aggregators. Unlike tracked_companies (one entry = one employer),
 # job boards return offers from many companies in a single API call.
@@ -1664,6 +1703,80 @@ job_boards:
     careers_url: https://news.ycombinator.com/jobs
     enabled: true
     notes: "Current monthly Ask HN hiring thread; free-form postings continue through normal scanner filters."
+
+  # ── Phase 1B-1 board providers ───────────────────────────────────────
+  # Consider, Getro, and JOIN are tenant/company scoped. Keep placeholders
+  # disabled until a real public board URL/identifier is supplied; never copy
+  # an invented board or collection id into a runnable configuration.
+
+  - name: Consider (configure tenant board)
+    provider: consider
+    careers_url: https://example.consider.com/jobs
+    consider_board: "REPLACE_WITH_BOARD_ID"
+    consider_size: 100
+    enabled: false
+    notes: "Disabled placeholder — set the tenant careers_url and opaque consider_board id supplied by the board owner."
+
+  - name: Getro (configure collection)
+    provider: getro
+    careers_url: https://example.getro.com/jobs
+    getro_max_pages: 10
+    getro_max_age_days: 90
+    enabled: false
+    notes: "Disabled placeholder — replace careers_url with a real Getro-powered board; collection id is resolved from its public __NEXT_DATA__."
+
+  - name: Welcome to the Jungle
+    provider: wttj
+    careers_url: https://www.welcometothejungle.com/en/jobs
+    wttj:
+      # Broad raw queries intentionally widen retrieval; global title/location
+      # filters remain authoritative after provider normalization.
+      queries:
+        - "AI"
+        - "Machine Learning"
+        - "Automation"
+        - "Software Engineer"
+      max_hits: 100
+      max_pages: 3
+      max_jobs: 300
+    enabled: true
+    notes: "WTTJ public Algolia search; explicit queries broaden discovery while normal scanner filters decide relevance."
+
+  - name: JOIN (configure company)
+    provider: join
+    careers_url: https://join.com/companies/replace-with-company-slug
+    max_pages: 10
+    enabled: false
+    notes: "Disabled placeholder — JOIN exposes company-scoped SSR pages; replace the slug with a real company board before enabling."
+
+  - name: Joinup
+    provider: joinup
+    careers_url: https://joinup.ch/browse/jobs
+    enabled: true
+    notes: "Swiss startup board public SSR feed; normal scanner filters determine role and location fit."
+
+  - name: getManfred
+    provider: manfred
+    careers_url: https://www.getmanfred.com/ofertas-empleo
+    lang: EN
+    enabled: true
+    notes: "Board-wide getManfred catalogue (English feed); set lang: ES for Spanish listings."
+
+  - name: Flowxtra
+    provider: flowxtra
+    careers_url: https://app.flowxtra.com
+    max_pages: 3
+    max_jobs: 300
+    enabled: true
+    notes: "Flowxtra public jobs API with bounded pagination; normal scanner filters remain authoritative."
+
+  - name: Remotli
+    provider: remotli
+    careers_url: https://remotli.ch/jobs
+    max_pages: 3
+    max_jobs: 300
+    enabled: true
+    notes: "Remotli Swiss remote board; remote=all feed is bounded before normal title/location filtering."
 
   # ── SolidJobs (Polish market) ──────────────────────────────────────
   # Public API — no auth needed. Division in URL path, campaign=career-ops for tracking.
@@ -1732,6 +1845,21 @@ job_boards:
     enabled: false
     notes: "Polish tech job board — newest public postings"
 
+  # Public Belgium-wide VDAB board. Kept disabled until explicitly enabled;
+  # normal scanner title/location filters decide which postings are retained.
+  - name: VDAB
+    provider: vdab
+    careers_url: https://www.vdab.be/vindeenjob/vacatures
+    vdab:
+      keywords:
+        - software
+      days: 30
+      size: 100
+      fetchDetails: false
+      detailLimit: 25
+    enabled: false
+    notes: "Public VDAB board; enable explicitly and tune keywords for your search."
+
   # -- Indonesia job boards (provider: jobstreet / glints) --
 
   - name: Jobstreet Indonesia
@@ -1765,3 +1893,14 @@ job_boards:
   #   provider: higheredjobs
   #   cat_id: 68
   #   enabled: true
+
+# Interamt is a separate, explicit scan (`npm run scan:interamt`). It writes an
+# immutable canonical review run; it does not append to legacy pipeline/history.
+interamt_searches:
+  - was: Informatik
+
+# Interamt request limits are optional and bounded by scan-interamt.mjs.
+interamt:
+  max_load_more: 10
+  page_timeout_ms: 15000
+  wait_timeout_ms: 10000
