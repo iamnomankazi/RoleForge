@@ -17,6 +17,7 @@ import {
   classifyFormSnapshot,
   executeCandidate,
   isCompatibleDestination,
+  listingSnapshotConfirmsSafeEntry,
   parseExecutorArgs,
   preparationGateState,
   requisitionIdentity,
@@ -276,6 +277,34 @@ test('visible identity requires both manifest company and title', () => {
     documentTitle: 'Backend Engineer | Wolt Careers', headings: ['Backend Engineer'], bodyText: 'Join Wolt.',
   }, candidate).verified, true);
   assert.equal(verifyVisibleIdentity({ bodyText: 'Generic engineering jobs' }, candidate).verified, false);
+});
+
+test('compound company identity accepts only meaningful explicit slash aliases', () => {
+  const candidate = { company: '1KOMMA5° / Heartbeat AI', title: 'Energy Data Analyst' };
+  assert.equal(verifyVisibleIdentity({
+    documentTitle: 'Energy Data Analyst | Heartbeat AI', bodyText: 'Join Heartbeat AI.',
+  }, candidate).verified, true);
+  assert.equal(verifyVisibleIdentity({
+    documentTitle: 'Energy Data Analyst', bodyText: 'Join an AI group.',
+  }, candidate).verified, false);
+  assert.equal(verifyVisibleIdentity({
+    documentTitle: 'Different Role | 1KOMMA5°', bodyText: 'Join 1KOMMA5°.',
+  }, candidate).verified, false);
+});
+
+test('fresh executor DOM may confirm a delayed safe entry without changing scanner liveness', () => {
+  const listingUrl = 'https://www.linkedin.com/jobs/view/4449325899';
+  const candidate = { company: 'Fluxion', title: 'Data Scientist / AI Engineer' };
+  const snapshot = {
+    currentUrl: listingUrl,
+    documentTitle: 'Fluxion hiring Data Scientist / AI Engineer',
+    bodyText: 'Fluxion Data Scientist / AI Engineer',
+    formCount: 0,
+    fields: [],
+    controls: [{ tag: 'button', type: 'button', text: 'Apply', visible: true }],
+  };
+  assert.equal(listingSnapshotConfirmsSafeEntry(snapshot, candidate, { listingUrl }), true);
+  assert.equal(listingSnapshotConfirmsSafeEntry({ ...snapshot, bodyText: 'Other company', documentTitle: 'Other company' }, candidate, { listingUrl }), false);
 });
 
 test('listing pages, login gates, and actual forms remain distinct', () => {

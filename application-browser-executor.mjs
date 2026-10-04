@@ -238,14 +238,27 @@ export function verifyVisibleIdentity(snapshot, candidate) {
   ].filter(Boolean).join(' '));
   const company = normalized(candidate?.company);
   const title = normalized(candidate?.title);
-  const companyMatch = Boolean(company && visible.includes(company));
+  const genericCompanyTokens = new Set([
+    'ai', 'company', 'corporation', 'corp', 'group', 'gmbh', 'inc', 'limited', 'llc', 'ltd', 'oy', 'plc', 'sa', 'software', 'tech',
+  ]);
+  const companyAliases = inline(candidate?.company).split(/\s*\/\s*/)
+    .map((value) => normalized(value))
+    .filter((value) => {
+      if (!value || value.length < 4) return false;
+      const meaningfulTokens = value.split(' ').filter((token) => token.length >= 3 && !genericCompanyTokens.has(token));
+      return meaningfulTokens.length > 0;
+    });
+  const matchedCompany = [company, ...companyAliases].find((value) => value && visible.includes(value)) || '';
+  const companyMatch = Boolean(matchedCompany);
   const titleMatch = Boolean(title && visible.includes(title));
   return {
     companyMatch,
     titleMatch,
     verified: companyMatch && titleMatch,
     reason: companyMatch && titleMatch
-      ? 'visible company and title match the batch manifest'
+      ? matchedCompany === company
+        ? 'visible company and title match the batch manifest'
+        : 'visible compound-company alias and title match the batch manifest'
       : `identity mismatch: company=${companyMatch ? 'match' : 'missing'}, title=${titleMatch ? 'match' : 'missing'}`,
   };
 }
@@ -292,7 +305,7 @@ export function classifyFormSnapshot(snapshot) {
   };
 }
 
-const ENTRY_ACTION_LABEL = /^(?:apply|apply now|apply for (?:this|the) (?:job|role|position)|start (?:an? |your )?application|begin (?:an? |your )?application|continue to (?:the )?application|go to (?:the )?application|bewerben|jetzt bewerben|postuler)$/i;
+const ENTRY_ACTION_LABEL = /^(?:apply|apply now|apply for (?:this|the) (?:job|role|position)|start (?:an? |your )?application|begin (?:an? |your )?application|continue to (?:the )?application|go to (?:the )?application|bewerben|jetzt bewerben|ich bin interessiert|postuler)$/i;
 const FINAL_ACTION_LABEL = /\b(?:submit|send|complete|finish|confirm|finali[sz]e|review and apply|apply and submit)\b/i;
 const DANGEROUS_ACTION_PATH = /\b(?:submit|send|complete|finish|confirm|finali[sz]e)[-_ ]?(?:application)?\b/i;
 
@@ -369,6 +382,23 @@ export function classifyApplicationEntryAction(control, {
 export function selectSafeApplyContinuation(controls, scope = {}) {
   if (!Array.isArray(controls)) return null;
   return controls.find((control) => classifyApplicationEntryAction(control, scope).safe) || null;
+}
+
+export function listingSnapshotConfirmsSafeEntry(snapshot, candidate, {
+  listingUrl,
+  applyUrl = null,
+} = {}) {
+  const form = classifyFormSnapshot(snapshot);
+  const identity = verifyVisibleIdentity(snapshot, candidate);
+  if (!identity.verified) return false;
+  if (form.actualForm || form.loginRequired) return true;
+  return Boolean(selectSafeApplyContinuation(snapshot?.controls, {
+    listingUrl: snapshot?.currentUrl || listingUrl,
+    applyUrl,
+    currentState: 'listing_verified',
+    actualFormReached: false,
+    candidateFieldSignals: form.candidateFieldSignals,
+  }));
 }
 
 export function isCompatibleApplicationEntryDestination({
@@ -558,34 +588,68 @@ async function reacquireSafeContinuation(page, expected, scope) {
   throw new Error('Safe application continuation changed before click; refusing to navigate');
 }
 
-export async function followSafeContinuation(context, page, control, scope) {
-  const locator = await reacquireSafeContinuation(page, control, scope);
-  const before = new Set(context.pages());
-  const expectedDestination = predictedEntryDestination(control);
-  const popupPromise = context.waitForEvent('page', { timeout: 4_000 }).catch(() => null);
-  await locator.click({ timeout: 10_000 });
+async function inspectContinuationAttempt(context, page, before, beforeUrl, expectedDestination, popupPromise) {
   const popup = await popupPromise;
   const created = context.pages().filter((candidatePage) => !before.has(candidatePage));
   await Promise.all([page, ...created].map((candidatePage) => (
-    candidatePage.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => {})
+    candidatePage.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => {})
   )));
-  await Promise.all(created.map((candidatePage) => (
-    expectedDestination && sameUrlIgnoringHash(candidatePage.url(), expectedDestination)
-      ? null
-      : expectedDestination
-        ? candidatePage.waitForURL((url) => sameUrlIgnoringHash(url.toString(), expectedDestination), { timeout: 3_000 }).catch(() => {})
-        : null
-  )));
-  const destination = expectedDestination
-    ? [page, ...created].find((candidatePage) => sameUrlIgnoringHash(candidatePage.url(), expectedDestination))
-    || popup
-    || page
-    : popup || page;
-  await destination.waitForTimeout(1_500);
-  for (const extra of created) {
-    if (extra !== destination) await extra.close().catch(() => {});
+  await page.waitForTimeout(750).catch(() => {});
+  const pages = [page, ...created];
+  const snapshots = await Promise.all(pages.map(async (candidatePage) => {
+    try {
+      return { page: candidatePage, snapshot: await collectPageSnapshot(candidatePage) };
+    } catch {
+      return { page: candidatePage, snapshot: null };
+    }
+  }));
+  const exactDestination = expectedDestination
+    ? snapshots.find(({ snapshot }) => snapshot && sameUrlIgnoringHash(snapshot.currentUrl, expectedDestination))
+    : null;
+  const consequential = snapshots.find(({ snapshot, page: candidatePage }) => {
+    if (!snapshot) return false;
+    const form = classifyFormSnapshot(snapshot);
+    return form.actualForm
+      || form.loginRequired
+      || candidatePage !== page
+      || !sameUrlIgnoringHash(snapshot.currentUrl, beforeUrl);
+  });
+  const outcome = exactDestination || consequential || (popup ? snapshots.find((row) => row.page === popup) : null);
+  return { succeeded: Boolean(outcome), destination: outcome?.page || page, created };
+}
+
+export async function followSafeContinuation(context, page, control, scope) {
+  const beforeUrl = page.url();
+  const expectedDestination = predictedEntryDestination(control);
+  let lastError = null;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const locator = await reacquireSafeContinuation(page, control, scope);
+    await locator.scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => {});
+    await locator.waitFor({ state: 'visible', timeout: 5_000 }).catch(() => {});
+    const before = new Set(context.pages());
+    const popupPromise = context.waitForEvent('page', { timeout: 1_500 }).catch(() => null);
+    try {
+      await locator.click({ timeout: 10_000 });
+    } catch (error) {
+      lastError = error;
+    }
+    const outcome = await inspectContinuationAttempt(
+      context, page, before, beforeUrl, expectedDestination, popupPromise,
+    );
+    if (outcome.succeeded) {
+      for (const extra of outcome.created) {
+        if (extra !== outcome.destination) await extra.close().catch(() => {});
+      }
+      await outcome.destination.waitForTimeout(750).catch(() => {});
+      return outcome.destination;
+    }
+    for (const extra of outcome.created) await extra.close().catch(() => {});
   }
-  return destination;
+  const error = new Error(
+    `Verified safe application-entry control could not be operated after 2 bounded attempts${lastError ? `: ${inline(lastError.message).slice(0, 220)}` : ''}`,
+  );
+  error.code = 'application_entry_interaction_failed';
+  throw error;
 }
 
 function canonicalVisitedUrl(value) {
@@ -657,7 +721,23 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
     usedActions.add(actionKey);
 
     const sourceUrl = snapshot.currentUrl;
-    page = await followSafeContinuation(context, page, continuation, scope);
+    try {
+      page = await followSafeContinuation(context, page, continuation, scope);
+    } catch (error) {
+      if (error?.code === 'application_entry_interaction_failed') {
+        return {
+          page,
+          snapshot,
+          form,
+          identity,
+          compatible,
+          hops,
+          manualReviewRequired: true,
+          reason: inline(error.message),
+        };
+      }
+      throw error;
+    }
     snapshot = await collectPageSnapshot(page);
     form = classifyFormSnapshot(snapshot);
     identity = verifyVisibleIdentity(snapshot, candidate);
@@ -856,6 +936,10 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
     latestUrl = listingCurrentUrl;
     const earlyForm = classifyFormSnapshot(listingSnapshot);
     const listingIdentity = verifyVisibleIdentity(listingSnapshot, contract.candidate);
+    const domConfirmsSafeEntry = listingSnapshotConfirmsSafeEntry(listingSnapshot, contract.candidate, {
+      listingUrl: listingCurrentUrl,
+      applyUrl: contract.candidate.applyUrl,
+    });
     const listingDestinationCompatible = isCompatibleDestination({
       listingUrl,
       applyUrl: contract.candidate.applyUrl,
@@ -894,7 +978,7 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
         );
       return { batchId: contract.manifest.batchId, candidate: listingUrl, state: finalState.state };
     }
-    if (browserLiveness.result !== 'active') {
+    if (browserLiveness.result !== 'active' && !domConfirmsSafeEntry) {
       finalState = recordTransition(
         contract.manifestPath,
         listingUrl,
@@ -923,7 +1007,7 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
       listingUrl,
       'listing_verified',
       listingCurrentUrl,
-      `Fresh liveness active; ${listingIdentity.reason}`,
+      `${browserLiveness.result === 'active' ? 'Fresh liveness active' : 'Fresh executor DOM confirmed a safe application entry'}; ${listingIdentity.reason}`,
       'not_opened',
     );
 
@@ -988,7 +1072,7 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
         finalState = recordTransition(
           contract.manifestPath,
           listingUrl,
-          'blocked',
+          entryFlow.manualReviewRequired ? 'review_required' : 'blocked',
           formCurrentUrl,
           entryFlow.reason,
           'listing_verified',
@@ -1242,7 +1326,11 @@ async function executePreparationResume(options, contract, { root, executionLock
     const live = await (dependencies.checkUrlLiveness || checkUrlLiveness)(listingPage, listingUrl);
     const listingSnapshot = await collectPageSnapshot(listingPage);
     const identity = verifyVisibleIdentity(listingSnapshot, contract.candidate);
-    if (live.result !== 'active' || !identity.verified) {
+    const domConfirmsSafeEntry = listingSnapshotConfirmsSafeEntry(listingSnapshot, contract.candidate, {
+      listingUrl,
+      applyUrl: contract.candidate.applyUrl,
+    });
+    if ((live.result !== 'active' && !domConfirmsSafeEntry) || !identity.verified) {
       const state = transition(
         contract.manifestPath, contract.candidate.candidate_id, 'blocked', listingPage.url(),
         `Preparation resume listing revalidation failed: ${live.reason}; ${identity.reason}`,
@@ -1259,6 +1347,16 @@ async function executePreparationResume(options, contract, { root, executionLock
     );
     const page = entryFlow.page;
     if (!entryFlow.form.actualForm || !entryFlow.compatible) {
+      if (entryFlow.manualReviewRequired && entryFlow.compatible) {
+        if (fromState === 'review_required') {
+          return { batchId: contract.manifest.batchId, candidate: listingUrl, state: fromState };
+        }
+        const state = transition(
+          contract.manifestPath, contract.candidate.candidate_id, 'review_required', page.url(),
+          entryFlow.reason, fromState, executionLock.token, null, null, root,
+        );
+        return { batchId: contract.manifest.batchId, candidate: listingUrl, state: state.state };
+      }
       throw new Error(`Fresh resume did not reach the exact verified application form: ${entryFlow.reason}; ${entryFlow.identity.reason}`);
     }
     if (dependencies.onCandidatePage) await dependencies.onCandidatePage(page, contract);

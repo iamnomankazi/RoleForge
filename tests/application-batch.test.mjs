@@ -465,6 +465,34 @@ test('state schema carries IDs and rejects invalid transitions and Applied statu
   assert.equal(state.candidates[0].history.at(-1).to, 'listing_verified');
 }));
 
+test('positively identified entry interaction failures may route to review_required', () => withFixture((fixture) => {
+  const fromListing = createOne(fixture, 'entry-review-from-listing');
+  const listingCandidate = bindCvAndConfirm(fixture, fromListing);
+  executorTransition(fixture, fromListing, listingCandidate, 'listing_verified', {
+    currentUrl: SELECTED_SIX[0], reason: 'identity and safe entry control verified',
+  });
+  executorTransition(fixture, fromListing, listingCandidate, 'review_required', {
+    currentUrl: SELECTED_SIX[0], reason: 'bounded safe entry interaction needs manual review',
+  });
+  assert.equal(loadBatchState(fromListing.manifestPath, { root: fixture.root }).state.candidates[0].state, 'review_required');
+
+  const fromBlocked = createApplicationBatch({
+    root: fixture.root,
+    sourceRunId: RUN_ID,
+    batchId: 'entry-review-from-blocked',
+    selectedCandidateIds: [fixture.candidates[2].candidate_id],
+    now: new Date('2026-07-01T08:00:00.000Z'),
+  });
+  const blockedCandidate = bindCvAndConfirm(fixture, fromBlocked);
+  executorTransition(fixture, fromBlocked, blockedCandidate, 'blocked', {
+    currentUrl: SELECTED_SIX[1], reason: 'legacy entry interaction blocker',
+  });
+  executorTransition(fixture, fromBlocked, blockedCandidate, 'review_required', {
+    currentUrl: SELECTED_SIX[1], reason: 'fresh safe entry control positively identified',
+  });
+  assert.equal(loadBatchState(fromBlocked.manifestPath, { root: fixture.root }).state.candidates[0].state, 'review_required');
+}));
+
 test('Phase 1 manifest and old scan run normalize without rewriting immutable files', () => withFixture((fixture) => {
   const legacyRun = 'legacy-scan-run';
   const legacyUrl = 'https://jobs.example.test/legacy/42?utm_source=old';

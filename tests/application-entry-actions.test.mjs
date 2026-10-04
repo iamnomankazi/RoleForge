@@ -83,6 +83,117 @@ test('listing-page non-submitting button labelled Apply for this job opens the f
   });
 });
 
+test('StepStone harmonised entry label is accepted only as a non-submit listing control', () => {
+  const listingUrl = 'https://www.stepstone.de/stellenangebote--role--14207605-inline.html';
+  const control = { tag: 'button', type: 'button', text: 'Ich bin interessiert', visible: true };
+  assert.equal(classifyApplicationEntryAction(control, {
+    listingUrl, currentState: 'listing_verified', actualFormReached: false, candidateFieldSignals: 0,
+  }).safe, true);
+  assert.equal(classifyApplicationEntryAction({ ...control, type: 'submit' }, {
+    listingUrl, currentState: 'listing_verified', actualFormReached: false, candidateFieldSignals: 0,
+  }).safe, false);
+});
+
+test('entry allowlist remains exact while semantic final actions stay forbidden', () => {
+  const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
+  const classify = (text, type = 'button') => classifyApplicationEntryAction({
+    tag: 'button', type, text, visible: true,
+  }, {
+    listingUrl, currentState: 'listing_verified', actualFormReached: false, candidateFieldSignals: 0,
+  }).safe;
+  for (const safe of ['Apply', 'Apply now', 'Apply for this job', 'Jetzt bewerben']) assert.equal(classify(safe), true, safe);
+  for (const unsafe of ['Submit application', 'Apply and submit', 'Review and apply']) assert.equal(classify(unsafe), false, unsafe);
+  assert.equal(classify('Apply', 'submit'), false);
+});
+
+function clickFailureFixture({ consequentialOnClick = null } = {}) {
+  const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
+  const formUrl = `${listingUrl}/application`;
+  const control = { tag: 'button', type: 'button', text: 'Apply', visible: true };
+  let clicks = 0;
+  let currentUrl = listingUrl;
+  let evaluatedSnapshot = {
+    documentTitle: 'Acme Data Engineer', headings: ['Acme Data Engineer'], bodyText: 'Acme Data Engineer',
+    formCount: 0, fields: [], controls: [control],
+  };
+  const locator = {
+    evaluate: async () => control,
+    scrollIntoViewIfNeeded: async () => {},
+    waitFor: async () => {},
+    click: async () => {
+      clicks += 1;
+      if (clicks === consequentialOnClick) {
+        currentUrl = formUrl;
+        evaluatedSnapshot = {
+          documentTitle: 'Acme Data Engineer application', headings: ['Acme Data Engineer'], bodyText: 'Application',
+          formCount: 1,
+          fields: [
+            { type: 'text', text: 'First name', visible: true },
+            { type: 'email', text: 'Email', visible: true },
+            { type: 'file', text: 'Resume', visible: true },
+          ],
+          controls: [{ tag: 'button', type: 'submit', text: 'Submit application', visible: true }],
+        };
+      }
+      throw new Error('simulated click timeout');
+    },
+  };
+  const page = {
+    url: () => currentUrl,
+    locator: () => ({ count: async () => 1, nth: () => locator }),
+    evaluate: async () => evaluatedSnapshot,
+    waitForLoadState: async () => {},
+    waitForTimeout: async () => {},
+  };
+  const context = {
+    pages: () => [page],
+    waitForEvent: async () => null,
+  };
+  return { context, page, listingUrl, control, getClicks: () => clicks, getSnapshot: () => ({ ...evaluatedSnapshot, currentUrl }) };
+}
+
+test('entry click timeout is inspected before retry and preserves a form reached despite the error', async () => {
+  const fixture = clickFailureFixture({ consequentialOnClick: 1 });
+  const result = await followSafeApplicationEntryFlow(
+    fixture.context, fixture.page, fixture.getSnapshot(), CANDIDATE, { listingUrl: fixture.listingUrl },
+  );
+  assert.equal(result.form.actualForm, true);
+  assert.equal(fixture.getClicks(), 1);
+  assert.equal(result.snapshot.controls[0].text, 'Submit application');
+});
+
+test('a second freshly revalidated attempt may succeed after the first has no effect', async () => {
+  const fixture = clickFailureFixture({ consequentialOnClick: 2 });
+  const result = await followSafeApplicationEntryFlow(
+    fixture.context, fixture.page, fixture.getSnapshot(), CANDIDATE, { listingUrl: fixture.listingUrl },
+  );
+  assert.equal(result.form.actualForm, true);
+  assert.equal(fixture.getClicks(), 2);
+});
+
+test('verified safe entry interaction failure is bounded to two attempts and requests manual review', async () => {
+  const fixture = clickFailureFixture();
+  const result = await followSafeApplicationEntryFlow(
+    fixture.context, fixture.page, fixture.getSnapshot(), CANDIDATE, { listingUrl: fixture.listingUrl },
+  );
+  assert.equal(fixture.getClicks(), 2);
+  assert.equal(result.manualReviewRequired, true);
+  assert.match(result.reason, /2 bounded attempts/);
+  assert.equal(result.form.actualForm, false);
+});
+
+test('unsafe final action never enters interaction retry handling', async () => {
+  const fixture = clickFailureFixture();
+  const snapshot = fixture.getSnapshot();
+  snapshot.controls = [{ tag: 'button', type: 'button', text: 'Submit application', visible: true }];
+  const result = await followSafeApplicationEntryFlow(
+    fixture.context, fixture.page, snapshot, CANDIDATE, { listingUrl: fixture.listingUrl },
+  );
+  assert.equal(fixture.getClicks(), 0);
+  assert.equal(result.manualReviewRequired, undefined);
+  assert.match(result.reason, /No safe listing-page/);
+});
+
 test('company listing may use one verified known-ATS intermediate before the actual form', async () => {
   const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
   const atsListingUrl = 'https://jobs.smartrecruiters.com/Acme/123-data-engineer';
