@@ -4,8 +4,9 @@
  * Phase 2 browser executor for exactly one hash-verified batch candidate.
  *
  * It verifies liveness and identity, follows at most one safe listing-to-form
- * continuation, and stops at the actual form. It never fills or submits the
- * form and never reads or writes the application tracker.
+ * continuation, and operates only on the verified form. It may fill supported
+ * fields, but never activates the semantic final submission action. User review
+ * and manual submission remain required. It never reads or writes the tracker.
  */
 
 import { randomBytes } from 'node:crypto';
