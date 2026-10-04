@@ -29,7 +29,8 @@ import { readFileSync, existsSync, readdirSync, mkdtempSync, mkdirSync, writeFil
 import { join, dirname, delimiter } from 'path';
 import { tmpdir } from 'os';
 import { fileURLToPath, pathToFileURL } from 'url';
-import { pass, fail, warn, run, fileExists, finish, ROOT, QUICK, NODE, getBash, toBashPath } from './tests/helpers.mjs';
+import { pass, fail, warn, run, formatRunFailure, fileExists, finish, ROOT, QUICK, NODE, getBash, toBashPath } from './tests/helpers.mjs';
+import { validateDiscoveredTestSources, parseTapSummary, discoveredRunFailed } from './test-runner-core.mjs';
 
 /**
  * Read a repo-relative text file as UTF-8.
@@ -79,6 +80,15 @@ async function runDiscovered(filter = null) {
     process.exit(1);
   }
   const relativeFiles = files.map((file) => file.slice(ROOT.length + 1).replace(/\\/g, '/'));
+  const violations = validateDiscoveredTestSources(files, (file) => readFileSync(file, 'utf-8'));
+  if (violations.length > 0) {
+    for (const violation of violations) {
+      const relative = violation.file.slice(ROOT.length + 1).replace(/\\/g, '/');
+      console.log(`  ❌ ${relative} may terminate the shared node:test child via ${violation.mechanism}`);
+    }
+    console.log('  Use node:test assertions/hooks and let the runner own the process exit.');
+    process.exit(1);
+  }
   console.log(`\nDiscovered node:test files (${files.length}):`);
   for (const file of relativeFiles) console.log(`  - ${file}`);
   const output = [];
@@ -98,19 +108,13 @@ async function runDiscovered(filter = null) {
     child.once('exit', (code) => resolveExit(code ?? 1));
   });
   const tap = output.join('');
-  const metric = (name) => Number([...tap.matchAll(new RegExp(`^# ${name} (\\d+)$`, 'gm'))].at(-1)?.[1] || 0);
-  const summary = {
-    files: files.length,
-    cases: metric('tests'),
-    passed: metric('pass'),
-    failed: metric('fail'),
-    skipped: metric('skipped'),
-    cancelled: metric('cancelled'),
-    todo: metric('todo'),
-    exitCode,
-  };
+  const parsed = parseTapSummary(tap, { files: files.length, exitCode });
+  const summary = parsed.summary;
   console.log(`\nnode:test summary: ${summary.files} files; ${summary.cases} cases; ${summary.passed} passed; ${summary.failed} failed; ${summary.skipped} skipped; ${summary.cancelled} cancelled; ${summary.todo} todo; exit ${summary.exitCode}`);
-  if (exitCode !== 0 || summary.failed > 0) fail('node:test discovered suite failed');
+  if (!parsed.complete) {
+    fail(`node:test summary incomplete or inconsistent (missing: ${parsed.missing.join(', ') || 'none'}; accounted: ${parsed.accounted ?? 'unknown'}; cases: ${summary.cases ?? 'missing'})`);
+  }
+  if (discoveredRunFailed(parsed)) fail('node:test discovered suite failed');
   return summary;
 }
 
@@ -194,7 +198,7 @@ for (const { name, allowFail } of scripts) {
   } else if (allowFail) {
     warn(`${name} exited with error (expected without user data)`);
   } else {
-    fail(`${name} crashed`);
+    fail(`${name} crashed${formatRunFailure()}`);
   }
 }
 

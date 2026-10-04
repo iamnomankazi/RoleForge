@@ -48,6 +48,7 @@ function runScript(script, args, sandbox) {
     CAREER_OPS_TRACKER: sandbox.tracker,
     CAREER_OPS_ADDITIONS: sandbox.additions,
     CAREER_OPS_TRACKER_LOCK: sandbox.lock,
+    CAREER_OPS_REPORTS: sandbox.reports,
   };
   try {
     const stdout = execFileSync(NODE, [join(ROOT, script), ...args], {
@@ -75,12 +76,14 @@ function makeSandbox(trackerContent, additions = {}) {
   const tracker = join(dir, 'applications.md');
   const additionsDir = join(dir, 'tracker-additions');
   const lock = join(dir, 'lock');
+  const reports = join(dir, 'reports');
   mkdirSync(additionsDir, { recursive: true });
+  mkdirSync(reports, { recursive: true });
   writeFileSync(tracker, trackerContent);
   for (const [name, content] of Object.entries(additions)) {
     writeFileSync(join(additionsDir, name), content);
   }
-  return { dir, tracker, additions: additionsDir, lock };
+  return { dir, tracker, additions: additionsDir, lock, reports };
 }
 
 // Return the data rows of a tracker (pipe lines that aren't header/separator).

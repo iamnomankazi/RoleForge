@@ -1,7 +1,7 @@
 // tests/helpers.mjs — shared assertion helpers + counters for the test suite.
 // Moved verbatim from test-all.mjs (issue #1440); no framework by design:
 // the suite must run on a fresh clone with only Node.
-import { execSync, execFileSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -75,27 +75,67 @@ export function finish({ nodeSummary = null, partial = false } = {}) {
   }
 }
 
-/**
- * Run a shell command or executable and return trimmed stdout on success.
- *
- * Array-form arguments use execFileSync to avoid shell parsing. String-only
- * commands use execSync for existing simple checks. Failures return null so the
- * caller can decide whether to count the result as a failure or warning.
- *
- * @param {string} cmd - Command or executable to run.
- * @param {string[]} [args=[]] - Optional argument vector for execFileSync.
- * @param {object} [opts={}] - Extra child_process options.
- * @returns {string|null} Trimmed stdout, or null when the command fails.
- */
+const SCOOP_ROOTS = [
+  process.env.SCOOP,
+  process.env.USERPROFILE ? join(process.env.USERPROFILE, 'scoop') : null,
+].filter(Boolean);
+
+const WINDOWS_BASH_CANDIDATES = [
+  'C:\\Program Files\\Git\\bin\\bash.exe',
+  'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
+  ...SCOOP_ROOTS.flatMap((root) => [
+    join(root, 'apps', 'git', 'current', 'bin', 'bash.exe'),
+    join(root, 'apps', 'git', 'current', 'usr', 'bin', 'bash.exe'),
+  ]),
+];
+
+const WINDOWS_CYGPATH_CANDIDATES = [
+  'C:\\Program Files\\Git\\usr\\bin\\cygpath.exe',
+  ...SCOOP_ROOTS.map((root) => join(root, 'apps', 'git', 'current', 'usr', 'bin', 'cygpath.exe')),
+];
+
+function resolveAllowedExecutable(cmd) {
+  if (cmd === process.execPath || cmd === 'node') return process.execPath;
+  if (cmd === 'bash' || cmd === 'git' || cmd === 'go' || cmd === 'wsl') return cmd;
+  if (WINDOWS_BASH_CANDIDATES.includes(cmd)) return cmd;
+  throw new Error(`run(): executable not in the test-helper allowlist: ${cmd}`);
+}
+
+let lastFailure = null;
+
+/** Run an allowlisted executable with an argument vector. */
 export function run(cmd, args = [], opts = {}) {
+  lastFailure = null;
+  const exe = resolveAllowedExecutable(cmd);
   try {
-    if (Array.isArray(args) && args.length > 0) {
-      return execFileSync(cmd, args, { cwd: ROOT, encoding: 'utf-8', timeout: 30000, ...opts }).trim();
-    }
-    return execSync(cmd, { cwd: ROOT, encoding: 'utf-8', timeout: 30000, ...opts }).trim();
+    return execFileSync(exe, args, { cwd: ROOT, encoding: 'utf-8', timeout: 30000, ...opts }).trim();
   } catch (e) {
+    lastFailure = {
+      status: e?.status ?? null,
+      signal: e?.signal ?? null,
+      stdout: e?.stdout == null ? '' : String(e.stdout),
+      stderr: e?.stderr == null ? '' : String(e.stderr),
+    };
+    warnFallbackShell(exe);
     return null;
   }
+}
+
+export function lastRunFailure() { return lastFailure; }
+
+export function formatRunFailure(maxChars = 2000) {
+  if (!lastFailure) return '';
+  const clip = (value) => {
+    const text = String(value ?? '').trim();
+    if (!text) return '';
+    return text.length > maxChars ? `${text.slice(0, maxChars)}\n    ... (${text.length - maxChars} more chars)` : text;
+  };
+  const parts = [` (exit ${lastFailure.status ?? 'null'}${lastFailure.signal ? `, signal ${lastFailure.signal}` : ''})`];
+  const out = clip(lastFailure.stdout);
+  const err = clip(lastFailure.stderr);
+  if (out) parts.push(`\n    stdout: ${out.replace(/\n/g, '\n    ')}`);
+  if (err) parts.push(`\n    stderr: ${err.replace(/\n/g, '\n    ')}`);
+  return parts.join('');
 }
 
 /**
@@ -107,6 +147,24 @@ export function run(cmd, args = [], opts = {}) {
 export function fileExists(path) { return existsSync(join(ROOT, path)); }
 
 let bashCache = null;
+let bashSourceCache = null;
+
+export function bashSource() { return bashSourceCache; }
+
+const FALLBACK_BASH_SOURCES = new Set(['wsl', 'path', 'unresolved']);
+let warnedFallbackShell = false;
+
+function warnFallbackShell(exe) {
+  if (warnedFallbackShell || bashCache === null || exe !== bashCache || !FALLBACK_BASH_SOURCES.has(bashSourceCache)) return;
+  warnedFallbackShell = true;
+  const where = {
+    wsl: 'WSL bash (a different OS with its own PATH)',
+    path: 'bash from PATH (provenance unknown)',
+    unresolved: 'bash, which no probe could confirm exists',
+  }[bashSourceCache];
+  console.error(`    [shell] failed command used ${where}; Git Bash was not found at a known location.`);
+  console.error('            Windows node and PATH-injected test binaries may be unavailable in that shell.');
+}
 
 /**
  * Resolve the bash executable to use for shell-script checks, lazily.
@@ -121,22 +179,25 @@ let bashCache = null;
  */
 export function getBash() {
   if (bashCache !== null) return bashCache;
-  if (process.platform !== 'win32') return (bashCache = 'bash');
-  try {
-    execSync('wsl -e bash -c "true"', { stdio: 'ignore' });
-    return (bashCache = 'bash');
-  } catch {}
-  const candidates = [
-    'C:\\Program Files\\Git\\bin\\bash.exe',
-    'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
-    'bash'
-  ];
-  for (const cmd of candidates) {
+  if (process.platform !== 'win32') { bashSourceCache = 'posix'; return (bashCache = 'bash'); }
+  for (const cmd of WINDOWS_BASH_CANDIDATES) {
     try {
-      execSync(`"${cmd}" -c "true"`, { stdio: 'ignore' });
+      execFileSync(cmd, ['-c', 'true'], { stdio: 'ignore' });
+      bashSourceCache = 'git-bash';
       return (bashCache = cmd);
     } catch {}
   }
+  try {
+    execFileSync('wsl', ['-e', 'bash', '-c', 'true'], { stdio: 'ignore' });
+    bashSourceCache = 'wsl';
+    return (bashCache = 'bash');
+  } catch {}
+  try {
+    execFileSync('bash', ['-c', 'true'], { stdio: 'ignore' });
+    bashSourceCache = 'path';
+    return (bashCache = 'bash');
+  } catch {}
+  bashSourceCache = 'unresolved';
   return (bashCache = 'bash');
 }
 
@@ -154,7 +215,7 @@ export function toBashPath(wpath) {
   try {
     // execFileSync: the path is passed as an argv element, never interpolated
     // into a shell string, so quotes/spaces in it can't be re-parsed.
-    const cygpathCmd = existsSync('C:\\Program Files\\Git\\usr\\bin\\cygpath.exe') ? 'C:\\Program Files\\Git\\usr\\bin\\cygpath.exe' : 'cygpath';
+    const cygpathCmd = WINDOWS_CYGPATH_CANDIDATES.find((candidate) => existsSync(candidate)) || 'cygpath';
     const out = execFileSync(cygpathCmd, ['-u', forwardSlashed], { stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim();
     if (out) return out;
   } catch {}

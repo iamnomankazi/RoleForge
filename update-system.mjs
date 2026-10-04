@@ -209,6 +209,7 @@ const SYSTEM_PATHS = [
   'openai-eval.mjs',
   'openrouter-runner.mjs',
   'test-all.mjs',
+  'test-runner-core.mjs',
   'detect-reposts.test.mjs',
   'test-salary-filter.mjs',
   'test-trust-validator.mjs',
