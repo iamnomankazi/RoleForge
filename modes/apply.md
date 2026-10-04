@@ -1,6 +1,8 @@
 # Mode: apply — Live Application Assistant
 
-> Apply `voice-dna.md` (if present) to free-text answers and cover-letter fields — full guardrail, conversational voice included (Tier 1 + Tier 2). See `_shared.md` → Voice DNA.
+> Apply `voice-dna.md` (if present) to free-text answers and cover-letter fields
+> as style guidance only. It never establishes facts. See `_shared.md` → Voice
+> DNA and the narrative evidence boundary below.
 
 Interactive drafting mode for a candidate already selected in an immutable
 application batch. Browser navigation belongs only to the batch executor's
@@ -149,7 +151,8 @@ manifest candidate. Never inspect or reuse a pre-existing user tab.
 1. Extract company name and role title from the page
 2. Search in `reports/` by company name (case-insensitive grep)
 3. If there is a match → load the full report
-4. If there is a Section H or `## Application Answers` → load previous answers as a base
+4. If there is a Section H or `## Application Answers` → treat previous answers
+   as draft wording only; do not treat their claims as evidence
 5. If there is NO match → notify and offer to run a quick auto-pipeline
 
 ## Step 3 — Detect changes in the role
@@ -170,8 +173,11 @@ Identify ALL visible questions:
 - Upload fields (resume, cover letter PDF)
 
 Classify each question:
-- **Already answered in Section H or `## Application Answers`** → adapt the existing response
-- **New question** → generate response from the report + cv.md
+- **Already answered in Section H or `## Application Answers`** → reuse only as
+  draft wording after every claim is re-established from the current factual
+  sources
+- **New question** → generate from current factual provenance; use the report
+  and JD only as context
 
 For each field, preserve the application form contract:
 - `field_type`: `text`, `textarea`, `select`, `radio`, `checkbox`, `number`, `file`, or `unknown`
@@ -187,13 +193,24 @@ Never invent answers for legal, demographic, work-authorization, visa/sponsorshi
 
 For each question, generate the response following:
 
-1. **Report context**: Use proof points from block B, STAR stories from block F
-2. **Previous Section H / Application Answers**: If a draft or final response exists, use it as a base and refine
-3. **"I'm choosing you" tone**: Same auto-pipeline framework
-4. **Specificity**: Reference something specific from the JD visible on screen
-5. **career-ops proof point**: Include in "Additional info" if there is a field for it
-6. **Recruiter-side risk map**: Use `modes/heuristics/recruiter-side.md` to identify what doubt the question is trying to resolve (motivation, stack fit, logistics, comp, work-auth, availability, seniority) and answer that doubt directly.
-7. **Disclosure discipline**: Answer logistics questions truthfully when asked, but do not volunteer sensitive or HR-only details in unrelated motivation/fit answers.
+1. **Facts:** Establish candidate claims only from exact `cv.md` excerpts or
+   scalar `config/profile.yml` values. Configured narrative evidence must bind
+   to one of those sources with an allowed locator and current hashes.
+2. **Context/rules:** Use the JD, candidate metadata, `article-digest.md`,
+   `modes/_profile.md`, and report content to choose relevance or constraints,
+   never to establish a new fact in automated form filling.
+3. **Style:** Use `voice-dna.md` only to shape how already-grounded facts read.
+4. **Draft/reuse:** Answer-bank content, report answers, and prior generated,
+   reviewed, filled, or approved prose remain drafts. Reuse requires exact
+   candidate/question identity, versioned non-empty provenance, matching answer
+   and current source hashes, and deterministic claim validation.
+5. **Tone:** Use the "I'm choosing you" framework only after grounding.
+6. **Specificity:** Reference something specific from the JD as role context,
+   not as a claim about the candidate.
+7. **Recruiter-side risk map:** Use `modes/heuristics/recruiter-side.md` to
+   identify the doubt being resolved and answer it from grounded evidence.
+8. **Disclosure discipline:** Answer logistics questions truthfully when asked,
+   but do not volunteer sensitive or HR-only details in unrelated answers.
 
 **Output format:**
 

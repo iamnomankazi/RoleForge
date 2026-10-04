@@ -108,6 +108,44 @@ Current fail-closed limitations include inaccessible shadow/canvas controls,
 native OS dialogs, demographic/legal declarations, and multi-step Next/Save
 actions whose non-final semantics cannot be proven. These require manual review.
 
+## Narrative evidence and provenance
+
+Automated application narratives use a strict evidence hierarchy:
+
+1. **Factual sources:** exact excerpts from `cv.md` and scalar values from
+   `config/profile.yml`. A configured `application_form.narrative_evidence`
+   entry is factual only when every sentence resolves through an allowed
+   `sourceType` plus locator to one of those current files.
+2. **Context/rules:** the JD, candidate metadata, `article-digest.md`, and
+   `modes/_profile.md`. These can select a topic or constrain wording, but they
+   do not establish a candidate fact in the automated form runtime.
+3. **Style:** `voice-dna.md` controls presentation only. It cannot authorize a
+   claim.
+4. **Draft/reuse:** the application answer bank, report answers, and prior form
+   answers are drafts. Generated, filled, reviewed, or approved prose is not a
+   factual source merely because it was used before.
+
+An evidence entry uses a stable ID and explicit provenance, for example:
+
+```yaml
+application_form:
+  narrative_evidence:
+    - id: warehouse-project
+      topics: [data_engineering, python_sql]
+      provenance:
+        - sourceType: cv
+          locator: lines:42-44
+        - sourceType: structured_profile
+          locator: current_status.summary
+```
+
+Arbitrary paths, traversal, non-factual source types, unresolved locators, and
+legacy `text`/`evidence_refs` entries fail closed for that narrative field. The
+result is `review_required`; unrelated deterministic fields may still be
+prepared. Stored answer reuse additionally requires the exact candidate and
+normalized question, a matching answer hash, non-empty versioned provenance,
+and unchanged current source/evidence hashes.
+
 ## ATS patterns
 
 Repository-controlled fixtures cover Greenhouse-style, Lever-style,
