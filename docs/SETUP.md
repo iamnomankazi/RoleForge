@@ -16,6 +16,8 @@ codex
 
 The setup check identifies missing `cv.md`, `config/profile.yml`, `modes/_profile.md`, and `portals.yml`. Ask your agent to guide onboarding from the example/template files. Store your personal details only in the user layer described in [DATA_CONTRACT.md](../DATA_CONTRACT.md).
 
+Optionally copy `voice-dna.example.md` to local `voice-dna.md` and customize your writing style; the personal file is ignored by Git.
+
 Ask the agent to “Run scan mode”, “Evaluate this job description”, “Run PDF mode”, or “Run tracker mode”. Legacy `/career-ops` skill aliases remain compatible; Codex can use the same modes by name. See [SCRIPTS.md](SCRIPTS.md) for CLI commands and immutable application-batch authority. Agents stop before final application submission.
 
 For PDF rendering, install Chromium if the dependency install has not already done so:
