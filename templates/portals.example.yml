@@ -1606,10 +1606,50 @@ tracked_companies:
 
 job_boards:
 
+  # Board-wide startup, AI, and remote discovery sources. Each result still
+  # passes through the normal title, seniority, location, and dedup filters.
+  - name: a16z speedrun talent network
+    provider: a16z-speedrun-talent
+    careers_url: https://speedrun-talent-network.com
+    max_pages: 3
+    enabled: true
+    notes: "a16z startup portfolio roles; normal scanner filters select relevant software, data, and AI openings."
+
+  - name: Agentic Engineering Jobs
+    provider: agentic-jobs
+    careers_url: https://agentic-engineering-jobs.com
+    max_pages: 2
+    enabled: true
+    notes: "AI and agentic-engineering roles; normal title, seniority, and location filters apply."
+
+  - name: Himalayas
+    provider: himalayas
+    careers_url: https://himalayas.app/jobs
+    max_pages: 3
+    enabled: true
+    notes: "Remote jobs feed; normal scanner filters determine role and location fit."
+
+  - name: Jobicy
+    provider: jobicy
+    careers_url: https://jobicy.com
+    enabled: true
+    notes: "Remote jobs aggregator; normal scanner filters determine role and location fit."
+
+  - name: Jobspresso
+    provider: jobspresso
+    careers_url: https://jobspresso.co
+    enabled: true
+    notes: "Curated remote jobs RSS feed; normal scanner filters determine role and location fit."
+
+  - name: Hacker News Who is hiring
+    provider: hackernews
+    careers_url: https://news.ycombinator.com/jobs
+    enabled: true
+    notes: "Current monthly Ask HN hiring thread; free-form postings continue through normal scanner filters."
+
   # ── SolidJobs (Polish market) ──────────────────────────────────────
   # Public API — no auth needed. Division in URL path, campaign=career-ops for tracking.
   # Available divisions: it, engineering, marketing, sales, hr, logistics, finances, other
-
   - name: SolidJobs IT
     careers_url: https://solid.jobs/public-api/offers/it?campaign=career-ops
     provider: solidjobs
