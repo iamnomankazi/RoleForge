@@ -19,13 +19,11 @@ try {
   assert.equal(provider.detect({ careers_url: 'https://evil.example' }), null);
   pass('id and explicit/host detection are scoped correctly');
 
-  const localPortals = yaml.load(readFileSync(join(ROOT, 'portals.yml'), 'utf8'));
   const examplePortals = yaml.load(readFileSync(join(ROOT, 'templates/portals.example.yml'), 'utf8'));
   const configuredMaxPages = (config) => config.job_boards
     .find((entry) => entry.provider === 'a16z-speedrun-talent')?.max_pages;
-  assert.equal(configuredMaxPages(localPortals), 20);
   assert.equal(configuredMaxPages(examplePortals), 20);
-  pass('local and source-controlled a16z configurations use the approved 20-page bound');
+  pass('source-controlled a16z example uses the approved 20-page bound');
 
   const normalized = normalizeSpeedrunJob({
     title: ' AI Engineer ', company: 'Acme',

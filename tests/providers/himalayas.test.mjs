@@ -1,9 +1,7 @@
 // tests/providers/himalayas.test.mjs — moved verbatim from test-all.mjs (#1440).
 import { pass, fail, ROOT } from '../helpers.mjs';
-import { readFileSync } from 'fs';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
-import yaml from 'js-yaml';
 
 console.log('\nProvider — himalayas');
 
@@ -379,18 +377,20 @@ try {
     fail(`plain targeted search unexpectedly added filters: ${JSON.stringify(searchCalls)}`);
   }
 
-  // The approved low-teens query shape gets two pages per family without the
-  // global cap starving the final query (14 * 2 * 20 = 560 raw rows).
+  // A representative high-teens/20-query shape covers the intended technical
+  // role families and gets two pages per query without starving the final one
+  // (20 * 2 * 20 = 800 raw rows).
   const familyQueries = [
-    'Python developer', 'junior backend engineer', 'junior software engineer',
-    'graduate software engineer', 'data engineer', 'junior data engineer',
-    'analytics engineer', 'ETL developer', 'machine learning engineer',
-    'AI engineer', 'junior data analyst', 'BI developer', 'working student',
-    'software engineering intern',
+    'Python developer', 'Backend engineer', 'Junior backend', 'Software engineer',
+    'Junior software engineer', 'Associate software engineer', 'Graduate software engineer',
+    'Data engineer', 'Junior data engineer', 'Analytics engineer', 'ETL developer',
+    'Machine learning AI engineer', 'Data analyst', 'BI developer',
+    'Working student software', 'Working student data', 'Working student machine learning AI',
+    'Software engineering intern', 'Data engineering intern', 'Machine learning AI intern',
   ];
   const familyCalls = [];
   const familySearch = await fetchHimalayasSearchPages(
-    { search_queries: familyQueries, search_max_pages: 2, search_max_jobs: 560 },
+    { search_queries: familyQueries, search_max_pages: 2, search_max_jobs: 800 },
     { fetchJson: async (url) => {
       familyCalls.push(url);
       const parsed = new URL(url);
@@ -403,12 +403,12 @@ try {
       };
     } },
   );
-  if (familyCalls.length === 28 && familySearch.jobs.length === 560
-      && familySearch.stats.queryStats.length === 14
-      && familySearch.stats.queryStats.at(-1)?.query === 'software engineering intern'
+  if (familyCalls.length === 40 && familySearch.jobs.length === 800
+      && familySearch.stats.queryStats.length === 20
+      && familySearch.stats.queryStats.at(-1)?.query === 'Machine learning AI intern'
       && familySearch.stats.queryStats.every(({ reachedEnd, truncated }) => reachedEnd && !truncated)
       && familySearch.stats.globalCapHit === false) {
-    pass('14-query two-page search reaches every role family within the derived 560-row cap');
+    pass('20-query two-page search reaches every role family within the derived 800-row cap');
   } else {
     fail(`family search bounds = ${JSON.stringify({ calls: familyCalls.length, jobs: familySearch.jobs.length, stats: familySearch.stats })}`);
   }
@@ -549,16 +549,43 @@ try {
     fail('Himalayas location classification outcomes are incorrect');
   }
 
-  // Verify the narrow faculty exclusion in the user portal configuration and
-  // ensure it does not remove a valid technical Business Intelligence title.
+  // Keep title-gate coverage deterministic and independent of ignored/private
+  // user configuration. Constrained internship/student phrases admit relevant
+  // early-career roles without making generic internships pass.
   const { buildTitleFilter } = await import(pathToFileURL(join(ROOT, 'scan.mjs')).href);
-  const portals = yaml.load(readFileSync(join(ROOT, 'portals.yml'), 'utf8'));
-  const titleFilter = buildTitleFilter(portals.title_filter);
-  if (!titleFilter('Adjunct Faculty - Business Intelligence (REMOTE-FL)')
-      && titleFilter('Business Intelligence Developer')) {
-    pass('portal title filter excludes narrow academic faculty roles without excluding Business Intelligence');
+  const titleFilter = buildTitleFilter({
+    positive: [
+      'Python Developer', 'Backend Developer', 'Backend Engineer', 'Software Engineer',
+      'Data Engineer', 'Machine Learning Engineer', 'AI Engineer',
+      'Machine Learning Intern', 'ML Intern', 'AI Intern',
+      'AI/ML Intern', 'AI & ML Intern', 'Data Engineering Intern',
+      'Software Engineering Intern', 'Working Student Software',
+      'Working Student Data', 'Working Student AI', 'Working Student Machine Learning',
+    ],
+    negative: [
+      'Senior', 'Staff', 'Lead', 'Marketing', 'Finance', 'Human Resources', 'HR ', 'Sales',
+    ],
+  });
+  const shouldPass = [
+    'Machine Learning Intern', 'ML Intern', 'AI Intern', 'AI/ML Intern', 'AI & ML Intern',
+    'AI/Machine Learning Engineer Intern', 'Data Engineering Intern',
+    'Software Engineering Intern', 'Associate Software Engineer',
+    'Associate Data Engineer', 'Junior Python Developer', 'Backend Developer',
+    'Working Student Software Engineering', 'Working Student Data Engineering',
+    'Working Student AI', 'Working Student Machine Learning',
+  ];
+  const shouldFail = [
+    'Marketing Intern', 'Finance Intern', 'HR Intern', 'Sales Intern',
+    'Working Student Marketing', 'Working Student Finance',
+    'Senior Software Engineer', 'Staff Data Engineer',
+  ];
+  if (shouldPass.every(titleFilter) && shouldFail.every(title => !titleFilter(title))) {
+    pass('constrained early-career title phrases pass while unrelated internships and senior roles stay blocked');
   } else {
-    fail('portal faculty exclusion is too broad or missing');
+    fail(`early-career title fixture mismatch = ${JSON.stringify({
+      unexpectedFails: shouldPass.filter(title => !titleFilter(title)),
+      unexpectedPasses: shouldFail.filter(titleFilter),
+    })}`);
   }
 } catch (e) {
   fail(`himalayas provider tests crashed: ${e.message}`);
