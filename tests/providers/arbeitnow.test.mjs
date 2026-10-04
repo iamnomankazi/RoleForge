@@ -64,6 +64,7 @@ try {
 
   // fetch(): pagination by self-built ?page=N, stop when links.next is null.
   const mk = (i) => ({ title: `Role ${i}`, url: `https://www.arbeitnow.com/jobs/x${i}`, company_name: `Co ${i}`, location: 'Berlin', remote: false, created_at: 1782693032 + i });
+  const noWait = async () => {};
   const page1 = Array.from({ length: 100 }, (_, i) => mk(i));            // full page → continue
   const page2 = [mk(100), mk(101), { title: '', url: 'https://www.arbeitnow.com/jobs/bad' }]; // short page (3 < 100) → stop; 1 drop
   const requested = [];
@@ -77,7 +78,7 @@ try {
     return { data: [], links: {}, meta: {} };
   };
 
-  const paged = await arbeitnow.fetch({ name: 'Arbeitnow' }, { fetchJson: pagedFetch });
+  const paged = await arbeitnow.fetch({ name: 'Arbeitnow' }, { fetchJson: pagedFetch, sleep: noWait });
 
   if (requested.length === 2
       && requested[0].url === 'https://www.arbeitnow.com/api/job-board-api?page=1'
@@ -105,7 +106,7 @@ try {
       return page === 1
         ? { data: [mk(200), mk(201)], links: { next: 'https://www.arbeitnow.com/api/job-board-api?page=2' } }
         : { data: [mk(202)], links: { next: null } };
-    } },
+    }, sleep: noWait },
   );
   if (unusualCalls.join(',') === '1,2' && unusual.length === 3 && providerCoverage(unusual) === null) {
     pass('arbeitnow.fetch() follows authoritative pagination despite a short intermediate page');
@@ -117,7 +118,7 @@ try {
   const capRequested = [];
   const capped = await arbeitnow.fetch(
     { name: 'Arbeitnow', max_pages: 1 },
-    { fetchJson: async (url, opts) => { capRequested.push(url); return { data: Array.from({ length: 100 }, (_, i) => mk(i)), links: { next: 'https://www.arbeitnow.com/api/job-board-api?page=2' } }; } },
+    { fetchJson: async (url, opts) => { capRequested.push(url); return { data: Array.from({ length: 100 }, (_, i) => mk(i)), links: { next: 'https://www.arbeitnow.com/api/job-board-api?page=2' } }; }, sleep: noWait },
   );
   if (capRequested.length === 1 && capRequested[0] === 'https://www.arbeitnow.com/api/job-board-api?page=1') {
     pass('arbeitnow.fetch() honors max_pages (stops at the cap even on a full page)');
@@ -134,7 +135,7 @@ try {
 
   const duplicateCompatible = await arbeitnow.fetch(
     { name: 'Arbeitnow' },
-    { fetchJson: async () => ({ data: [mk(300), mk(300)], links: { next: null } }) },
+    { fetchJson: async () => ({ data: [mk(300), mk(300)], links: { next: null } }), sleep: noWait },
   );
   if (duplicateCompatible.length === 2) {
     pass('arbeitnow.fetch() leaves cross-provider/global dedup to the scanner as before');
@@ -143,9 +144,225 @@ try {
   }
 
   // unexpected API response → throws.
+  const httpError = (status, message = `HTTP ${status}`) => {
+    const error = new Error(message);
+    error.status = status;
+    return error;
+  };
+
+  // A transient first-page 429 retries deterministically and recovers.
+  let first429Attempts = 0;
+  const first429Sleeps = [];
+  const first429 = await arbeitnow.fetch(
+    { name: 'RetryCo' },
+    {
+      fetchJson: async () => {
+        first429Attempts++;
+        if (first429Attempts === 1) {
+          const error = httpError(429);
+          error.retryAfter = '2';
+          throw error;
+        }
+        return { data: [mk(400)], links: { next: null } };
+      },
+      sleep: async (ms) => { first429Sleeps.push(ms); },
+    },
+  );
+  if (first429Attempts === 2 && first429.length === 1 && providerCoverage(first429) === null
+      && first429Sleeps[0] === 2000) {
+    pass('arbeitnow.fetch() retries a first-page 429 and honors Retry-After seconds');
+  } else {
+    fail(`arbeitnow.fetch() first-page 429 recovery = ${JSON.stringify({ attempts: first429Attempts, sleeps: first429Sleeps, jobs: first429.length, coverage: providerCoverage(first429) })}`);
+  }
+
+  // 5xx and statusless network errors are transient; successful retry attempts
+  // must not append anything until the page actually returns.
+  let transientAttempts = 0;
+  const transientSleeps = [];
+  const transient = await arbeitnow.fetch(
+    { name: 'TransientCo' },
+    {
+      fetchJson: async () => {
+        transientAttempts++;
+        if (transientAttempts === 1) throw httpError(503, 'service unavailable');
+        if (transientAttempts === 2) throw new Error('connection reset');
+        return { data: [mk(401)], links: { next: null } };
+      },
+      sleep: async (ms) => { transientSleeps.push(ms); },
+    },
+  );
+  if (transientAttempts === 3 && transient.length === 1
+      && transientSleeps.join(',') === '500,1000') {
+    pass('arbeitnow.fetch() retries 5xx and statusless transient failures with deterministic backoff');
+  } else {
+    fail(`arbeitnow.fetch() transient retry = ${JSON.stringify({ attempts: transientAttempts, sleeps: transientSleeps, jobs: transient.length })}`);
+  }
+
+  // A later-page 429 retries and keeps every successful page.
+  let later429Attempts = 0;
+  let later429Requests = 0;
+  const later429Sleeps = [];
+  const later429 = await arbeitnow.fetch(
+    { name: 'LaterRetryCo' },
+    {
+      fetchJson: async (url) => {
+        later429Requests++;
+        const page = Number(new URL(url).searchParams.get('page'));
+        if (page === 1) return { data: [mk(402)], links: { next: 'https://www.arbeitnow.com/api/job-board-api?page=2' } };
+        later429Attempts++;
+        if (later429Attempts === 1) throw httpError(429);
+        return { data: [mk(403)], links: { next: null } };
+      },
+      sleep: async (ms) => { later429Sleeps.push(ms); },
+    },
+  );
+  if (later429Requests === 3 && later429Attempts === 2 && later429.length === 2
+      && providerCoverage(later429) === null && later429Sleeps.join(',') === '150,500') {
+    pass('arbeitnow.fetch() retries a later-page 429 and retains all pages');
+  } else {
+    fail(`arbeitnow.fetch() later-page 429 recovery = ${JSON.stringify({ requests: later429Requests, attempts: later429Attempts, sleeps: later429Sleeps, jobs: later429.length, coverage: providerCoverage(later429) })}`);
+  }
+
+  // Retry-After HTTP dates are honored, but waits remain bounded.
+  let dateAttempts = 0;
+  const dateSleeps = [];
+  const retryDate = new Date(Date.now() + 5000).toUTCString();
+  const dateRecovered = await arbeitnow.fetch(
+    { name: 'DateRetryCo' },
+    {
+      fetchJson: async () => {
+        dateAttempts++;
+        if (dateAttempts === 1) {
+          const error = httpError(429);
+          error.retryAfter = retryDate;
+          throw error;
+        }
+        return { data: [mk(404)], links: { next: null } };
+      },
+      sleep: async (ms) => { dateSleeps.push(ms); },
+    },
+  );
+  if (dateAttempts === 2 && dateRecovered.length === 1 && dateSleeps.length === 1
+      && dateSleeps[0] >= 3000 && dateSleeps[0] <= 5000) {
+    pass('arbeitnow.fetch() honors a future Retry-After HTTP date');
+  } else {
+    fail(`arbeitnow.fetch() Retry-After date = ${JSON.stringify({ attempts: dateAttempts, sleeps: dateSleeps, jobs: dateRecovered.length })}`);
+  }
+
+  let clampAttempts = 0;
+  const clampSleeps = [];
+  const clamped = await arbeitnow.fetch(
+    { name: 'ClampRetryCo' },
+    {
+      fetchJson: async () => {
+        clampAttempts++;
+        if (clampAttempts === 1) {
+          const error = httpError(429);
+          error.retryAfter = '86400';
+          throw error;
+        }
+        return { data: [mk(405)], links: { next: null } };
+      },
+      sleep: async (ms) => { clampSleeps.push(ms); },
+    },
+  );
+  if (clampAttempts === 2 && clamped.length === 1 && clampSleeps[0] === 32000) {
+    pass('arbeitnow.fetch() clamps excessive Retry-After delays to 32000ms');
+  } else {
+    fail(`arbeitnow.fetch() Retry-After clamp = ${JSON.stringify({ attempts: clampAttempts, sleeps: clampSleeps, jobs: clamped.length })}`);
+  }
+
+  // Persistent first-page 429 remains a provider failure after four attempts.
+  const persistentFirstError = httpError(429, 'persistent rate limit');
+  let persistentFirstAttempts = 0;
+  let persistentFirstFailure;
+  try {
+    await arbeitnow.fetch(
+      { name: 'PersistentFirstCo' },
+      {
+        fetchJson: async () => { persistentFirstAttempts++; throw persistentFirstError; },
+        sleep: noWait,
+      },
+    );
+  } catch (error) {
+    persistentFirstFailure = error;
+  }
+  if (persistentFirstAttempts === 4 && persistentFirstFailure === persistentFirstError) {
+    pass('arbeitnow.fetch() keeps a persistent first-page 429 as a provider failure');
+  } else {
+    fail(`arbeitnow.fetch() persistent first-page 429 = ${JSON.stringify({ attempts: persistentFirstAttempts, sameError: persistentFirstFailure === persistentFirstError })}`);
+  }
+
+  // Persistent later-page 429 returns prior jobs as typed rate-limited partial coverage.
+  const persistentLaterError = httpError(429, 'later page rate limit');
+  let persistentLaterAttempts = 0;
+  const persistentLater = await arbeitnow.fetch(
+    { name: 'PersistentLaterCo', max_pages: 3 },
+    {
+      fetchJson: async (url) => {
+        const page = Number(new URL(url).searchParams.get('page'));
+        if (page === 1) return { data: [mk(406)], links: { next: 'https://www.arbeitnow.com/api/job-board-api?page=2' } };
+        persistentLaterAttempts++;
+        throw persistentLaterError;
+      },
+      sleep: noWait,
+    },
+  );
+  const persistentLaterCoverage = providerCoverage(persistentLater);
+  if (persistentLater.length === 1 && persistentLaterAttempts === 4
+      && persistentLaterCoverage?.code === 'rate_limited'
+      && persistentLaterCoverage.pagesFetched === 1 && persistentLaterCoverage.maxPages === 3) {
+    pass('arbeitnow.fetch() preserves earlier pages after a persistent later-page 429');
+  } else {
+    fail(`arbeitnow.fetch() persistent later-page 429 = ${JSON.stringify({ jobs: persistentLater.length, attempts: persistentLaterAttempts, coverage: persistentLaterCoverage })}`);
+  }
+
+  // A later statusless failure has its own stable partial-coverage code.
+  let laterNetworkAttempts = 0;
+  const laterNetwork = await arbeitnow.fetch(
+    { name: 'LaterNetworkCo' },
+    {
+      fetchJson: async (url) => {
+        const page = Number(new URL(url).searchParams.get('page'));
+        if (page === 1) return { data: [mk(407)], links: { next: 'https://www.arbeitnow.com/api/job-board-api?page=2' } };
+        laterNetworkAttempts++;
+        throw new Error('network unavailable');
+      },
+      sleep: noWait,
+    },
+  );
+  const laterNetworkCoverage = providerCoverage(laterNetwork);
+  if (laterNetwork.length === 1 && laterNetworkAttempts === 4 && laterNetworkCoverage?.code === 'fetch_error'
+      && laterNetworkCoverage.pagesFetched === 1) {
+    pass('arbeitnow.fetch() preserves earlier pages after a persistent later fetch failure');
+  } else {
+    fail(`arbeitnow.fetch() persistent later fetch failure = ${JSON.stringify({ jobs: laterNetwork.length, attempts: laterNetworkAttempts, coverage: laterNetworkCoverage })}`);
+  }
+
+  // A permanent non-429 4xx is not retried.
+  const permanentError = httpError(400, 'bad request');
+  let permanentAttempts = 0;
+  let permanentFailure;
+  try {
+    await arbeitnow.fetch(
+      { name: 'PermanentCo' },
+      {
+        fetchJson: async () => { permanentAttempts++; throw permanentError; },
+        sleep: noWait,
+      },
+    );
+  } catch (error) {
+    permanentFailure = error;
+  }
+  if (permanentAttempts === 1 && permanentFailure === permanentError) {
+    pass('arbeitnow.fetch() does not retry a permanent non-429 4xx');
+  } else {
+    fail(`arbeitnow.fetch() permanent 4xx retry behavior = ${JSON.stringify({ attempts: permanentAttempts, sameError: permanentFailure === permanentError })}`);
+  }
+
   let badThrew = false;
   try {
-    await arbeitnow.fetch({ name: 'X' }, { fetchJson: async () => ({ wrong: true }) });
+    await arbeitnow.fetch({ name: 'X' }, { fetchJson: async () => ({ wrong: true }), sleep: noWait });
   } catch (e) {
     badThrew = /unexpected API response/.test(e.message);
   }
@@ -155,7 +372,7 @@ try {
   const network = new Error('network unavailable');
   let networkFailure;
   try {
-    await arbeitnow.fetch({ name: 'Arbeitnow' }, { fetchJson: async () => { throw network; } });
+    await arbeitnow.fetch({ name: 'Arbeitnow' }, { fetchJson: async () => { throw network; }, sleep: noWait });
   } catch (error) {
     networkFailure = error;
   }

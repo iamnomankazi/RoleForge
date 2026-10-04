@@ -24,6 +24,11 @@ const TRUSTED_HOST = 'www.arbeitnow.com';
 const LEGACY_PER_PAGE = 100;
 const DEFAULT_MAX_PAGES = 3;
 const MAX_PAGES_CAP = 50;
+const MAX_RETRIES = 3;
+const RETRY_BASE_DELAY_MS = 500;
+const RETRY_MAX_DELAY_MS = 8_000;
+const RETRY_AFTER_MAX_DELAY_MS = 32_000;
+const INTER_PAGE_DELAY_MS = 150;
 
 /** @param {string} url */
 function assertArbeitnowUrl(url) {
@@ -45,6 +50,44 @@ function resolveMaxPages(entry) {
   const v = entry?.max_pages;
   if (Number.isInteger(v) && v > 0) return Math.min(v, MAX_PAGES_CAP);
   return DEFAULT_MAX_PAGES;
+}
+
+function sleep(ms, ctx) {
+  if (typeof ctx?.sleep === 'function') return ctx.sleep(ms);
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Parses Retry-After seconds or an HTTP date into milliseconds. */
+function parseRetryAfterMs(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return seconds >= 0 ? seconds * 1000 : null;
+  const dateMs = Date.parse(String(value));
+  return Number.isFinite(dateMs) ? Math.max(0, dateMs - Date.now()) : null;
+}
+
+function isRetryableError(error) {
+  const status = error?.status;
+  if (status === 429) return true;
+  if (typeof status === 'number' && status >= 500 && status <= 599) return true;
+  return status === undefined || status === null;
+}
+
+async function fetchPageWithRetry(ctx, url, options) {
+  let lastError;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await ctx.fetchJson(url, options);
+    } catch (error) {
+      lastError = error;
+      if (attempt === MAX_RETRIES || !isRetryableError(error)) throw error;
+      const backoff = Math.min(RETRY_BASE_DELAY_MS * 2 ** attempt, RETRY_MAX_DELAY_MS);
+      const retryAfter = parseRetryAfterMs(error?.retryAfter);
+      const delay = retryAfter === null ? backoff : Math.min(retryAfter, RETRY_AFTER_MAX_DELAY_MS);
+      await sleep(delay, ctx);
+    }
+  }
+  throw lastError;
 }
 
 /**
@@ -115,7 +158,22 @@ export default {
       // featured `?search=` term that would narrow the board).
       const url = `${FEED_BASE}?page=${page}`;
       // redirect:'error' prevents SSRF via server-side redirects
-      const json = await ctx.fetchJson(url, { redirect: 'error' });
+      if (page > 1) await sleep(INTER_PAGE_DELAY_MS, ctx);
+      let json;
+      try {
+        json = await fetchPageWithRetry(ctx, url, { redirect: 'error' });
+      } catch (error) {
+        if (page === 1) throw error;
+        const code = error?.status === 429 ? 'rate_limited' : 'fetch_error';
+        const reason = `arbeitnow: page ${page} failed after ${MAX_RETRIES + 1} attempts: ${error?.message || String(error)}`;
+        return markProviderCoverage(out, {
+          status: 'partial',
+          code,
+          reason,
+          pagesFetched: page - 1,
+          maxPages,
+        });
+      }
       if (!json || !Array.isArray(json.data)) {
         throw new Error(
           `arbeitnow: unexpected API response on page ${page} — expected { data: [...] }, got keys: [${json ? Object.keys(json).join(', ') : 'null'}]`,
