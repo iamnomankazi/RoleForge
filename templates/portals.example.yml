@@ -162,6 +162,17 @@
 #         - "llm"
 #         - "claude"
 
+# -- Experience policy (optional) --
+# When enabled, numeric year requirements are preserved as structured candidate
+# evidence instead of acting as raw content_filter.negative substring blockers.
+# Final review still considers seniority, responsibilities, ownership, domain,
+# and other hard blockers. Qualitative content negatives remain unchanged.
+# experience_policy:
+#   enabled: true
+#   normal_max_years: 2
+#   normal_range_max_years: 3
+#   outside_min_years: 4
+
 # -- Title filter --
 # The scanner uses these keywords to decide if a title is relevant.
 # At least 1 positive must match AND 0 negatives must match (case-insensitive).

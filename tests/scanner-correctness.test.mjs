@@ -28,7 +28,7 @@ import { classifyFetchError } from '../verify-portals.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
-function writePortals(file, entries) {
+function writePortals(file, entries, { experiencePolicy = false } = {}) {
   writeFileSync(file, [
     'tracked_companies:',
     ...entries.flatMap((entry) => [
@@ -41,10 +41,19 @@ function writePortals(file, entries) {
     ]),
     'title_filter:',
     '  positive: [Engineer]',
+    ...(experiencePolicy ? [
+      'experience_policy:',
+      '  enabled: true',
+      '  normal_max_years: 2',
+      '  normal_range_max_years: 3',
+      '  outside_min_years: 4',
+      'content_filter:',
+      '  negative: ["2+ years", "3+ years", "4+ years", "5+ years", "embedded"]',
+    ] : []),
   ].join('\n') + '\n');
 }
 
-function standardScanFixture(entries, runId) {
+function standardScanFixture(entries, runId, { experiencePolicy = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'career-ops-standard-cli-'));
   const providers = join(dir, 'providers');
   const data = join(dir, 'data');
@@ -58,6 +67,9 @@ function standardScanFixture(entries, runId) {
       if (entry.mode === 'throw') throw new Error('fictional provider unavailable');
       if (entry.mode === 'two') return [1, 2].map((id) => ({ company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/role-' + id, location: 'Helsinki, Finland' }));
       if (entry.mode === 'job') return [{ company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/Role', location: 'Helsinki, Finland' }];
+      if (entry.mode === 'experience-normal') return [{ company: entry.name, title: 'Junior Data Engineer', url: 'https://jobs.example.test/' + entry.name + '/normal', location: 'Helsinki, Finland', description: 'Python and SQL role requiring 2+ years of experience' }];
+      if (entry.mode === 'experience-stretch') return [{ company: entry.name, title: 'ML Engineer II', url: 'https://jobs.example.test/' + entry.name + '/stretch', location: 'Helsinki, Finland', description: '2-5 years of industry experience with production ML and MLOps ownership' }];
+      if (entry.mode === 'experience-outside') return [{ company: entry.name, title: 'Software Engineer', url: 'https://jobs.example.test/' + entry.name + '/outside', location: 'Helsinki, Finland', description: '5+ years of commercial software engineering experience' }];
       if (entry.mode === 'degraded') {
         const jobs = [{ company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/partial', location: 'Helsinki, Finland' }];
         Object.defineProperty(jobs, 'providerDegraded', { value: true });
@@ -85,7 +97,7 @@ function standardScanFixture(entries, runId) {
     },
   };\n`);
   const portals = join(dir, 'portals.yml');
-  writePortals(portals, entries);
+  writePortals(portals, entries, { experiencePolicy });
   const pipeline = join(data, 'pipeline.md');
   const history = join(data, 'scan-history.tsv');
   writeFileSync(pipeline, '# Pipeline\n\n## Pending\n');
@@ -162,6 +174,26 @@ test('--since accepts zero and rejects negative or malformed values', () => {
   assert.equal(parseSinceDays(['--since=2.5'], 3), 2.5);
   assert.throws(() => parseSinceDays(['--since', '-1'], 3), /non-negative/);
   assert.throws(() => parseSinceDays(['--since=soon'], 3), /non-negative/);
+});
+
+test('standard scan retains configured numeric experience evidence for contextual review', () => {
+  const fixture = standardScanFixture([
+    { name: 'Normal', mode: 'experience-normal' },
+    { name: 'Stretch', mode: 'experience-stretch' },
+    { name: 'Outside', mode: 'experience-outside' },
+  ], 'experience-policy', { experiencePolicy: true });
+  try {
+    assert.equal(fixture.result.status, 0, fixture.result.stderr);
+    const candidates = JSON.parse(readFileSync(join(fixture.runDir, 'candidates.json'), 'utf8'));
+    assert.deepEqual(
+      Object.fromEntries(candidates.map(candidate => [candidate.company, candidate.experience_metadata?.interpretation])),
+      { Normal: 'normal', Stretch: 'stretch', Outside: 'outside' },
+    );
+    assert.ok(candidates.every(candidate => candidate.experience_metadata?.numeric_hard_blocker === false));
+    assert.match(fixture.result.stdout, /Filtered by content:\s+0/);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
 });
 
 test('URL dedup removes cosmetic presentation without changing path case', () => {

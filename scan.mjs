@@ -46,6 +46,11 @@ import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
 import { atsIdentityFromUrl, deriveCandidateId } from './candidate-identity.mjs';
 import { writeImmutableScanRun } from './scan-candidate-contract.mjs';
 import { appendPortalHealth, loadPortalHealth, computeConsecutiveFailures } from './portal-health.mjs';
+import {
+  classifyExperienceRequirements,
+  isNumericExperienceKeyword,
+  normalizeExperiencePolicy,
+} from './experience-policy.mjs';
 
 try {
   const { config } = await import('dotenv');
@@ -406,10 +411,12 @@ export function extractHttpUrlsFromMarkdown(text) {
 // populate `job.description`. Lever (`descriptionPlain`) does today; others
 // leave it empty and therefore always pass this filter.
 
-export function buildContentFilter(contentFilter) {
+export function buildContentFilter(contentFilter, { experiencePolicy = null } = {}) {
   if (!contentFilter) return () => true;
   const positive = normalizeKeywordList(contentFilter.positive);
-  const negative = normalizeKeywordList(contentFilter.negative);
+  const preserveNumericExperience = Boolean(experiencePolicy);
+  const negative = normalizeKeywordList(contentFilter.negative)
+    .filter(keyword => !(preserveNumericExperience && isNumericExperienceKeyword(keyword)));
 
   const byTitleKeyword = new Map();
   if (contentFilter.by_title_keyword && typeof contentFilter.by_title_keyword === 'object' && !Array.isArray(contentFilter.by_title_keyword)) {
@@ -417,7 +424,8 @@ export function buildContentFilter(contentFilter) {
       if (typeof kw !== 'string' || !kw.trim()) continue;
       byTitleKeyword.set(kw.trim().toLowerCase(), {
         positive: normalizeKeywordList(rule?.positive),
-        negative: normalizeKeywordList(rule?.negative),
+        negative: normalizeKeywordList(rule?.negative)
+          .filter(keyword => !(preserveNumericExperience && isNumericExperienceKeyword(keyword))),
       });
     }
   }
@@ -1254,7 +1262,8 @@ async function main() {
   const locationFilter = buildLocationFilter(config.location_filter);
   const salaryFilter = buildSalaryFilter(config.salary_filter);
   const trustValidator = buildTrustValidator(config.trust_filter);
-  const contentFilter = buildContentFilter(config.content_filter);
+  const experiencePolicy = normalizeExperiencePolicy(config.experience_policy);
+  const contentFilter = buildContentFilter(config.content_filter, { experiencePolicy });
 
   // 3. Resolve a provider for each enabled company / board
   const targets = [];
@@ -1449,6 +1458,8 @@ async function main() {
           totalFilteredSalary++;
           continue;
         }
+        const experienceMetadata = classifyExperienceRequirements(job.description, experiencePolicy);
+        if (experienceMetadata) job.experienceMetadata = experienceMetadata;
         if (!contentFilter(job.description, matchedTitleKeywords(job.title, config.title_filter))) {
           totalFilteredContent++;
           continue;

@@ -71,6 +71,31 @@ test('candidate TSV keeps primitive arrays readable and structured values lossle
   assert.equal(cells[header.indexOf('notes')], `'${candidate.notes}`);
 });
 
+test('standard scan artifacts preserve structured experience review evidence', () => {
+  const root = mkdtempSync(join(tmpdir(), 'career-ops-standard-experience-'));
+  try {
+    const experienceMetadata = {
+      interpretation: 'stretch',
+      numeric_hard_blocker: false,
+      requirements: [{ text: '2-5 years', minimum_years: 2, maximum_years: 5, bound: 'range', strength: 'required', interpretation: 'stretch' }],
+    };
+    const result = persistStandardScanRun({
+      runId: 'experience-run', root,
+      offers: [{
+        company: 'Example', title: 'ML Engineer II', url: 'https://jobs.example.com/experience',
+        experienceMetadata,
+      }],
+    });
+    const candidates = JSON.parse(readFileSync(join(result.runDir, 'candidates.json'), 'utf8'));
+    assert.deepEqual(candidates[0].experience_metadata, experienceMetadata);
+    const tsv = readFileSync(join(result.runDir, 'candidates.tsv'), 'utf8');
+    assert.match(tsv, /"interpretation":"stretch"/);
+    assert.doesNotMatch(tsv, /\[object Object\]/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('different requisitions with the same company and title remain distinct', () => {
   const root = mkdtempSync(join(tmpdir(), 'career-ops-standard-req-'));
   try {

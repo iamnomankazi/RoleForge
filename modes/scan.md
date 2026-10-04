@@ -27,6 +27,20 @@ Read `portals.yml` which contains:
 - `tracked_companies`: Specific companies with `careers_url` for direct navigation
 - `tracked_companies[].parser`: Optional local parser for SSR pages or stable HTML
 - `title_filter`: Keywords (positive/negative/seniority_boost) for filtering job titles
+- `experience_policy`: Optional numeric-year interpretation. When enabled, year requirements are retained as structured review evidence rather than irreversible substring blockers.
+
+### Experience Requirements: Retain Evidence, Review Context
+
+When `experience_policy` is enabled, numeric years alone do not create an early hard blocker. Preserve the candidate and its `experience_metadata`, then review the number together with title, seniority, responsibilities, production ownership, domain depth, technologies, work authorization, language, and geography. Do not add separate requirements together.
+
+- Requirements at or below `normal_max_years`, including an unbounded lower threshold such as `2+ years`, remain normal-range evidence.
+- A bounded range that starts in the normal range and ends at or below `normal_range_max_years` remains normal-range evidence; wider ranges starting in the normal range are stretch evidence.
+- Required thresholds above the normal range but below `outside_min_years` are stretch evidence and should survive for credibility review.
+- Required thresholds at or above `outside_min_years` are outside-target evidence and should usually be rejected during final review when the rest of the posting agrees.
+- `preferred`, `ideally`, `nice-to-have`, `bonus`, `advantageous`, and `is a plus` language never becomes a numeric hard blocker.
+- Explicit Senior, Staff, Lead, Principal, Engineering Manager, and equivalent senior titles remain subject to the existing seniority exclusions regardless of a low numeric threshold.
+
+The structured scanner cannot infer full role credibility from a number. A retained stretch candidate can still be Blocked later for senior-level ownership, production depth, domain specialization, sponsorship, language, geography, or another genuine mismatch. Qualitative filters such as “deep experience designing distributed systems” remain ordinary content/review signals.
 
 ## Discovery Strategy (4 Levels)
 

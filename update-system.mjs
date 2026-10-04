@@ -178,6 +178,7 @@ const SYSTEM_PATHS = [
   'update-system.mjs',
   'reserve-report-num.mjs',
   'scan.mjs',
+  'experience-policy.mjs',
   'classify-tier.mjs',
   'scan-ats-full.mjs',
   'portal-health.mjs',
