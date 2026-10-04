@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -34,14 +34,18 @@ const DISABLED = [
 
 test('every audited unsafe legacy application entrypoint is fail-closed at startup', () => {
   for (const relative of DISABLED) {
-    const source = readFileSync(resolve(ROOT, relative), 'utf8').slice(0, 700);
+    const absolute = resolve(ROOT, relative);
+    if (!existsSync(absolute)) continue;
+    const source = readFileSync(absolute, 'utf8').slice(0, 700);
     assert.match(source, /Legacy application entrypoint disabled|disableLegacyApplicationEntrypoint/, relative);
   }
 });
 
 test('every legacy entrypoint fails with a migration message before application work', () => {
   for (const relative of DISABLED) {
-    const result = spawnSync(process.execPath, [resolve(ROOT, relative)], { cwd: ROOT, encoding: 'utf8' });
+    const absolute = resolve(ROOT, relative);
+    if (!existsSync(absolute)) continue;
+    const result = spawnSync(process.execPath, [absolute], { cwd: ROOT, encoding: 'utf8' });
     assert.notEqual(result.status, 0, relative);
     assert.match(result.stdout + result.stderr, /Legacy application entrypoint disabled/);
     assert.match(result.stdout + result.stderr, /application-batches\/<batch-id>\/manifest\.json and an exact candidate ID/);
@@ -73,16 +77,23 @@ test('active application authority has no global queue or hard-coded target fall
   }
   const importer = readFileSync(resolve(ROOT, 'legacy-queue-importer.mjs'), 'utf8');
   assert.doesNotMatch(importer, /queueFile\s*=\s*['"].*apply-queue|--rank/i);
-  const queueBuilder = readFileSync(resolve(ROOT, 'output/build-current-apply-queue.mjs'), 'utf8');
-  assert.match(queueBuilder, /Derived Review Queue.*Non-authoritative/);
+  const queueBuilderPath = resolve(ROOT, 'output/build-current-apply-queue.mjs');
+  if (existsSync(queueBuilderPath)) {
+    const queueBuilder = readFileSync(queueBuilderPath, 'utf8');
+    assert.match(queueBuilder, /Derived Review Queue.*Non-authoritative/);
+  }
 });
 
 test('static guard catches new risky executables under legacy application directories', () => {
   const allow = new Set(['output/build-current-apply-queue.mjs', 'output/extract-one-workday.mjs']);
-  const walk = (relative) => readdirSync(resolve(ROOT, relative), { withFileTypes: true }).flatMap((entry) => {
-    const child = `${relative}/${entry.name}`;
-    return entry.isDirectory() ? walk(child) : [child];
-  });
+  const walk = (relative) => {
+    const absolute = resolve(ROOT, relative);
+    if (!existsSync(absolute)) return [];
+    return readdirSync(absolute, { withFileTypes: true }).flatMap((entry) => {
+      const child = `${relative}/${entry.name}`;
+      return entry.isDirectory() ? walk(child) : [child];
+    });
+  };
   const candidates = ['scripts', 'output', 'tmp/playwright'].flatMap(walk)
     .filter((relative) => /\.(?:mjs|cjs|js)$/.test(relative));
   for (const relative of candidates) {

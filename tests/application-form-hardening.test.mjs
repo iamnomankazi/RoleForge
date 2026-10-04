@@ -16,9 +16,50 @@ import {
   resolveAuthorizationAnswer,
   validateGroundedNarrative,
 } from '../application-form-policy.mjs';
-import { loadApplicationProfile } from '../application-profile.mjs';
-
-const profile = loadApplicationProfile(resolve('.'));
+const syntheticEvidence = [
+  {
+    topics: ['data_engineering', 'analytics', 'python_sql'],
+    text: 'In the fictional Example Warehouse project, I validated 250K synthetic inventory records with Python, pandas, SQL, PostgreSQL, Power BI, Tableau, and Excel.',
+    evidence_refs: ['cv.md#fictional-example-warehouse'],
+  },
+  {
+    topics: ['ai_ml'],
+    text: 'In the fictional Example Vision Lab project, I evaluated Vision Transformers with PyTorch and Hugging Face.',
+    evidence_refs: ['cv.md#fictional-example-vision-lab'],
+  },
+  {
+    topics: ['software_backend', 'motivation_fit'],
+    text: 'In the fictional Example API project, I built Django APIs with explicit validation and reproducible tests.',
+    evidence_refs: ['cv.md#fictional-example-api'],
+  },
+];
+const syntheticCorpus = syntheticEvidence.map((entry) => entry.text).join('\n');
+const profile = {
+  candidate: {
+    full_name: 'Alex Example',
+    email: 'alex.example@example.test',
+    phone: '+1 202-555-0142',
+    location: 'Example City, Finland',
+    linkedin: 'https://linkedin.test/alex-example',
+    github: 'https://github.test/alex-example',
+  },
+  location: { country: 'Finland', city: 'Example City' },
+  currentStatus: { summary: 'Graduate student at Example University', availability: { start: 'Available immediately' } },
+  compensation: { target_range: 'EUR 50,000-55,000/year' },
+  education: { expected_graduation_date: '31/12/2030' },
+  formRules: {
+    current_location: { city: 'Example City', country: 'Finland', combined: 'Example City, Finland' },
+    work_authorization: { home_country: 'Finland' },
+    source: { value: 'LinkedIn' },
+    narrative_evidence: syntheticEvidence,
+  },
+  answers: new Map(),
+  priorApprovedAnswers: [],
+  cvText: syntheticCorpus,
+  articleDigestText: '',
+  answerBankText: syntheticCorpus,
+  profileModeText: 'Synthetic fixture evidence only.',
+};
 const candidate = {
   candidate_id: `cand_v1_${'a'.repeat(64)}`,
   company: 'Acme Data',
@@ -73,18 +114,23 @@ function sha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
-test('1–2. current location is canonical Joensuu while preferred location remains manual', () => {
+test('1–2. current location is canonical Example City while preferred location remains manual', () => {
   const result = plan([
     field({ id: 'city', label: 'Current city' }),
     field({ id: 'country', label: 'Country of residence' }),
     field({ id: 'location', label: 'Current location' }),
     field({ id: 'preferred', label: 'Preferred office location' }),
   ]);
-  assert.equal(result.actions.find((row) => row.semantic === 'city').value, 'Joensuu');
+  assert.equal(result.actions.find((row) => row.semantic === 'city').value, 'Example City');
   assert.equal(result.actions.find((row) => row.semantic === 'country').value, 'Finland');
-  assert.equal(result.actions.find((row) => row.semantic === 'current_location').value, 'Joensuu, Finland');
+  assert.equal(result.actions.find((row) => row.semantic === 'current_location').value, 'Example City, Finland');
   assert.equal(result.actions.some((row) => row.semantic === 'preferred_location'), false);
   assert.match(result.unresolvedFields.find((row) => row.semantic === 'preferred_location').reason, /application-specific/);
+});
+
+test('education institution is derived from the synthetic profile rather than source literals', () => {
+  const result = plan([field({ id: 'university', label: 'University' })]);
+  assert.equal(result.actions.find((row) => row.semantic === 'university').value, 'Example University');
 });
 
 test('3–6. authorization and sponsorship are exact Yes/No decisions by verified jurisdiction', () => {
@@ -171,7 +217,7 @@ test('12–14. data-engineering narrative is role-specific, evidence-rich, and l
     jdText: formContext.jdText,
   });
   assert.match(generated.answer, /Acme Data|Data & AI Engineer/);
-  assert.match(generated.answer, /1\.1M|procurement/);
+  assert.match(generated.answer, /250K|synthetic inventory/);
   assert.match(generated.answer, /Python|pandas/);
   assert.match(generated.answer, /SQL|PostgreSQL/);
   assert.match(generated.answer, /Power BI|Tableau|Excel/);
@@ -234,10 +280,10 @@ test('21–24. autocomplete captures options, retries once, preserves other fiel
       let chosen = 0;
       const locationInput = document.getElementById('location');
       locationInput.addEventListener('input', () => {
-        options.innerHTML = '<button type="button" role="option">Joensuu, North Karelia, Finland</button>';
+        options.innerHTML = '<button type="button" role="option">Example City, Example Region, Finland</button>';
         options.querySelector('[role=option]').onclick = () => {
           chosen += 1;
-          locationInput.value = chosen === 1 ? 'Helsinki, Finland' : 'Joensuu, North Karelia, Finland';
+          locationInput.value = chosen === 1 ? 'Helsinki, Finland' : 'Example City, Example Region, Finland';
           options.innerHTML = '';
         };
       });
@@ -247,8 +293,8 @@ test('21–24. autocomplete captures options, retries once, preserves other fiel
   const result = await prepareOperationalApplicationForm(page, profile, {}, { context: formContext });
   const attempts = result.evidence.attemptLedger.filter((row) => row.semantic === 'current_location');
   assert.equal(attempts.length, 2);
-  assert.ok(attempts.flatMap((row) => row.visibleOptions).includes('Joensuu, North Karelia, Finland'), JSON.stringify(attempts));
-  assert.equal(await page.locator('#name').inputValue(), 'Noman');
+  assert.ok(attempts.flatMap((row) => row.visibleOptions).includes('Example City, Example Region, Finland'), JSON.stringify(attempts));
+  assert.equal(await page.locator('#name').inputValue(), 'Alex');
   assert.equal(await page.evaluate(() => window.locationChoices()), 2);
   assert.equal(result.evidence.passBudget.fullPassesUsed, 1);
   assert.equal(result.evidence.passBudget.perFieldAttemptsAllowed, 2);
@@ -271,7 +317,7 @@ test('22–25. unresolved location leaves the same browser page open for manual 
   assert.equal(initial.evidence.browserOpenRequired, true);
   assert.equal(page.isClosed(), false);
   const emailBefore = await page.locator('#email').inputValue();
-  await page.locator('#location').fill('Joensuu, Finland');
+  await page.locator('#location').fill('Example City, Finland');
   assert.equal(await page.locator('#email').inputValue(), emailBefore);
   assert.equal(initial.evidence.browserSession.manualContinuation, true);
   await page.close();

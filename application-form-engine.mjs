@@ -115,6 +115,16 @@ function controlAction(field, intended) {
   return 'fill';
 }
 
+function groundedLocationMatches(value, action) {
+  const normalized = normalizeFormQuestion(value);
+  const intended = cleanFormText(action.value);
+  const parts = ['city', 'country'].includes(action.semantic)
+    ? [intended]
+    : intended.split(',').map((part) => part.trim()).filter(Boolean);
+  const tokens = parts.map(normalizeFormQuestion).filter(Boolean);
+  return tokens.length > 0 && tokens.every((token) => normalized.includes(token));
+}
+
 function isCommitted(field, action) {
   if (action.action === 'upload') {
     return (field.files || []).some((filename) => filename === action.artifact.intendedFilename);
@@ -129,8 +139,7 @@ function isCommitted(field, action) {
   }
   const current = cleanFormText(field.value);
   if (action.action === 'autocomplete' && action.category === 'current_location') {
-    const normalized = normalizeFormQuestion(current);
-    return normalized.includes('joensuu') && normalized.includes('finland');
+    return groundedLocationMatches(current, action);
   }
   return current === cleanFormText(action.value);
 }
@@ -480,11 +489,6 @@ function remainingTimeout(deadlineMs, clock) {
 }
 
 async function chooseAutocomplete(page, action, visibleOptions, { deadlineMs, clock }) {
-  const groundedLocation = (normalized) => {
-    if (action.semantic === 'city') return normalized.includes('joensuu');
-    if (action.semantic === 'country') return normalized.includes('finland');
-    return normalized.includes('joensuu') && normalized.includes('finland');
-  };
   let locator = await exactLocator(page, action);
   await locator.focus({ timeout: remainingTimeout(deadlineMs, clock) });
   await locator.fill('', { timeout: remainingTimeout(deadlineMs, clock) });
@@ -499,7 +503,7 @@ async function chooseAutocomplete(page, action, visibleOptions, { deadlineMs, cl
     const label = cleanFormText(await optionLocators.nth(index).innerText().catch(() => ''));
     const normalized = normalizeFormQuestion(label);
     if (action.category === 'current_location') {
-      if (groundedLocation(normalized)) {
+      if (groundedLocationMatches(label, action)) {
         targetIndex = index;
         break;
       }
@@ -515,7 +519,7 @@ async function chooseAutocomplete(page, action, visibleOptions, { deadlineMs, cl
   const committed = cleanFormText((await validationState(locator)).value);
   if (action.category === 'current_location') {
     const normalized = normalizeFormQuestion(committed);
-    if (!groundedLocation(normalized)) {
+    if (!groundedLocationMatches(committed, action)) {
       throw new Error(`Autocomplete committed an ungrounded location: ${committed || '(empty)'}`);
     }
   } else if (normalizeFormQuestion(committed) !== normalizeFormQuestion(action.value)) {

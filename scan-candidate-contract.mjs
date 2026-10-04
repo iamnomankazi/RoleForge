@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import yaml from 'js-yaml';
 import { randomBytes } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import {
@@ -146,27 +147,75 @@ function mergeBucket(left, right) {
     .sort((a, b) => rank.get(a) - rank.get(b))[0] || null;
 }
 
-function locationRank(location) {
-  const value = clean(location).toLowerCase();
-  if (/(finland|helsinki|espoo|vantaa|tampere|turku|joensuu)/.test(value)) return 0;
-  if (/(denmark|copenhagen|aarhus|odense|aalborg)/.test(value)) return 1;
-  if (/(germany|berlin|munich|münchen|hamburg|frankfurt|cologne|köln)/.test(value)) return 2;
-  if (/(netherlands|amsterdam|rotterdam|eindhoven|utrecht)/.test(value)) return 3;
-  if (/(remote|europe|eu|eea|emea)/.test(value)) return 4;
-  return 5;
+export function configuredLocationPriority(root = process.cwd()) {
+  const configuredPath = process.env.CAREER_OPS_PROFILE || join(root, 'config', 'profile.yml');
+  const profilePath = resolve(root, configuredPath);
+  if (!existsSync(profilePath)) return [];
+  try {
+    const profile = yaml.load(readFileSync(profilePath, 'utf8')) || {};
+    const explicit = list(profile.scan?.location_priority || profile.location?.priority);
+    const ordered = explicit.length
+      ? explicit.map((entry) => [entry])
+      : [['Finland'], ['Germany'], ['Denmark'], ['Netherlands']];
+    const city = clean(profile.location?.city);
+    const country = clean(profile.location?.country);
+    if (city && country) {
+      const countryIndex = ordered.findIndex((group) => group.some(
+        (entry) => entry.localeCompare(country, 'en', { sensitivity: 'base' }) === 0,
+      ));
+      if (countryIndex >= 0) ordered[countryIndex].push(city);
+      else ordered.push([country, city]);
+    }
+    return ordered;
+  } catch {
+    return [];
+  }
 }
 
-function sortCandidate(a, b) {
+const DEFAULT_LOCATION_GROUPS = [
+  ['finland', 'helsinki', 'espoo', 'vantaa', 'tampere', 'turku'],
+  ['germany', 'berlin', 'munich', 'münchen', 'hamburg', 'frankfurt', 'cologne', 'köln'],
+  ['denmark', 'copenhagen', 'aarhus', 'odense', 'aalborg'],
+  ['netherlands', 'amsterdam', 'rotterdam', 'eindhoven', 'utrecht'],
+];
+
+function priorityGroups(locationPriority) {
+  if (!Array.isArray(locationPriority)) return list(locationPriority).map((entry) => [entry]);
+  return locationPriority
+    .map((entry) => (Array.isArray(entry) ? list(entry) : list(entry)))
+    .filter((group) => group.length > 0);
+}
+
+function matchesLocationGroup(value, group) {
+  return group.some((entry) => value.includes(entry.toLocaleLowerCase('en')));
+}
+
+function locationRank(location, locationPriority = []) {
+  const value = clean(location).toLocaleLowerCase('en');
+  const configured = priorityGroups(locationPriority);
+  const configuredRank = configured.findIndex((group) => matchesLocationGroup(value, group));
+  if (configuredRank >= 0) return configuredRank;
+  const defaultRank = DEFAULT_LOCATION_GROUPS.findIndex((group) => matchesLocationGroup(value, group));
+  if (defaultRank >= 0) return configured.length + defaultRank;
+  if (/(remote|europe|eu|eea|emea)/.test(value)) return configured.length + DEFAULT_LOCATION_GROUPS.length;
+  return configured.length + DEFAULT_LOCATION_GROUPS.length + 1;
+}
+
+function sortCandidate(a, b, locationPriority) {
   const ranks = new Map([...MATCH_BUCKETS, ''].map((bucket, index) => [bucket, index]));
   return (ranks.get(a.match_bucket) ?? 3) - (ranks.get(b.match_bucket) ?? 3)
-    || locationRank(a.location) - locationRank(b.location)
+    || locationRank(a.location, locationPriority) - locationRank(b.location, locationPriority)
     || (Date.parse(b.posted_at) || 0) - (Date.parse(a.posted_at) || 0)
     || a.company.localeCompare(b.company, 'en', { sensitivity: 'base' })
     || a.title.localeCompare(b.title, 'en', { sensitivity: 'base' })
     || a.candidate_id.localeCompare(b.candidate_id, 'en');
 }
 
-export function mergeCanonicalCandidates(inputs, { runId = null, createdAt = null } = {}) {
+export function mergeCanonicalCandidates(inputs, {
+  runId = null,
+  createdAt = null,
+  locationPriority = [],
+} = {}) {
   const merged = [];
   const byAts = new Map();
   const byUrl = new Map();
@@ -230,7 +279,7 @@ export function mergeCanonicalCandidates(inputs, { runId = null, createdAt = nul
       postedAt: { value: row.posted_at, enumerable: false },
     });
   }
-  merged.sort(sortCandidate);
+  merged.sort((a, b) => sortCandidate(a, b, locationPriority));
   const ids = new Set();
   for (const row of merged) {
     if (ids.has(row.candidate_id)) throw new Error(`Duplicate candidate_id after merge: ${row.candidate_id}`);
@@ -304,16 +353,19 @@ export function buildReviewMarkdown(candidates, manifest) {
 }
 
 export function buildImmutableScanRun({
+  root = process.cwd(),
   runId,
   inputs,
   createdAt = new Date().toISOString(),
   sourceArchitecture = 'worker_merge',
   metadata = {},
+  locationPriority = null,
 }) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(String(runId || ''))) {
     throw new Error('run ID must be 1-120 safe filename characters');
   }
-  const result = mergeCanonicalCandidates(inputs, { runId, createdAt });
+  const effectiveLocationPriority = locationPriority || configuredLocationPriority(root);
+  const result = mergeCanonicalCandidates(inputs, { runId, createdAt, locationPriority: effectiveLocationPriority });
   const matchBuckets = Object.fromEntries(MATCH_BUCKETS.map((bucket) => [
     bucket, result.candidates.filter((candidate) => candidate.match_bucket === bucket).length,
   ]));
@@ -337,7 +389,7 @@ export function buildImmutableScanRun({
 }
 
 export function writeImmutableScanRun({ root = process.cwd(), outRoot = 'output/scan-runs', ...options }) {
-  const built = buildImmutableScanRun(options);
+  const built = buildImmutableScanRun({ root, ...options });
   const parent = resolve(root, outRoot);
   mkdirSync(parent, { recursive: true });
   const runDir = join(parent, built.manifest.run_id);

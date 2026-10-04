@@ -278,25 +278,56 @@ export function generateCustomNarrativeAnswer(profile, {
 
 function formRules(profile) {
   const rules = profile?.formRules || {};
+  const city = cleanFormText(rules.current_location?.city || profile?.location?.city);
+  const country = cleanFormText(rules.current_location?.country || profile?.location?.country);
+  const combined = cleanFormText(
+    rules.current_location?.combined
+      || profile?.candidate?.location
+      || [city, country].filter(Boolean).join(', '),
+  );
   return {
-    currentLocation: {
-      city: rules.current_location?.city || profile?.location?.city || 'Joensuu',
-      country: rules.current_location?.country || profile?.location?.country || 'Finland',
-      combined: rules.current_location?.combined || profile?.candidate?.location || 'Joensuu, Finland',
-    },
+    currentLocation: { city: city || null, country: country || null, combined: combined || null },
     source: rules.source?.value || 'LinkedIn',
-    homeCountry: rules.work_authorization?.home_country || profile?.location?.country || 'Finland',
+    homeCountry: cleanFormText(rules.work_authorization?.home_country || country) || null,
   };
+}
+
+function hasConfiguredCountryCapability(context, homeCountry) {
+  const target = normalizeFormQuestion(homeCountry);
+  if (!target) return false;
+  return Object.entries(context || {}).some(([key, value]) => {
+    if (value !== true || !key.startsWith('canEmployFrom')) return false;
+    const suffix = key.slice('canEmployFrom'.length).replace(/([a-z])([A-Z])/g, '$1 $2');
+    return normalizeFormQuestion(suffix) === target;
+  });
+}
+
+function configuredUniversity(profile) {
+  const explicit = cleanFormText(
+    profile?.formRules?.education?.university
+      || profile?.education?.university
+      || profile?.currentStatus?.university,
+  );
+  if (explicit) return explicit;
+  const summary = cleanFormText(profile?.currentStatus?.summary);
+  const match = summary.match(/\b(?:at|from)\s+(.+?)(?:[.;]|$)/i);
+  return cleanFormText(match?.[1]) || null;
 }
 
 export function resolveAuthorizationAnswer(profile, semantic, context = {}) {
   const rules = formRules(profile);
   const arrangement = normalizeFormQuestion(context.hiringArrangement);
   const country = cleanFormText(context.jobCountry);
-  const remoteFromFinland = arrangement === 'remote finland'
-    || arrangement === 'employ from finland'
-    || context.canEmployFromFinland === true;
-  if (remoteFromFinland || country.toLowerCase() === rules.homeCountry.toLowerCase()) {
+  const normalizedHomeCountry = normalizeFormQuestion(rules.homeCountry);
+  const remoteFromHomeCountry = Boolean(normalizedHomeCountry) && (
+    arrangement === `remote ${normalizedHomeCountry}`
+    || arrangement === `employ from ${normalizedHomeCountry}`
+    || context.canEmployFromHomeCountry === true
+    || hasConfiguredCountryCapability(context, rules.homeCountry)
+  );
+  const sameCountry = Boolean(country && normalizedHomeCountry)
+    && normalizeFormQuestion(country) === normalizedHomeCountry;
+  if (remoteFromHomeCountry || sameCountry) {
     return semantic === 'work_authorization' ? 'Yes' : semantic === 'sponsorship' ? 'No' : null;
   }
   if (country) return semantic === 'work_authorization' ? 'No' : semantic === 'sponsorship' ? 'Yes' : null;
@@ -341,8 +372,7 @@ export function canonicalFieldValue(profile, semantics, {
   }
   if (category === 'source_how_heard') return rules.source;
   if (category === 'education') {
-    if (semantic === 'university') return /University of Eastern Finland/i.test(profile?.currentStatus?.summary || '')
-      ? 'University of Eastern Finland' : null;
+    if (semantic === 'university') return configuredUniversity(profile);
     if (semantic === 'graduation') return profile?.education?.expected_graduation_date || null;
     return null;
   }
