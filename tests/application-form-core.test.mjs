@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { chromium } from 'playwright';
 import {
   buildFormPlan,
+  classifyApplicationControl,
   classifyField,
   classifyUserGate,
   inspectApplicationForm,
@@ -91,9 +92,17 @@ test('field and final-action semantics cover common ATS patterns', () => {
   assert.equal(classifyField({ label: 'Motivation letter', type: 'file' }), 'cover_letter_upload');
   assert.equal(classifyField({ label: 'Phone country', tag: 'select', type: 'select-one' }), 'phone_country');
   assert.equal(classifyField({ label: 'I certify this is accurate', type: 'checkbox' }), 'legal_consent');
-  assert.equal(isSemanticFinalAction({ type: 'submit', label: 'Continue' }), true);
+  const workflow = { insideApplicationForm: true, candidateFieldCount: 2, workflowVerified: true, hasRemainingStep: true, formId: 'application', applicationFormId: 'application' };
+  assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', label: 'Continue' }), 'progression');
+  assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', label: 'Next' }), 'progression');
+  assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', formAction: '/step/2', label: 'Save and continue' }), 'progression');
+  assert.equal(isSemanticFinalAction({ type: 'submit', label: 'Submit application', insideApplicationForm: true }), true);
   assert.equal(isSemanticFinalAction({ type: 'button', label: 'Apply Now', insideApplicationForm: false }), false);
   assert.equal(isSemanticFinalAction({ type: 'button', label: 'Apply Now', insideApplicationForm: true }), true);
+  assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', label: 'Continue and submit' }), 'ambiguous');
+  assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', label: 'Review application' }), 'ambiguous');
+  assert.equal(classifyApplicationControl({ ...workflow, type: 'button', label: 'Review application' }), 'ambiguous');
+  assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', label: 'Continue', hasRemainingStep: false }), 'ambiguous');
 });
 
 test('text-only cover fields receive the complete bound letter and one-document fields require an explicit combined artifact', () => {

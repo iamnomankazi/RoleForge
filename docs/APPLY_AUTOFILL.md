@@ -95,18 +95,34 @@ lets an operator attest `form_prepared` manually.
 ## User gates and unsupported controls
 
 The executor stops for login, CAPTCHA/reCAPTCHA, MFA, email verification,
-account-creation consent, privacy or legal declarations, ambiguous personal
-data, unsupported identity checks, and custom controls whose committed value
-cannot be verified. It records the exact unresolved field and required user
-action. It never guesses missing personal information.
+account-creation consent, ambiguous personal data, unsupported identity checks,
+and custom controls whose committed value cannot be verified. It may accept an
+ordinary required application privacy/data-processing acknowledgement such as
+`I agree`, `Accept`, `Yes`, or `I acknowledge`. Optional marketing or talent-pool
+consent, legal declarations, signatures, background-check authorization, and
+unusual consent or permission language always remain manual. It records the
+exact unresolved field and required user action and never guesses missing
+personal information.
 
 Login resume is limited to the same manifest and candidate ID and repeats
 source, artifact, liveness, identity, and URL validation. No browser page handle
 or session is trusted across processes.
 
-Current fail-closed limitations include inaccessible shadow/canvas controls,
-native OS dialogs, demographic/legal declarations, and multi-step Next/Save
-actions whose non-final semantics cannot be proven. These require manual review.
+Current fail-closed limitations include inaccessible shadow/canvas controls
+and native OS dialogs. For a required EEO/demographic selector, Career-Ops may
+choose an explicit visible `Prefer not to say`, `Decline to disclose`, or
+equivalent non-disclosure option; otherwise it stops for manual review, and
+optional EEO fields may remain untouched. It never invents demographic data.
+Legal declarations, signatures, background-check authorization, marketing or
+talent-pool consent, and unusual permissions remain manual. JavaScript-only
+`type="button"` Next/Continue controls also remain manual because their handlers
+can bypass the guarded HTML submit event. Verified multi-step
+Next/Continue/Save-and-continue actions may advance automatically only when a
+visible wizard indicator proves another application step remains. Progression
+is capped at eight verified transitions with per-step and overall deadlines,
+loop detection, and an exact single-use control permit. Ambiguous controls,
+including terminal-looking review actions, require manual review. Career-Ops
+still never activates the genuine final Submit, Apply, Send, or Complete action.
 
 ## Narrative evidence and provenance
 

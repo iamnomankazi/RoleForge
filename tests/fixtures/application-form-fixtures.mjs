@@ -155,3 +155,17 @@ export const identityMismatchFixture = shell(`<h1>Senior Sales Director</h1><h2>
 export const expiredFixture = shell(`<h1>Data Engineer</h1><h2>Acme</h2><p>This job is no longer available.</p>`);
 export const unsafeRedirectFixture = shell(`<h1>Data Engineer</h1><h2>Acme</h2><a href="http://127.0.0.1/private">Apply Now</a>`);
 export const consentFixture = shell(`<h1>Data Engineer</h1><h2>Acme</h2><form><label>Email<input type="email" required></label><label><input type="checkbox" required>I certify that this application is accurate</label><button type="submit">Submit</button></form>`);
+
+export function multiStepApplicationFixture(step = 1, { loop = false, unchanged = false, captchaAt = 0, loginAt = 0, total = 4 } = {}) {
+  const indicator = `<p class="steps" data-career-ops-step="${step}" data-career-ops-total-steps="${total}">Step ${step} of ${total}</p>`;
+  const wizard = (content) => `<div data-career-ops-wizard>${indicator}${content}</div>`;
+  if (loginAt === step) return shell(wizard('<h1>Log in to apply</h1><label>Password<input type="password"></label>'));
+  if (captchaAt === step) return shell(wizard('<div class="captcha-overlay" role="dialog" aria-modal="true" style="position:fixed;inset:0;width:100vw;height:100vh;background:white;z-index:9">Human verification CAPTCHA</div>'));
+  if (step === 1) return shell(wizard('<form id="application" action="/application/step/2"><label>First name<input id="first" name="first_name" required></label><label>Last name<input id="last" name="last_name" required></label><label>Email<input id="email" name="email" type="email" required></label><button id="continue" type="submit" aria-label="Continue application">Continue</button></form>'));
+  if (step === 2) {
+    const destination = unchanged ? 2 : loop ? 1 : 3;
+    return shell(`${wizard(`<form id="application" action="/application/step/${destination}"><label>Resume / CV<input id="resume" name="resume" type="file" required></label><span id="resume-name"></span><label>Cover letter<input id="cover" name="cover" type="file" required></label><span id="cover-name"></span><button id="save" type="submit" aria-label="Continue application">Save and continue</button></form>`)}<script>for(const input of document.querySelectorAll('input[type=file]'))input.addEventListener('change',()=>{document.getElementById(input.id+'-name').textContent=input.files[0]?.name||'';});</script>`);
+  }
+  if (step < total) return shell(wizard(`<form id="application" action="/application/step/${step + 1}"><label>How did you hear about us?<select id="source" name="source" required><option value="">Choose</option><option>LinkedIn</option></select></label><button id="next-${step}" type="submit" aria-label="Continue application">Next</button></form>`));
+  return shell(`${wizard('<form id="application" action="/application/submit" method="post"><label>LinkedIn<input id="linkedin-final" name="linkedin" required></label><button id="final-submit" type="submit">Submit application</button></form>')}<script>document.getElementById('application').addEventListener('submit',event=>{window.fixtureFinalSubmits=(window.fixtureFinalSubmits||0)+1;event.preventDefault();});</script>`);
+}

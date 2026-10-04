@@ -436,7 +436,7 @@ export function canonicalFieldValue(profile, semantics, {
     email: candidate.email || null,
     phone: candidate.phone || null,
     phone_country: rules.homeCountry,
-    phone_dial_code: rules.phoneDialCode || cleanFormText(candidate.phone).match(/^\+\d{1,4}/)?.[0] || null,
+    phone_dial_code: rules.phoneDialCode || null,
     linkedin: candidate.linkedin || null,
     github: candidate.github || null,
   };

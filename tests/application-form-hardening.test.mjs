@@ -284,7 +284,11 @@ test('Markdown CV structure is rejected instead of emerging as literal cover-let
 
 test('composite phone widget keeps dial selector and telephone value type-safe', async () => {
   const page = await browser.newPage();
-  const phoneProfile = { ...profile, candidate: { ...profile.candidate, phone: '+358 40 123 4567' } };
+  const phoneProfile = {
+    ...profile,
+    candidate: { ...profile.candidate, phone: '+358401234567' },
+    formRules: { ...profile.formRules, phone: { dial_code: '+358' } },
+  };
   await page.setContent(`
     <form><fieldset><legend>Phone country code</legend>
       <label for="dial">Country / dial code</label>
@@ -295,12 +299,26 @@ test('composite phone widget keeps dial selector and telephone value type-safe',
   `);
   const result = await prepareOperationalApplicationForm(page, phoneProfile, {}, { context: formContext });
   assert.equal(await page.locator('#dial').inputValue(), '+358');
-  assert.equal(await page.locator('#number').inputValue(), '40 123 4567');
+  assert.equal(await page.locator('#number').inputValue(), '401234567');
   const controls = result.evidence.operationalArtifacts.phoneControls;
   assert.equal(controls.find((row) => row.id === 'dial').semantic, 'phone_dial_code');
   assert.equal(controls.find((row) => row.id === 'number').semantic, 'phone');
-  assert.equal(controls.find((row) => row.id === 'number').value, '40 123 4567');
+  assert.equal(controls.find((row) => row.id === 'number').value, '401234567');
   assert.notEqual(await page.locator('#number').inputValue(), 'Finland');
+  await page.close();
+});
+
+test('continuous international phone never guesses a four-digit dial code', async () => {
+  const page = await browser.newPage();
+  const phoneProfile = { ...profile, candidate: { ...profile.candidate, phone: '+358401234567' } };
+  await page.setContent(`
+    <form><label for="dial">Phone dial code</label><select id="dial" required><option value="">Select</option><option value="+358">+358</option><option value="+3584">+3584</option></select>
+      <label for="number">Phone number</label><input id="number" type="tel" required><button type="button">Apply</button></form>
+  `);
+  const result = await prepareOperationalApplicationForm(page, phoneProfile, {}, { context: formContext });
+  assert.equal(await page.locator('#dial').inputValue(), '');
+  assert.notEqual(await page.locator('#dial').inputValue(), '+3584');
+  assert.ok(result.evidence.unresolvedFields.some((row) => row.semantic === 'phone_dial_code'));
   await page.close();
 });
 

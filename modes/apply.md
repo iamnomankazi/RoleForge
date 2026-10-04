@@ -80,6 +80,24 @@ it cannot submit candidate data. It may traverse one verified known-ATS
 intermediate page. Once the actual form is reached, Apply/Submit/Send/Complete
 controls remain prohibited regardless of their visible label.
 
+Inside a verified actual application form, Career-Ops may fill and advance a
+bounded multi-step workflow through one uniquely verified Next, Continue, Save
+and continue, Save & continue, Proceed, or Continue application control. The
+control must have exact form/control identity and a visible step indicator must
+prove another step remains. Each activation uses a single-use permit, must
+produce a meaningful new form-state fingerprint, and is followed by a fresh
+snapshot and safety-gate check. Stop on ambiguity, unchanged state, a visited
+state, CAPTCHA/login/manual-review evidence, timeout, or after eight successful
+transitions. Fill safe fields on the terminal step, but never activate the real
+Submit, Apply, Send, Complete, Finish, Finalize, or confirmation action.
+
+An ordinary required application privacy/data-processing acknowledgement such
+as I agree, Accept, Yes, or I acknowledge may be accepted automatically.
+Optional marketing or talent-pool consent, legal declarations, signatures,
+background-check authorization, and unusual permission language remain manual.
+JavaScript-only `type="button"` Next/Continue controls also remain manual because
+their handlers are not covered by the guarded HTML-submit progression permit.
+
 ## Workflow
 
 ```text
@@ -184,9 +202,9 @@ For each field, preserve the application form contract:
 - `required`: `yes`, `no`, or `unknown`
 - `limit`: exact character/word limit if visible; otherwise `unknown`
 - `options`: visible options for select/radio/checkbox fields
-- `needs_candidate_confirmation`: `yes` for legal, demographic, work authorization, visa, relocation, salary, disability, veteran, sponsorship, background-check, or self-identification questions unless the answer is explicitly present in `config/profile.yml`
+- `needs_candidate_confirmation`: `yes` for legal, work authorization, visa, relocation, salary, sponsorship, background-check, or self-identification questions unless the answer is explicitly present in `config/profile.yml`; for required EEO/demographic selectors, an explicit visible Prefer not to say / Decline to disclose option may be selected without inventing demographic data, while optional EEO may remain untouched
 
-Never invent answers for legal, demographic, work-authorization, visa/sponsorship, salary, disability, veteran, background-check, relocation, or self-identification fields. If the answer is not present in `config/profile.yml` or visible context, mark it as needing candidate confirmation and provide the safest question to ask the candidate.
+Never invent answers for legal, demographic, work-authorization, visa/sponsorship, salary, disability, veteran, background-check, relocation, or self-identification fields. A required EEO/demographic selector may use only an explicit visible non-disclosure option; otherwise, if the answer is not present in `config/profile.yml` or visible context, mark it as needing candidate confirmation and provide the safest question to ask the candidate.
 
 
 ## Step 7 — Generate responses

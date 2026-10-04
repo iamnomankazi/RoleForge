@@ -49,11 +49,16 @@ export function buildCandidateFormContext(contract) {
   const jdText = inline(row.description ?? row.jobDescription ?? row.job_description ?? row.content);
   return {
     batchId: contract?.manifest?.batchId || null,
-    candidate: contract?.candidate || {},
+    candidate: {
+      ...(contract?.candidate || {}),
+      listingUrl: contract?.candidate?.listingUrl || contract?.candidateState?.listingUrl || null,
+      applyUrl: contract?.candidate?.applyUrl || null,
+    },
     jobCountry: jobCountry || null,
     hiringArrangement: inline(row.hiringArrangement ?? row.hiring_arrangement ?? row.employmentArrangement) || null,
     canEmployFromFinland: row.canEmployFromFinland === true || row.can_employ_from_finland === true,
     jdText,
+    verifyApplicationContinuity,
   };
 }
 
@@ -490,6 +495,34 @@ export function isCompatibleDestination({ listingUrl, applyUrl = null, currentUr
   const currentRequisition = requisitionIdentity(currentUrl);
   if (listingRequisition && listingRequisition === currentRequisition) return true;
   return Boolean(identity?.verified);
+}
+
+export function verifyApplicationContinuity({ beforeUrl, currentUrl, snapshot, candidate }) {
+  let before;
+  let current;
+  try {
+    before = new URL(beforeUrl);
+    current = new URL(currentUrl);
+  } catch {
+    return { verified: false, reason: 'invalid application continuity URL' };
+  }
+  if (before.origin !== current.origin) return { verified: false, reason: 'application origin changed' };
+  const listingUrl = candidate?.listingUrl || beforeUrl;
+  const listingRequisition = requisitionIdentity(listingUrl);
+  const beforeRequisition = requisitionIdentity(beforeUrl);
+  const currentRequisition = requisitionIdentity(currentUrl);
+  const expectedRequisition = listingRequisition || beforeRequisition;
+  if (expectedRequisition) {
+    return currentRequisition === expectedRequisition
+      ? { verified: true, reason: 'ATS requisition identity remained exact' }
+      : { verified: false, reason: 'ATS requisition identity changed or disappeared' };
+  }
+  const identity = verifyVisibleIdentity(snapshot, candidate || {});
+  if (identity.verified) return identity;
+  if (sameUrlIgnoringHash(beforeUrl, currentUrl) || (candidate?.applyUrl && sameUrlIgnoringHash(candidate.applyUrl, currentUrl))) {
+    return { verified: true, reason: 'same exact application URL remained active' };
+  }
+  return { verified: false, reason: `application continuity is unverified: ${identity.reason}` };
 }
 
 export async function collectPageSnapshot(page) {
@@ -1568,6 +1601,7 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
           validationErrorCount: evidence.validationErrors.length,
           finalActionDetected: evidence.finalAction.detected,
           finalActionActivated: evidence.finalAction.activated,
+          progressionTransitions: evidence.progression?.stepsAdvanced || 0,
         };
         finalState = transition(
           contract.manifestPath,
@@ -1724,6 +1758,7 @@ async function prepareResumedForm(page, contract, root, executionLock) {
       validationErrorCount: evidence.validationErrors.length,
       finalActionDetected: evidence.finalAction.detected,
       finalActionActivated: evidence.finalAction.activated,
+      progressionTransitions: evidence.progression?.stepsAdvanced || 0,
     };
     const move = (to, from, reason) => transition(
       contract.manifestPath, contract.candidate.candidate_id, to, evidence.currentUrl,

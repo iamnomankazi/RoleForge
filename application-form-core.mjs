@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { groundedFieldValue } from './application-profile.mjs';
 import { validateNarrativeProvenanceRecord } from './application-evidence.mjs';
 
-const FINAL_WORDS = /\b(apply(?: now)?|submit|send(?: application)?|complete application|finish|confirm application|finali[sz]e)\b/i;
+const FINAL_ACTION_LABEL = /^(?:apply(?: now)?|submit(?: application)?|send(?: application)?|complete(?: application)?|finish(?: application)?|finali[sz]e(?: application)?|confirm(?: submission| application)?|review and (?:apply|submit)|apply and submit)$/i;
+const FINAL_TOKEN = /\b(?:apply(?: now)?|submit|send|complete|finish|finali[sz]e|confirm)\b/i;
+const PROGRESSION_ACTION_LABEL = /^(?:next|continue|save (?:and|&) continue|proceed|continue application|review application)$/i;
 const LOGIN_WORDS = /\b(sign in to apply|log in to apply|login to apply|create an account to apply|sign in or create|login or register|verify (?:your )?email|one[- ]time code|mfa|two[- ]factor)\b/i;
 const LEGAL_WORDS = /\b(certify|declare|privacy|terms|accurate|truthful|consent|signature|background check|data processing)\b/i;
 const CAPTCHA_SIGNAL_WORDS = /\b(captcha|recaptcha|hcaptcha|turnstile|are you human|human verification)\b/i;
@@ -85,12 +87,78 @@ export function classifyCaptchaState(signals = {}) {
   };
 }
 
+function controlLabel(control) {
+  return clean(control?.label || control?.text || control?.value || '').replace(/\s*&\s*/g, ' & ');
+}
+
+export function applicationControlSignature(control) {
+  return {
+    controlId: clean(control?.controlId),
+    formId: clean(control?.formId),
+    label: controlLabel(control),
+    type: clean(control?.type).toLowerCase(),
+    formAction: clean(control?.formAction),
+    formMethod: clean(control?.formMethod || 'get').toLowerCase(),
+  };
+}
+
+export function classifyApplicationControl(control) {
+  const label = controlLabel(control);
+  const insideForm = Boolean(control?.insideApplicationForm);
+  if (insideForm && FINAL_ACTION_LABEL.test(label)) return 'final';
+  if (FINAL_TOKEN.test(label)) return 'ambiguous';
+  if (!PROGRESSION_ACTION_LABEL.test(label)) return 'ambiguous';
+  if (clean(control?.type).toLowerCase() !== 'submit' || control?.invokesSubmit) return 'ambiguous';
+  if (label.toLowerCase() === 'review application' && control?.type === 'submit') return 'ambiguous';
+  const verifiedContext = insideForm
+    && Number(control?.candidateFieldCount || 0) > 0
+    && Boolean(control?.hasRemainingStep)
+    && Boolean(control?.workflowVerified)
+    && clean(control?.formId)
+    && clean(control?.applicationFormId) === clean(control?.formId);
+  if (!verifiedContext) return 'ambiguous';
+  if (control?.formActionLooksTerminal) return 'ambiguous';
+  return 'progression';
+}
+
 export function isSemanticFinalAction(control) {
-  const label = clean(`${control?.label || ''} ${control?.text || ''} ${control?.value || ''}`);
-  return control?.type === 'submit'
-    || Boolean(control?.formAction)
-    || (Boolean(control?.insideApplicationForm) && FINAL_WORDS.test(label))
-    || Boolean(control?.invokesSubmit);
+  return classifyApplicationControl(control) === 'final';
+}
+
+export function applicationFormStateFingerprint(snapshot) {
+  let url = clean(snapshot?.url);
+  try {
+    const parsed = new URL(url);
+    parsed.hash = '';
+    url = `${parsed.origin}${parsed.pathname}`;
+  } catch {}
+  const hasVerifiedFormKey = Object.prototype.hasOwnProperty.call(snapshot || {}, 'applicationFormId');
+  const applicationFormId = clean(snapshot?.applicationFormId);
+  const applicationFields = (snapshot?.fields || []).filter((field) => (
+    !hasVerifiedFormKey || (applicationFormId && clean(field.formId) === applicationFormId && field.applicationFormOwned !== false)
+  ));
+  const applicationControls = (snapshot?.controls || []).filter((control) => (
+    !hasVerifiedFormKey || (applicationFormId && clean(control.formId) === applicationFormId)
+  ));
+  return digest({
+    url,
+    applicationFormId,
+    workflowId: snapshot?.applicationWorkflowId || applicationFormId || null,
+    step: snapshot?.stepIndicator || null,
+    fields: applicationFields.filter((field) => field.visible !== false).map((field) => ({
+      id: field.name || field.id || field.label,
+      label: field.label,
+      type: field.type,
+      required: Boolean(field.required),
+    })),
+    controls: applicationControls.map((control) => ({
+      label: controlLabel(control),
+      type: control.type,
+      formAction: control.formAction || '',
+      formMethod: control.formMethod || 'get',
+      formId: control.formId || '',
+    })),
+  });
 }
 
 export function classifyField(field) {
@@ -132,8 +200,17 @@ export function classifyField(field) {
 }
 
 export function inspectUploadTopology(snapshot) {
-  const uploads = (snapshot.fields || []).filter((field) => field.visible !== false && !field.disabled && field.type === 'file');
-  const semantics = uploads.map((field) => ({ fieldId: field.fieldId, label: field.label, semantic: classifyField(field) }));
+  const hasVerifiedFormKey = Object.prototype.hasOwnProperty.call(snapshot || {}, 'applicationFormId');
+  const applicationFormId = clean(snapshot?.applicationFormId);
+  const uploads = (snapshot.fields || []).filter((field) => field.visible !== false && !field.disabled && field.type === 'file'
+    && (!hasVerifiedFormKey || (applicationFormId && clean(field.formId) === applicationFormId && field.applicationFormOwned !== false)));
+  const semantics = uploads.map((field) => ({
+    fieldId: field.fieldId,
+    formId: field.formId || '',
+    applicationFormOwned: field.applicationFormOwned !== false,
+    label: field.label,
+    semantic: classifyField(field),
+  }));
   const cv = semantics.filter((row) => row.semantic === 'cv_upload');
   const cover = semantics.filter((row) => row.semantic === 'cover_letter_upload');
   const combined = semantics.filter((row) => row.semantic === 'single_document_upload');
@@ -167,7 +244,19 @@ function dropdownValue(semantic, profile) {
 export function buildFormPlan(snapshot, profile, artifacts, { candidateId = null } = {}) {
   const actions = [];
   const unresolvedFields = [];
-  for (const field of snapshot.fields.filter((item) => item.visible !== false && !item.disabled)) {
+  const hasVerifiedFormKey = Object.prototype.hasOwnProperty.call(snapshot || {}, 'applicationFormId');
+  const applicationFormId = clean(snapshot?.applicationFormId);
+  if (hasVerifiedFormKey && !applicationFormId) {
+    unresolvedFields.push({
+      fieldId: 'application-form-unverified',
+      label: 'Application form',
+      semantic: 'application_form',
+      reason: 'No uniquely verified application form is available; no fields were filled.',
+    });
+  }
+  const applicationFields = snapshot.fields.filter((item) => !hasVerifiedFormKey
+    || (applicationFormId && clean(item.formId) === applicationFormId && item.applicationFormOwned !== false));
+  for (const field of applicationFields.filter((item) => item.visible !== false && !item.disabled)) {
     const semantic = classifyField(field);
     if (semantic === 'legal_consent') {
       unresolvedFields.push({ fieldId: field.fieldId, label: field.label, semantic, reason: 'Explicit user approval is required for this declaration.' });
@@ -179,7 +268,7 @@ export function buildFormPlan(snapshot, profile, artifacts, { candidateId = null
         if (field.required) unresolvedFields.push({ fieldId: field.fieldId, label: field.label, semantic, reason: 'Required exact bound artifact is unavailable.' });
         continue;
       }
-      actions.push({ fieldId: field.fieldId, id: field.id, label: field.label, name: field.name, semantic, action: 'upload', artifact });
+      actions.push({ fieldId: field.fieldId, formId: field.formId || '', id: field.id, label: field.label, name: field.name, semantic, action: 'upload', artifact });
       continue;
     }
     let value;
@@ -213,7 +302,7 @@ export function buildFormPlan(snapshot, profile, artifacts, { candidateId = null
       });
       continue;
     }
-    if (semantic === 'phone' && snapshot.fields.some((item) => classifyField(item) === 'phone_country')) {
+    if (semantic === 'phone' && applicationFields.some((item) => classifyField(item) === 'phone_country')) {
       value = clean(value).replace(/^\+?358[\s-]*/, '');
     }
     const optionLabels = (field.options || []).flatMap((option) => [option.label, option.value]).map((item) => clean(item).toLowerCase());
@@ -229,6 +318,7 @@ export function buildFormPlan(snapshot, profile, artifacts, { candidateId = null
         : (field.type === 'checkbox' || field.type === 'radio') ? 'choice' : 'fill';
     actions.push({
       fieldId: field.fieldId,
+      formId: field.formId || '',
       id: field.id,
       label: field.label,
       name: field.name,
@@ -239,22 +329,31 @@ export function buildFormPlan(snapshot, profile, artifacts, { candidateId = null
       sourceRef: semantic === 'free_text' ? 'output/application-answer-bank.md' : 'config/profile.yml',
     });
   }
-  const finalActions = snapshot.controls.filter(isSemanticFinalAction).map((control) => ({
+  const applicationControls = snapshot.controls.filter((control) => !hasVerifiedFormKey
+    || (applicationFormId && clean(control.formId) === applicationFormId));
+  const finalActions = applicationControls.filter(isSemanticFinalAction).map((control) => ({
     label: control.label || control.text || control.value || '(unlabelled submit control)',
     semanticClass: control.type === 'submit' ? 'form_submit' : 'terminal_action',
   }));
+  const progressionActions = applicationControls.filter((control) => classifyApplicationControl(control) === 'progression');
+  const ambiguousActions = applicationControls.filter((control) => (
+    classifyApplicationControl(control) === 'ambiguous'
+    && (control.type === 'submit' || control.formAction || control.invokesSubmit
+      || PROGRESSION_ACTION_LABEL.test(controlLabel(control)) || FINAL_TOKEN.test(controlLabel(control)))
+  ));
   const uploadTopology = inspectUploadTopology(snapshot);
   if (uploadTopology.mode === 'ambiguous') {
     for (const row of uploadTopology.fields) {
       if (!unresolvedFields.some((field) => field.fieldId === row.fieldId)) unresolvedFields.push({ ...row, reason: uploadTopology.reason });
     }
   }
-  return { actions, unresolvedFields, finalActions, uploadTopology, snapshotHash: digest(snapshot) };
+  return { actions, unresolvedFields, finalActions, progressionActions, ambiguousActions, uploadTopology, snapshotHash: digest(snapshot) };
 }
 
 export async function inspectApplicationForm(page) {
   const snapshot = await page.evaluate(() => {
     const visible = (element) => {
+      if (!element || element.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
       const style = getComputedStyle(element);
       const rect = element.getBoundingClientRect();
       return style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity || 1) > 0
@@ -268,15 +367,39 @@ export async function inspectApplicationForm(page) {
       return [...labels, aria, labelled, element.placeholder || '', element.name || '', element.id || '']
         .join(' ').replace(/\s+/g, ' ').trim();
     };
-    let counter = 0;
-    const fields = [...document.querySelectorAll('input, textarea, select, [role="combobox"]')]
-      .filter((element) => !['hidden', 'submit', 'button', 'reset', 'image'].includes((element.type || '').toLowerCase()))
-      .map((element) => {
-        const fieldId = element.getAttribute('data-career-ops-field-id') || `field-${++counter}`;
+    globalThis.__careerOpsFieldCounter = Number(globalThis.__careerOpsFieldCounter || 0);
+    globalThis.__careerOpsFormCounter = Number(globalThis.__careerOpsFormCounter || 0);
+    globalThis.__careerOpsControlCounter = Number(globalThis.__careerOpsControlCounter || 0);
+    const forms = [...document.querySelectorAll('form')];
+    for (const form of forms) {
+      if (!form.getAttribute('data-career-ops-form-id')) {
+        form.setAttribute('data-career-ops-form-id', `form-${++globalThis.__careerOpsFormCounter}`);
+      }
+    }
+    const fieldElements = [...document.querySelectorAll('input, textarea, select, [role="combobox"]')]
+      .filter((element) => !['hidden', 'submit', 'button', 'reset', 'image'].includes((element.type || '').toLowerCase()));
+    const usedFieldIds = new Set();
+    for (const element of fieldElements) {
+      const existing = String(element.getAttribute('data-career-ops-field-id') || '').trim();
+      if (!existing) continue;
+      if (usedFieldIds.has(existing)) throw new Error(`Duplicate Career-Ops field identity detected: ${existing}`);
+      usedFieldIds.add(existing);
+      const generated = existing.match(/^field-(\d+)$/);
+      if (generated) globalThis.__careerOpsFieldCounter = Math.max(globalThis.__careerOpsFieldCounter, Number(generated[1]));
+    }
+    const fields = fieldElements.map((element) => {
+        let fieldId = String(element.getAttribute('data-career-ops-field-id') || '').trim();
+        if (!fieldId) {
+          do fieldId = `field-${++globalThis.__careerOpsFieldCounter}`;
+          while (usedFieldIds.has(fieldId));
+          usedFieldIds.add(fieldId);
+        }
         element.setAttribute('data-career-ops-field-id', fieldId);
         const fieldText = textFor(element);
+        const owningForm = element.form || element.closest('form');
         return {
           fieldId,
+          formId: owningForm?.getAttribute('data-career-ops-form-id') || '',
           id: element.id || '',
           tag: element.tagName.toLowerCase(),
           type: (element.type || element.tagName).toLowerCase(),
@@ -296,20 +419,147 @@ export async function inspectApplicationForm(page) {
           options: element.tagName === 'SELECT' ? [...element.options].map((option) => ({ label: option.textContent.trim(), value: option.value })) : [],
         };
       });
+    const applicationFieldPattern = /(?:first.?name|last.?name|full.?name|e-?mail|phone|linkedin|github|resume|r[ée]sum[ée]|\bcv\b|cover letter|work authori[sz]|sponsor|current location|city|country|university|degree|salary|how did you hear)/i;
+    const applicationSpecificFieldPattern = /(?:linkedin|github|resume|\bcv\b|cover letter|work authori[sz]|sponsor|how did you hear)/i;
+    const stepFromElement = (element) => {
+      if (!visible(element)) return null;
+      const ownText = [...element.childNodes]
+        .filter((node) => node.nodeType === Node.TEXT_NODE)
+        .map((node) => node.textContent || '').join(' ').replace(/\s+/g, ' ').trim();
+      const text = ownText || (element.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+      const current = Number(element.getAttribute('data-career-ops-step') || 0);
+      const total = Number(element.getAttribute('data-career-ops-total-steps') || 0);
+      if (current > 0 && total > current) return { current, total, text: text || `Step ${current} of ${total}` };
+      const match = text.match(/\b(?:step|page)\s*(\d+)\s+(?:of|\/)\s+(\d+)\b/i);
+      if (!match) return null;
+      return { current: Number(match[1]), total: Number(match[2]), text: match[0] };
+    };
+    const localWorkflowAssociation = (form) => {
+      const explicit = form.closest('[data-career-ops-wizard]');
+      if (explicit && visible(explicit)) {
+        const competing = [...explicit.querySelectorAll('form')].filter((item) => item !== form && visible(item));
+        if (!competing.length) {
+          const step = [...explicit.querySelectorAll('[data-career-ops-step], [aria-current="step"], .step, .steps')]
+            .map(stepFromElement).find(Boolean) || null;
+          if (step) return { root: explicit, explicit: true, step };
+        }
+      }
+      const parent = form.parentElement;
+      if (!parent || ['BODY', 'MAIN', 'HTML'].includes(parent.tagName) || !visible(parent)) return null;
+      const localForms = [...parent.querySelectorAll('form')].filter(visible);
+      if (localForms.length !== 1 || localForms[0] !== form) return null;
+      const meaningfulChildren = [...parent.children].filter((element) => !['SCRIPT', 'STYLE', 'TEMPLATE'].includes(element.tagName));
+      if (meaningfulChildren.length > 2) return null;
+      const stepCandidates = [...parent.querySelectorAll('*')]
+        .filter((element) => !form.contains(element))
+        .map((element) => ({ element, step: stepFromElement(element) }))
+        .filter((row) => row.step);
+      if (stepCandidates.length !== 1) return null;
+      return { root: parent, explicit: false, step: stepCandidates[0].step };
+    };
+    const workflowAssociations = new Map(forms.map((form) => [form, localWorkflowAssociation(form)]));
+    const scoredForms = forms.map((form) => {
+      const candidates = [...form.querySelectorAll('input, textarea, select, [role="combobox"]')]
+        .filter((field) => !['hidden', 'submit', 'button', 'reset', 'image'].includes((field.type || '').toLowerCase()));
+      const visibleCandidates = candidates.filter(visible);
+      const visibleControls = [...form.querySelectorAll('button, input[type="submit"], input[type="button"], a[role="button"], a.btn')]
+        .filter(visible);
+      const score = visibleCandidates.filter((field) => applicationFieldPattern.test(textFor(field))
+        || ['email', 'tel', 'file'].includes((field.type || '').toLowerCase())).length;
+      const applicationSpecificSignals = visibleCandidates.filter((field) => applicationSpecificFieldPattern.test(textFor(field))).length;
+      const controlText = visibleControls
+        .map((control) => `${control.getAttribute('aria-label') || ''} ${control.innerText || ''} ${control.value || ''}`)
+        .join(' ');
+      const hasApplicationAction = /\b(?:apply|application)\b/i.test(controlText);
+      const hasTerminalAction = /\b(?:apply|submit|send|complete|finish|finali[sz]e)\b/i.test(controlText);
+      const visibleText = visible(form) ? (form.innerText || '') : '';
+      const formApplicationContext = /\b(?:application|candidate|privacy|data notice|certif(?:y|ication)|resume|\bcv\b|cover letter|work authori[sz]|sponsor)\b/i.test(visibleText);
+      const workflowAssociation = workflowAssociations.get(form);
+      const structurallyAssociated = Boolean(workflowAssociation);
+      const hasFormStepEvidence = [...form.querySelectorAll('[data-career-ops-step], [aria-current="step"]')].some(visible)
+        || /\b(?:step|page)\s*\d+\s+(?:of|\/)\s+\d+\b/i.test(visibleText);
+      const independentApplicationIdentity = hasApplicationAction
+        || (applicationSpecificSignals > 0 && hasTerminalAction)
+        || (formApplicationContext && hasTerminalAction);
+      const associationBonus = structurallyAssociated || hasFormStepEvidence || hasApplicationAction ? 100 : 0;
+      return {
+        form,
+        score: score + applicationSpecificSignals * 4 + associationBonus,
+        applicationQualified: visible(form) && candidates.length > 0
+          && (visibleCandidates.length > 0 || hasApplicationAction)
+          && independentApplicationIdentity,
+      };
+    }).filter((row) => row.applicationQualified).sort((a, b) => b.score - a.score);
+    const uniqueTopForm = scoredForms.length && (scoredForms.length === 1 || scoredForms[0].score > scoredForms[1].score)
+      ? scoredForms[0].form : null;
+    const applicationFormId = uniqueTopForm?.getAttribute('data-career-ops-form-id') || '';
+    const applicationWizard = uniqueTopForm ? workflowAssociations.get(uniqueTopForm)?.root || null : null;
+    if (applicationWizard && !applicationWizard.getAttribute('data-career-ops-workflow-id')) {
+      applicationWizard.setAttribute('data-career-ops-workflow-id', `workflow-${applicationFormId}`);
+    }
+    const applicationWorkflowId = applicationWizard?.getAttribute('data-career-ops-workflow-id') || applicationFormId;
+    for (const field of fields) field.applicationFormOwned = Boolean(applicationFormId && field.formId === applicationFormId);
+    const parseStep = (root, selector) => {
+      const candidates = [...root.querySelectorAll(selector)].filter(visible);
+      for (const element of candidates) {
+        const step = stepFromElement(element);
+        if (step) return step;
+      }
+      return workflowAssociations.get(uniqueTopForm)?.root === root
+        ? workflowAssociations.get(uniqueTopForm)?.step || null
+        : null;
+    };
+    const applicationStepIndicator = applicationWizard
+      ? parseStep(applicationWizard, '[data-career-ops-step], [aria-current="step"], [role="progressbar"], .step, .steps, .progress')
+      : parseStep(uniqueTopForm || document.createElement('div'), '[data-career-ops-step], [aria-current="step"], .step, .steps');
     const controls = [...document.querySelectorAll('button, input[type="submit"], input[type="button"], a[role="button"], a.btn')]
       .filter(visible)
-      .map((element) => ({
-        label: textFor(element),
-        text: element.innerText || '',
-        value: element.value || '',
-        type: (element.type || '').toLowerCase(),
-        formAction: element.getAttribute('formaction') || '',
-        insideApplicationForm: Boolean(element.closest('form')),
-        invokesSubmit: Boolean(element.getAttribute('onclick')?.match(/submit|requestSubmit/i)),
-      }));
+      .map((element) => {
+        if (!element.getAttribute('data-career-ops-control-id')) {
+          element.setAttribute('data-career-ops-control-id', `control-${++globalThis.__careerOpsControlCounter}`);
+        }
+        const form = element.form || element.closest('form');
+        const formFields = form ? [...form.querySelectorAll('input, textarea, select, [role="combobox"]')]
+          .filter((field) => !['hidden', 'submit', 'button', 'reset', 'image'].includes((field.type || '').toLowerCase())) : [];
+        const wizardScope = form === uniqueTopForm ? applicationWizard : null;
+        const scopedStep = wizardScope
+          ? parseStep(wizardScope, '[data-career-ops-step], [aria-current="step"], [role="progressbar"], .step, .steps, .progress')
+          : parseStep(form || document.createElement('div'), '[data-career-ops-step], [aria-current="step"], .step, .steps');
+        const stepIndicator = form === uniqueTopForm ? scopedStep : null;
+        const formAction = element.getAttribute('formaction') || form?.getAttribute('action') || '';
+        return {
+          controlId: element.getAttribute('data-career-ops-control-id'),
+          formId: form?.getAttribute('data-career-ops-form-id') || '',
+          label: (element.getAttribute('aria-label') || element.innerText || element.value || textFor(element)).replace(/\s+/g, ' ').trim(),
+          text: element.innerText || '',
+          value: element.value || '',
+          type: (element.type || '').toLowerCase(),
+          formAction,
+          formMethod: (element.getAttribute('formmethod') || form?.getAttribute('method') || 'get').toLowerCase(),
+          formActionLooksTerminal: /(?:submit|send|complete|finish|finali[sz]e|confirm|apply)(?:[-_\/]|[A-Z]|\?|$)/i.test(formAction),
+          insideApplicationForm: Boolean(form),
+          candidateFieldCount: formFields.filter(visible).length,
+          applicationFormId,
+          workflowVerified: Boolean(form && form === uniqueTopForm),
+          hasRemainingStep: Boolean(stepIndicator && stepIndicator.total > stepIndicator.current),
+          invokesSubmit: Boolean(element.getAttribute('onclick')?.match(/submit|requestSubmit/i)),
+        };
+      });
     const bodyText = document.body?.innerText || '';
-    const validationErrors = [...document.querySelectorAll('[role="alert"], .error, .validation-error, [aria-invalid="true"]')]
-      .filter(visible).map((element) => (element.innerText || element.getAttribute('aria-label') || '').trim()).filter(Boolean);
+    const validationErrorEvidence = [...document.querySelectorAll('[role="alert"], .error, .validation-error, [aria-invalid="true"]')]
+      .filter(visible).map((element) => {
+        const text = (element.innerText || element.getAttribute('aria-label') || '').trim();
+        const owningForm = element.form || element.closest('form');
+        const formId = owningForm?.getAttribute('data-career-ops-form-id') || '';
+        const inApplicationWorkflow = Boolean(uniqueTopForm && (
+          owningForm ? owningForm === uniqueTopForm : applicationWizard?.contains(element)
+        ));
+        const associatedElsewhere = Boolean(owningForm && owningForm !== uniqueTopForm);
+        return { text, formId, inApplicationWorkflow, associatedElsewhere };
+      }).filter((row) => row.text);
+    const validationErrors = validationErrorEvidence
+      .filter((row) => row.inApplicationWorkflow || !row.associatedElsewhere)
+      .map((row) => row.text);
     const captchaSelector = [
       'iframe[src*="captcha" i]', 'iframe[src*="recaptcha" i]', 'iframe[src*="hcaptcha" i]',
       'iframe[src*="turnstile" i]', 'iframe[src*="challenges.cloudflare" i]',
@@ -383,7 +633,11 @@ export async function inspectApplicationForm(page) {
       bodyText,
       fields,
       controls,
+      applicationFormId,
+      applicationWorkflowId,
+      stepIndicator: applicationStepIndicator,
       validationErrors,
+      validationErrorEvidence,
       loginGate: /sign in to apply|log in to apply|login to apply|create an account to apply|sign in or create|login or register|verify (?:your )?email|one[- ]time code|two[- ]factor|mfa/i.test(bodyText)
         || fields.some((field) => field.visible && field.type === 'password'),
       captchaSignals: {
@@ -398,6 +652,7 @@ export async function inspectApplicationForm(page) {
         requiredDisabledFields,
       },
       submitAttempts: Number(globalThis.__careerOpsSubmitAttempts || 0),
+      progressionSubmits: Number(globalThis.__careerOpsProgressionSubmits || 0),
     };
   });
   return { ...snapshot, captcha: classifyCaptchaState(snapshot.captchaSignals) };
@@ -435,20 +690,25 @@ export async function removeSubmissionGuard(page) {
 
 async function exactLocator(page, action) {
   let locator;
+  const scope = action.formId
+    ? page.locator(`[data-career-ops-form-id="${action.formId.replace(/"/g, '\\"')}"]`)
+    : page;
+  const stamped = scope.locator(`[data-career-ops-field-id="${action.fieldId.replace(/"/g, '\\"')}"]`);
+  const stampedCount = await stamped.count();
+  if (stampedCount === 1) return stamped;
+  if (stampedCount > 1) throw new Error(`Career-Ops exact field identity is ambiguous for ${action.semantic}`);
   if (action.id) {
-    locator = page.locator(`[id="${action.id.replace(/"/g, '\\"')}"]`).first();
-    if (await locator.count()) return locator;
+    locator = scope.locator(`[id="${action.id.replace(/"/g, '\\"')}"]`);
+    if (await locator.count() === 1 && await locator.getAttribute('data-career-ops-field-id') === action.fieldId) return locator;
   }
   if (action.name) {
-    locator = page.locator(`[name="${action.name.replace(/"/g, '\\"')}"]`).first();
-    if (await locator.count()) return locator;
+    locator = scope.locator(`[name="${action.name.replace(/"/g, '\\"')}"]`);
+    if (await locator.count() === 1 && await locator.getAttribute('data-career-ops-field-id') === action.fieldId) return locator;
   }
-  if (action.label) {
-    locator = page.getByLabel(action.label, { exact: true }).first();
-    if (await locator.count()) return locator;
+  if (action.label && action.formId) {
+    locator = scope.getByLabel(action.label, { exact: true });
+    if (await locator.count() === 1 && await locator.getAttribute('data-career-ops-field-id') === action.fieldId) return locator;
   }
-  locator = page.locator(`[data-career-ops-field-id="${action.fieldId.replace(/"/g, '\\"')}"]`).first();
-  if (await locator.count()) return locator;
   throw new Error(`Form control changed and could not be reacquired: ${action.semantic}`);
 }
 
@@ -536,7 +796,9 @@ export async function executeFormPlan(page, plan) {
 export async function reviewApplicationForm(page, profile, artifacts, execution, { candidateId = null } = {}) {
   const snapshot = await inspectApplicationForm(page);
   const plan = buildFormPlan(snapshot, profile, artifacts, { candidateId });
-  const requiredMissing = snapshot.fields.filter((field) => field.visible !== false && field.required && !field.disabled
+  const applicationFields = snapshot.fields.filter((field) => snapshot.applicationFormId
+    && field.formId === snapshot.applicationFormId && field.applicationFormOwned !== false);
+  const requiredMissing = applicationFields.filter((field) => field.visible !== false && field.required && !field.disabled
     && !clean(field.value) && !field.checked && !field.files.length)
     .map((field) => ({ fieldId: field.fieldId, label: field.label, semantic: classifyField(field), reason: 'Required field remains empty.' }));
   const unresolvedFields = [...plan.unresolvedFields, ...(execution.unresolvedFields || []), ...requiredMissing];
@@ -552,8 +814,8 @@ export async function reviewApplicationForm(page, profile, artifacts, execution,
     inspectedAt: new Date().toISOString(),
     reviewedAt: new Date().toISOString(),
     currentUrl: snapshot.url,
-    formFingerprint: digest(snapshot.fields.map((field) => ({ label: field.label, type: field.type, required: field.required }))),
-    requiredFieldCount: snapshot.fields.filter((field) => field.visible !== false && field.required).length,
+    formFingerprint: digest(applicationFields.map((field) => ({ label: field.label, type: field.type, required: field.required }))),
+    requiredFieldCount: applicationFields.filter((field) => field.visible !== false && field.required).length,
     filledFields: execution.completed,
     committedSelections: execution.committedSelections,
     uploadedArtifacts: execution.uploadedArtifacts,

@@ -1,4 +1,7 @@
 import {
+  applicationControlSignature,
+  applicationFormStateFingerprint,
+  classifyApplicationControl,
   classifyCaptchaState,
   classifyUserGate,
   inspectApplicationForm as inspectLegacyApplicationForm,
@@ -21,6 +24,9 @@ import { validateNarrativeProvenanceRecord } from './application-evidence.mjs';
 
 const MAX_FIELD_ATTEMPTS = 2;
 const MAX_CONTROLLED_RESUMES = 2;
+export const MAX_PROGRESSION_TRANSITIONS = 8;
+const DEFAULT_PROGRESSION_TRANSITION_MS = 10 * 1000;
+const DEFAULT_PROGRESSION_STABILITY_MS = 600;
 
 export const DEFAULT_LIVE_FORM_LIMITS = Object.freeze({
   sessionMs: 5 * 60 * 1000,
@@ -29,6 +35,7 @@ export const DEFAULT_LIVE_FORM_LIMITS = Object.freeze({
   uploadMs: 30 * 1000,
   maxAttempts: MAX_FIELD_ATTEMPTS,
 });
+const DEFAULT_PROGRESSION_SESSION_MS = DEFAULT_LIVE_FORM_LIMITS.sessionMs;
 
 function positiveInteger(value, fallback) {
   const parsed = Number(value);
@@ -162,7 +169,11 @@ export async function inspectOperationalApplicationForm(page) {
   const snapshot = await inspectLegacyApplicationForm(page);
   const metadata = await page.evaluate(() => {
     const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const seen = new Set();
     return [...document.querySelectorAll('[data-career-ops-field-id]')].map((element) => {
+      const fieldId = clean(element.getAttribute('data-career-ops-field-id'));
+      if (!fieldId || seen.has(fieldId)) throw new Error(`Duplicate Career-Ops field identity detected: ${fieldId || '(empty)'}`);
+      seen.add(fieldId);
       const fieldset = element.closest('fieldset');
       const groupLabel = clean(fieldset?.querySelector(':scope > legend')?.innerText)
         || clean(element.closest('[role="group"], [role="radiogroup"]')?.getAttribute('aria-label'));
@@ -171,7 +182,7 @@ export async function inspectOperationalApplicationForm(page) {
       const optionLabel = ['radio', 'checkbox'].includes((element.type || '').toLowerCase()) ? ownLabel : '';
       const selected = element.tagName === 'SELECT' ? element.selectedOptions?.[0]?.textContent : '';
       return {
-        fieldId: element.getAttribute('data-career-ops-field-id'),
+        fieldId,
         groupLabel,
         questionText: groupLabel || ownLabel || formGroupLabel || element.getAttribute('aria-label') || element.placeholder || element.name || element.id || '',
         optionLabel,
@@ -190,12 +201,17 @@ export async function inspectOperationalApplicationForm(page) {
 }
 
 export function inspectOperationalUploadTopology(snapshot) {
+  const hasVerifiedFormKey = Object.prototype.hasOwnProperty.call(snapshot || {}, 'applicationFormId');
+  const applicationFormId = cleanFormText(snapshot?.applicationFormId);
   const fields = (snapshot.fields || [])
-    .filter((field) => !field.disabled && field.type === 'file')
+    .filter((field) => !field.disabled && field.type === 'file'
+      && (!hasVerifiedFormKey || (applicationFormId && field.formId === applicationFormId && field.applicationFormOwned !== false)))
     .map((field) => {
       const semantics = classifyFieldSemantics(field);
       return {
         fieldId: field.fieldId,
+        formId: field.formId || '',
+        applicationFormOwned: field.applicationFormOwned !== false,
         stableFieldId: stableFieldIdentity(field, semantics),
         label: fieldQuestion(field),
         category: semantics.category,
@@ -274,7 +290,11 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
   const answerRecords = [];
   const priorAnswers = Array.isArray(previousEvidence?.answerRecords) ? previousEvidence.answerRecords : [];
   const effectiveProfile = { ...profile, priorApprovedAnswers: priorAnswers };
-  const visibleFields = (snapshot.fields || []).filter((field) => {
+  const hasVerifiedFormKey = Object.prototype.hasOwnProperty.call(snapshot || {}, 'applicationFormId');
+  const applicationFormId = cleanFormText(snapshot?.applicationFormId);
+  const applicationFields = (snapshot.fields || []).filter((field) => !hasVerifiedFormKey
+    || (applicationFormId && field.formId === applicationFormId && field.applicationFormOwned !== false));
+  const visibleFields = applicationFields.filter((field) => {
     if (field.disabled) return false;
     const semantics = classifyFieldSemantics(field);
     return field.visible !== false
@@ -282,11 +302,42 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       || (field.required && semantics.category === 'current_location');
   });
 
+  if (hasVerifiedFormKey) {
+    if (!applicationFormId) {
+      unresolvedFields.push({
+        fieldId: 'application-form-unverified',
+        stableFieldId: 'application-form-unverified',
+        label: 'Application form',
+        category: 'workflow_identity',
+        semantic: 'application_form',
+        reason: 'No uniquely verified application form is available; no fields were filled.',
+        missingInformation: null,
+        manualActionRequired: true,
+      });
+    }
+    const unownedApplicationFields = (snapshot.fields || []).filter((field) => {
+      if (field.disabled || field.visible === false || field.formId) return false;
+      const semantics = classifyFieldSemantics(field);
+      return semantics.category !== 'unknown';
+    });
+    for (const field of unownedApplicationFields) {
+      const semantics = classifyFieldSemantics(field);
+      unresolvedFields.push(manualField(
+        field,
+        semantics,
+        applicationFormId
+          ? 'Application-like field is outside the uniquely verified application form; it was not filled.'
+          : 'No uniquely verified application form owns this field; it was not filled.',
+      ));
+    }
+  }
+
   for (const field of visibleFields) {
     const semantics = classifyFieldSemantics(field);
     const stableFieldId = stableFieldIdentity(field, semantics);
     const base = {
       fieldId: field.fieldId,
+      formId: field.formId || '',
       stableFieldId,
       id: field.id,
       label: fieldQuestion(field),
@@ -433,10 +484,21 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
     if (resolved.answerRecord) answerRecords.push(resolved.answerRecord);
   }
 
-  const finalActions = (snapshot.controls || []).filter(isSemanticFinalAction).map((control) => ({
+  const applicationControls = (snapshot.controls || []).filter((control) => (
+    snapshot.applicationFormId && control.formId === snapshot.applicationFormId
+  ));
+  const finalActions = applicationControls.filter(isSemanticFinalAction).map((control) => ({
     label: control.label || control.text || control.value || '(unlabelled submit control)',
     semanticClass: control.type === 'submit' ? 'form_submit' : 'terminal_action',
   }));
+  const progressionActions = applicationControls.filter((control) => classifyApplicationControl(control) === 'progression');
+  const ambiguousActions = applicationControls.filter((control) => (
+    classifyApplicationControl(control) === 'ambiguous'
+    && (control.type === 'submit' || control.formAction || control.invokesSubmit
+      || /\b(?:next|continue|proceed|review|apply|submit|send|complete|finish|finali[sz]e|confirm)\b/i.test(
+        cleanFormText(control.label || control.text || control.value),
+      ))
+  ));
   const uploadTopology = inspectOperationalUploadTopology(snapshot);
   if (uploadTopology.mode === 'ambiguous') {
     for (const row of uploadTopology.fields) {
@@ -452,16 +514,55 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
     unresolvedFields: dedupeRows(unresolvedFields),
     answerRecords,
     finalActions,
+    progressionActions,
+    ambiguousActions,
     uploadTopology,
     snapshotHash: digest(snapshot),
   };
 }
 
-async function installSubmissionGuard(page) {
-  await page.evaluate(() => {
-    if (globalThis.__careerOpsOperationalGuard) return;
+const operationalGuardContexts = new WeakSet();
+
+function installOperationalGuardInDocument() {
+    if (!String(globalThis.name || '').split('|').includes('career-ops-guard-active')) return;
+    if (globalThis.__careerOpsOperationalGuard?.document === document) return;
+    if (globalThis.__careerOpsOperationalGuard) delete globalThis.__careerOpsOperationalGuard;
     globalThis.__careerOpsSubmitAttempts = Number(globalThis.__careerOpsSubmitAttempts || 0);
+    globalThis.__careerOpsProgressionSubmits = Number(globalThis.__careerOpsProgressionSubmits || 0);
     const block = (event) => {
+      const permit = globalThis.__careerOpsProgressionPermit;
+      const submitter = event?.submitter;
+      const form = event?.target;
+      const liveSignature = submitter && form ? {
+        controlId: String(submitter.getAttribute('data-career-ops-control-id') || '').trim(),
+        formId: String(form.getAttribute('data-career-ops-form-id') || '').trim(),
+        label: String(submitter.getAttribute('aria-label') || submitter.innerText || submitter.value || '').replace(/\s+/g, ' ').trim().replace(/\s*&\s*/g, ' & '),
+        type: String(submitter.type || '').trim().toLowerCase(),
+        formAction: String(submitter.getAttribute('formaction') || form.getAttribute('action') || '').trim(),
+        formMethod: String(submitter.getAttribute('formmethod') || form.getAttribute('method') || 'get').trim().toLowerCase(),
+      } : null;
+      const signatureMatches = liveSignature && permit?.expected
+        && Object.keys(permit.expected).every((key) => liveSignature[key] === permit.expected[key]);
+      const permitted = Boolean(
+        permit
+        && permit.classification === 'progression'
+        && permit.consumed !== true
+        && Date.now() <= permit.expiresAt
+        && permit.applicationIdentity === globalThis.__careerOpsApplicationIdentity
+        && permit.stateFingerprint === globalThis.__careerOpsCurrentStateFingerprint
+        && submitter
+        && submitter === permit.controlElement
+        && form
+        && form === permit.formElement
+        && signatureMatches
+      );
+      if (permitted) {
+        permit.consumed = true;
+        delete globalThis.__careerOpsProgressionPermit;
+        globalThis.__careerOpsProgressionSubmits += 1;
+        return;
+      }
+      delete globalThis.__careerOpsProgressionPermit;
       globalThis.__careerOpsSubmitAttempts += 1;
       event?.preventDefault?.();
       event?.stopImmediatePropagation?.();
@@ -469,11 +570,36 @@ async function installSubmissionGuard(page) {
     };
     const nativeSubmit = HTMLFormElement.prototype.submit;
     const nativeRequestSubmit = HTMLFormElement.prototype.requestSubmit;
-    globalThis.__careerOpsOperationalGuard = { block, nativeSubmit, nativeRequestSubmit };
+    globalThis.__careerOpsOperationalGuard = { block, nativeSubmit, nativeRequestSubmit, document };
     document.addEventListener('submit', block, true);
     HTMLFormElement.prototype.submit = function guardedSubmit() { block(); };
-    HTMLFormElement.prototype.requestSubmit = function guardedRequestSubmit() { block(); };
+    HTMLFormElement.prototype.requestSubmit = function guardedRequestSubmit(submitter) {
+      const permit = globalThis.__careerOpsProgressionPermit;
+      const exact = arguments.length === 1
+        && submitter
+        && permit
+        && permit.classification === 'progression'
+        && permit.consumed !== true
+        && Date.now() <= permit.expiresAt
+        && submitter === permit.controlElement
+        && this === permit.formElement;
+      if (exact) return nativeRequestSubmit.call(this, submitter);
+      return block();
+    };
+}
+
+async function installSubmissionGuard(page) {
+  const context = page.context?.();
+  if (context?.addInitScript && !operationalGuardContexts.has(context)) {
+    await context.addInitScript(installOperationalGuardInDocument);
+    operationalGuardContexts.add(context);
+  }
+  await page.evaluate(() => {
+    const parts = String(globalThis.name || '').split('|').filter(Boolean);
+    if (!parts.includes('career-ops-guard-active')) parts.push('career-ops-guard-active');
+    globalThis.name = parts.join('|');
   });
+  await page.evaluate(installOperationalGuardInDocument);
 }
 
 export async function removeOperationalSubmissionGuard(page) {
@@ -483,27 +609,169 @@ export async function removeOperationalSubmissionGuard(page) {
     document.removeEventListener('submit', guard.block, true);
     HTMLFormElement.prototype.submit = guard.nativeSubmit;
     HTMLFormElement.prototype.requestSubmit = guard.nativeRequestSubmit;
+    delete globalThis.__careerOpsProgressionPermit;
+    delete globalThis.__careerOpsCurrentStateFingerprint;
+    delete globalThis.__careerOpsApplicationIdentity;
+    globalThis.name = String(globalThis.name || '').split('|').filter((part) => part && part !== 'career-ops-guard-active').join('|');
     delete globalThis.__careerOpsOperationalGuard;
   });
 }
 
+export async function grantProgressionPermit(page, control, {
+  applicationIdentity,
+  stateFingerprint,
+  timeoutMs = DEFAULT_PROGRESSION_TRANSITION_MS,
+} = {}) {
+  if (classifyApplicationControl(control) !== 'progression') {
+    throw new Error('Progression permit refused for a non-progression control.');
+  }
+  await installSubmissionGuard(page);
+  const expected = applicationControlSignature(control);
+  return page.evaluate(({ expected, applicationIdentity: identity, stateFingerprint: fingerprint, timeoutMs: ttl }) => {
+    delete globalThis.__careerOpsProgressionPermit;
+    const controls = [...document.querySelectorAll(`[data-career-ops-control-id="${CSS.escape(expected.controlId)}"]`)];
+    const forms = [...document.querySelectorAll(`[data-career-ops-form-id="${CSS.escape(expected.formId)}"]`)];
+    if (controls.length !== 1 || forms.length !== 1) return false;
+    const controlElement = controls[0];
+    const formElement = forms[0];
+    if ((controlElement.form || controlElement.closest('form')) !== formElement) return false;
+    const live = {
+      controlId: String(controlElement.getAttribute('data-career-ops-control-id') || '').trim(),
+      formId: String(formElement.getAttribute('data-career-ops-form-id') || '').trim(),
+      label: String(controlElement.getAttribute('aria-label') || controlElement.innerText || controlElement.value || '').replace(/\s+/g, ' ').trim().replace(/\s*&\s*/g, ' & '),
+      type: String(controlElement.type || '').trim().toLowerCase(),
+      formAction: String(controlElement.getAttribute('formaction') || formElement.getAttribute('action') || '').trim(),
+      formMethod: String(controlElement.getAttribute('formmethod') || formElement.getAttribute('method') || 'get').trim().toLowerCase(),
+    };
+    if (!Object.keys(expected).every((key) => live[key] === expected[key])) return false;
+    globalThis.__careerOpsApplicationIdentity = identity;
+    globalThis.__careerOpsCurrentStateFingerprint = fingerprint;
+    globalThis.__careerOpsProgressionPermit = {
+      controlId: expected.controlId,
+      formId: expected.formId,
+      applicationIdentity: identity,
+      stateFingerprint: fingerprint,
+      classification: 'progression',
+      expiresAt: Date.now() + ttl,
+      consumed: false,
+      controlElement,
+      formElement,
+      expected,
+    };
+    return true;
+  }, {
+    expected,
+    applicationIdentity,
+    stateFingerprint,
+    timeoutMs,
+  });
+}
+
+export async function clearProgressionPermit(page) {
+  await page.evaluate(() => {
+    delete globalThis.__careerOpsProgressionPermit;
+    delete globalThis.__careerOpsCurrentStateFingerprint;
+  }).catch(() => {});
+}
+
+export async function activateProgressionControl(page, control, options = {}) {
+  if (classifyApplicationControl(control) !== 'progression') {
+    throw new Error('Refusing to activate a final or ambiguous application control.');
+  }
+  const locator = page.locator(`[data-career-ops-control-id="${String(control.controlId).replace(/"/g, '\\"')}"]`);
+  if (await locator.count() !== 1) {
+    await clearProgressionPermit(page);
+    throw new Error('Progression control identity is no longer exact.');
+  }
+  const liveSnapshot = await inspectOperationalApplicationForm(page);
+  const liveControl = liveSnapshot.controls.find((item) => item.controlId === control.controlId);
+  if (!liveControl || classifyApplicationControl(liveControl) !== 'progression'
+      || JSON.stringify(applicationControlSignature(liveControl)) !== JSON.stringify(applicationControlSignature(control))) {
+    await clearProgressionPermit(page);
+    throw new Error('Progression control changed or is no longer semantically intermediate.');
+  }
+  const liveFingerprint = applicationFormStateFingerprint(liveSnapshot);
+  if (liveFingerprint !== options.stateFingerprint) {
+    await clearProgressionPermit(page);
+    throw new Error('Application form state changed before progression activation.');
+  }
+  const granted = await grantProgressionPermit(page, liveControl, options);
+  if (!granted) throw new Error('Progression control identity changed before activation.');
+  try {
+    await locator.click({ timeout: options.timeoutMs || DEFAULT_PROGRESSION_TRANSITION_MS });
+  } finally {
+    await clearProgressionPermit(page);
+  }
+}
+
+export async function waitForApplicationStateTransition(page, beforeFingerprint, {
+  timeoutMs = DEFAULT_PROGRESSION_TRANSITION_MS,
+  pollMs = 200,
+  stabilityMs = DEFAULT_PROGRESSION_STABILITY_MS,
+  inspect = inspectOperationalApplicationForm,
+  clock = () => Date.now(),
+} = {}) {
+  const started = clock();
+  let latest = null;
+  let changedFingerprint = null;
+  let stableSince = null;
+  while (clock() - started < timeoutMs) {
+    await installSubmissionGuard(page).catch(() => {});
+    latest = await inspect(page);
+    const fingerprint = applicationFormStateFingerprint(latest);
+    if (fingerprint !== beforeFingerprint) {
+      if (fingerprint !== changedFingerprint) {
+        changedFingerprint = fingerprint;
+        stableSince = clock();
+      } else if (clock() - stableSince >= stabilityMs) {
+        return { snapshot: latest, fingerprint, durationMs: clock() - started };
+      }
+    } else {
+      changedFingerprint = null;
+      stableSince = null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+  return { snapshot: latest, fingerprint: latest ? applicationFormStateFingerprint(latest) : beforeFingerprint, durationMs: clock() - started, timedOut: true };
+}
+
+function isSameVerifiedApplicationOrigin(beforeUrl, afterUrl) {
+  try {
+    const before = new URL(beforeUrl);
+    const after = new URL(afterUrl);
+    return ['http:', 'https:'].includes(after.protocol) && before.origin === after.origin;
+  } catch {
+    return false;
+  }
+}
+
 async function exactLocator(page, action) {
-  const selectors = [
-    `[data-career-ops-field-id="${String(action.fieldId).replace(/"/g, '\\"')}"]`,
-  ];
-  if (action.id) selectors.push(`[id="${String(action.id).replace(/"/g, '\\"')}"]`);
-  if (action.name) selectors.push(`[name="${String(action.name).replace(/"/g, '\\"')}"]`);
-  for (const selector of selectors) {
+  const formPrefix = action.formId
+    ? `[data-career-ops-form-id="${String(action.formId).replace(/"/g, '\\"')}"] `
+    : '';
+  const expectedFieldId = String(action.fieldId);
+  const stamped = page.locator(`${formPrefix}[data-career-ops-field-id="${expectedFieldId.replace(/"/g, '\\"')}"]`);
+  const stampedCount = await stamped.count();
+  if (stampedCount === 1) return stamped;
+  if (stampedCount > 1) {
+    throw new Error(`Career-Ops exact field identity is ambiguous for ${action.semantic}`);
+  }
+  const fallbackSelectors = [];
+  if (action.id) fallbackSelectors.push(`${formPrefix}[id="${String(action.id).replace(/"/g, '\\"')}"]`);
+  if (action.name) fallbackSelectors.push(`${formPrefix}[name="${String(action.name).replace(/"/g, '\\"')}"]`);
+  for (const selector of fallbackSelectors) {
     const locator = page.locator(selector);
     const count = await locator.count();
-    if (count === 1) return locator;
-    if (count > 1 && selector.startsWith('[data-career-ops-field-id=')) {
-      throw new Error(`Career-Ops exact field identity is ambiguous for ${action.semantic}`);
+    if (count === 1 && await locator.getAttribute('data-career-ops-field-id') === expectedFieldId) {
+      return locator;
     }
   }
-  if (action.label && action.action !== 'upload') {
-    const locator = page.getByLabel(action.label, { exact: true });
-    if (await locator.count() === 1) return locator;
+  if (action.label && action.action !== 'upload' && action.formId) {
+    const locator = page.locator(`[data-career-ops-form-id="${String(action.formId).replace(/"/g, '\\"')}"]`).getByLabel(action.label, { exact: true });
+    if (await locator.count() === 1) {
+      const fieldId = await locator.getAttribute('data-career-ops-field-id');
+      if (fieldId === expectedFieldId) return locator;
+    }
   }
   throw new Error(`Form control changed and could not be reacquired: ${action.semantic}`);
 }
@@ -869,7 +1137,9 @@ export async function reviewOperationalApplicationForm(page, profile, artifacts,
     () => Boolean(globalThis.__careerOpsOperationalGuard),
   ).catch(() => null);
   const plan = buildOperationalFormPlan(snapshot, profile, artifacts, { context, previousEvidence });
-  const requiredMissing = snapshot.fields.filter(requiredEmpty).map((field) => {
+  const applicationFields = snapshot.fields.filter((field) => snapshot.applicationFormId
+    && field.formId === snapshot.applicationFormId && field.applicationFormOwned !== false);
+  const requiredMissing = applicationFields.filter(requiredEmpty).map((field) => {
     const semantics = classifyFieldSemantics(field);
     return manualField(field, semantics, 'Required field remains empty.');
   });
@@ -896,13 +1166,13 @@ export async function reviewOperationalApplicationForm(page, profile, artifacts,
     inspectedAt: new Date().toISOString(),
     reviewedAt: new Date().toISOString(),
     currentUrl: snapshot.url,
-    formFingerprint: digest(snapshot.fields.map((field) => ({
+    formFingerprint: digest(applicationFields.map((field) => ({
       stableFieldId: stableFieldIdentity(field, classifyFieldSemantics(field)),
       label: fieldQuestion(field),
       type: field.type,
       required: field.required,
     }))),
-    requiredFieldCount: snapshot.fields.filter((field) => field.visible !== false && field.required).length,
+    requiredFieldCount: applicationFields.filter((field) => field.visible !== false && field.required).length,
     filledFields: execution.completed || [],
     committedSelections: execution.committedSelections || [],
     uploadedArtifacts: execution.uploadedArtifacts || [],
@@ -941,7 +1211,7 @@ export async function reviewOperationalApplicationForm(page, profile, artifacts,
       uploadTopologyBefore: null,
       uploadTopologyAfter: plan.uploadTopology,
       submissionGuardActiveAtHandoff,
-      phoneControls: snapshot.fields
+      phoneControls: applicationFields
         .map((field) => ({ field, semantics: classifyFieldSemantics(field) }))
         .filter(({ field, semantics }) => field.type === 'tel' || ['phone', 'phone_country', 'phone_dial_code'].includes(semantics.semantic))
         .map(({ field, semantics }) => ({
@@ -985,6 +1255,10 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
   limits = null,
   clock = () => Date.now(),
   performActionImpl = performAction,
+  transitionTimeoutMs = DEFAULT_PROGRESSION_TRANSITION_MS,
+  progressionSessionMs = DEFAULT_PROGRESSION_SESSION_MS,
+  transitionStabilityMs = DEFAULT_PROGRESSION_STABILITY_MS,
+  waitForTransitionImpl = waitForApplicationStateTransition,
 } = {}) {
   const effectiveLimits = resolveOperationalFormLimits(profile, limits || {});
   const sessionDeadlineMs = clock() + effectiveLimits.sessionMs;
@@ -1046,64 +1320,192 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
     };
   }
 
-  const snapshot = await inspectOperationalApplicationForm(page);
-  const gate = classifyUserGate(snapshot);
-  const emptyExecution = {
-    completed: [],
-    uploadedArtifacts: [],
-    committedSelections: [],
-    unresolvedFields: [],
-    attemptLedger: effectivePreviousEvidence?.attemptLedger || [],
-    timeLimits: effectiveLimits,
-    sessionLimitReached: false,
-    precomputedNarrativeCount: 0,
+  const priorProgression = effectivePreviousEvidence?.progression || {};
+  const progression = {
+    stepsAdvanced: Number(priorProgression.stepsAdvanced || 0),
+    transitions: [...(priorProgression.transitions || [])],
+    visitedFingerprints: [...(priorProgression.visitedFingerprints || [])],
+    maxTransitions: MAX_PROGRESSION_TRANSITIONS,
+    transitionTimeoutMs,
+    deadlineReached: false,
   };
-  if (gate) {
-    const reviewed = await reviewOperationalApplicationForm(page, profile, artifacts, emptyExecution, {
-      context, previousEvidence: effectivePreviousEvidence, passId, resumeMode,
-    });
-    return { gate, ...reviewed };
+  const visited = new Set();
+  const historicalVisited = new Set(progression.visitedFingerprints);
+  const progressionDeadlineMs = Math.min(sessionDeadlineMs, clock() + Math.min(progressionSessionMs, effectiveLimits.sessionMs));
+  const aggregate = {
+    completed: [], uploadedArtifacts: [], committedSelections: [], unresolvedFields: [],
+    attemptLedger: effectivePreviousEvidence?.attemptLedger || [],
+    timeLimits: effectiveLimits, sessionLimitReached: false, precomputedNarrativeCount: 0,
+  };
+  const applicationIdentity = digest({
+    batchId: context.batchId || null,
+    candidateId: context.candidate?.candidate_id || context.candidate?.candidateId || null,
+  });
+  let outcome;
+  await installSubmissionGuard(page);
+  try {
+    while (true) {
+      const snapshot = await inspectOperationalApplicationForm(page);
+      const stateFingerprint = applicationFormStateFingerprint(snapshot);
+      if (visited.has(stateFingerprint)) {
+        outcome = {
+          gate: { state: 'review_required', reason: 'Application form-state loop detected; progression stopped safely.' },
+          snapshot,
+        };
+        break;
+      }
+      visited.add(stateFingerprint);
+      progression.visitedFingerprints = [...new Set([...historicalVisited, ...visited])];
+
+      const gate = classifyUserGate(snapshot);
+      if (gate) {
+        outcome = { gate, snapshot };
+        break;
+      }
+
+      const plan = buildOperationalFormPlan(snapshot, profile, artifacts, { context, previousEvidence: effectivePreviousEvidence });
+      const applicationFields = snapshot.fields.filter((field) => snapshot.applicationFormId
+        && field.formId === snapshot.applicationFormId && field.applicationFormOwned !== false);
+      plan.formFingerprint = digest(applicationFields.map((field) => stableFieldIdentity(field, classifyFieldSemantics(field))));
+      plan.actions = plan.actions.map((action) => ({
+        ...action,
+        batchId: context.batchId || null,
+        candidateId: context.candidate?.candidate_id || null,
+      }));
+      const execution = await executeOperationalFormPlanGuarded(page, plan, {
+        previousEvidence: { ...effectivePreviousEvidence, attemptLedger: aggregate.attemptLedger },
+        clock,
+        limits: effectiveLimits,
+        sessionDeadlineMs,
+        performActionImpl,
+      });
+      execution.precomputedNarrativeCount = plan.answerRecords.length;
+      for (const key of ['completed', 'uploadedArtifacts', 'committedSelections', 'unresolvedFields']) {
+        aggregate[key].push(...(execution[key] || []));
+      }
+      aggregate.attemptLedger = execution.attemptLedger;
+      aggregate.sessionLimitReached ||= execution.sessionLimitReached;
+      aggregate.precomputedNarrativeCount += plan.answerRecords.length;
+
+      const reviewed = await reviewOperationalApplicationForm(page, profile, artifacts, aggregate, {
+        context, previousEvidence: effectivePreviousEvidence, passId, resumeMode,
+      });
+      reviewed.evidence.progression = { ...progression, progressionSubmits: reviewed.snapshot.progressionSubmits || 0 };
+      reviewed.evidence.evidenceHash = digest({ ...reviewed.evidence, evidenceHash: undefined });
+      const currentSnapshot = reviewed.snapshot;
+      const currentPlan = reviewed.plan;
+      const currentStateFingerprint = applicationFormStateFingerprint(currentSnapshot);
+      const staleProgressionMutation = plan.progressionActions.find((oldControl) => {
+        const liveControl = currentSnapshot.controls.find((item) => item.controlId === oldControl.controlId);
+        return !liveControl
+          || classifyApplicationControl(liveControl) !== 'progression'
+          || JSON.stringify(applicationControlSignature(liveControl)) !== JSON.stringify(applicationControlSignature(oldControl));
+      });
+
+      if (reviewed.evidence.captcha.manualActionRequired) {
+        outcome = { ...reviewed, gate: { state: 'review_required', reason: `CAPTCHA requires manual completion (${reviewed.evidence.captcha.classification}).` } };
+        break;
+      }
+      if (reviewed.evidence.unresolvedFields.length || reviewed.evidence.validationErrors.length) {
+        outcome = { ...reviewed, gate: { state: 'review_required', reason: 'Controlled form preparation found unresolved or invalid fields; review is required.' } };
+        break;
+      }
+      if (staleProgressionMutation) {
+        outcome = { ...reviewed, gate: { state: 'review_required', reason: 'A progression control changed after form filling; no control was activated.' } };
+        break;
+      }
+      if (currentPlan.finalActions.length) {
+        outcome = reviewed;
+        break;
+      }
+      if (currentPlan.ambiguousActions.length || currentPlan.progressionActions.length !== 1) {
+        const reason = currentPlan.ambiguousActions.length
+          ? 'Application progression control is ambiguous; no control was activated.'
+          : 'A unique verified progression control was not available; no control was activated.';
+        outcome = { ...reviewed, gate: { state: 'review_required', reason } };
+        break;
+      }
+      if (progression.stepsAdvanced >= MAX_PROGRESSION_TRANSITIONS) {
+        outcome = { ...reviewed, gate: { state: 'review_required', reason: 'Maximum of 8 verified progression transitions reached; continue manually.' } };
+        break;
+      }
+      if (clock() >= progressionDeadlineMs) {
+        progression.deadlineReached = true;
+        reviewed.evidence.progression = { ...progression, progressionSubmits: reviewed.snapshot.progressionSubmits || 0 };
+        reviewed.evidence.evidenceHash = digest({ ...reviewed.evidence, evidenceHash: undefined });
+        outcome = { ...reviewed, gate: { state: 'review_required', reason: 'Overall application progression deadline reached; continue manually.' } };
+        break;
+      }
+
+      const control = currentPlan.progressionActions[0];
+      const startedAt = clock();
+      try {
+        await activateProgressionControl(page, control, {
+          applicationIdentity,
+          stateFingerprint: currentStateFingerprint,
+          timeoutMs: Math.min(transitionTimeoutMs, Math.max(1, progressionDeadlineMs - clock())),
+        });
+      } catch (error) {
+        outcome = { ...reviewed, gate: { state: 'review_required', reason: `Progression control changed before safe activation: ${cleanFormText(error.message)}` } };
+        break;
+      }
+      const transition = await waitForTransitionImpl(page, currentStateFingerprint, {
+        timeoutMs: Math.min(transitionTimeoutMs, Math.max(1, progressionDeadlineMs - clock())),
+        stabilityMs: transitionStabilityMs,
+      });
+      await clearProgressionPermit(page);
+      if (transition.timedOut || transition.fingerprint === currentStateFingerprint) {
+        outcome = { ...reviewed, gate: { state: 'review_required', reason: 'Progression activation produced no verified application-state transition.' } };
+        break;
+      }
+      const continuity = typeof context.verifyApplicationContinuity === 'function'
+        ? context.verifyApplicationContinuity({
+          beforeUrl: currentSnapshot.url,
+          currentUrl: transition.snapshot?.url,
+          snapshot: transition.snapshot,
+          candidate: context.candidate,
+        })
+        : { verified: isSameVerifiedApplicationOrigin(currentSnapshot.url, transition.snapshot?.url), reason: 'origin-only fallback' };
+      if (!continuity?.verified) {
+        outcome = { ...reviewed, gate: { state: 'review_required', reason: `Application continuity check failed: ${cleanFormText(continuity?.reason || 'unverified application identity')}` } };
+        break;
+      }
+      if (visited.has(transition.fingerprint) || historicalVisited.has(transition.fingerprint)) {
+        progression.transitions.push({
+          controlId: control.controlId, label: control.label, before: currentStateFingerprint,
+          after: transition.fingerprint, durationMs: transition.durationMs, loopDetected: true,
+        });
+        reviewed.evidence.progression = { ...progression, progressionSubmits: Number(reviewed.snapshot.progressionSubmits || 0) + 1 };
+        reviewed.evidence.evidenceHash = digest({ ...reviewed.evidence, evidenceHash: undefined });
+        outcome = { ...reviewed, gate: { state: 'review_required', reason: 'Application form-state loop detected after progression; stopped safely.' } };
+        break;
+      }
+      progression.stepsAdvanced += 1;
+      progression.transitions.push({
+        controlId: control.controlId,
+        label: control.label,
+        before: currentStateFingerprint,
+        after: transition.fingerprint,
+        durationMs: transition.durationMs ?? Math.max(0, clock() - startedAt),
+      });
+    }
+  } finally {
+    await clearProgressionPermit(page);
+    await removeOperationalSubmissionGuard(page);
   }
 
-  const plan = buildOperationalFormPlan(snapshot, profile, artifacts, { context, previousEvidence: effectivePreviousEvidence });
-  plan.formFingerprint = digest(snapshot.fields.map((field) => stableFieldIdentity(field, classifyFieldSemantics(field))));
-  plan.actions = plan.actions.map((action) => ({
-    ...action,
-    batchId: context.batchId || null,
-    candidateId: context.candidate?.candidate_id || null,
-  }));
-  const execution = await executeOperationalFormPlan(page, plan, {
-    previousEvidence: effectivePreviousEvidence,
-    clock,
-    limits: effectiveLimits,
-    sessionDeadlineMs,
-    performActionImpl,
-  });
-  execution.precomputedNarrativeCount = plan.answerRecords.length;
-  execution.completed.unshift(...plan.preservedFields.filter((row) => !execution.completed.some((item) => item.stableFieldId === row.stableFieldId)));
-  execution.uploadedArtifacts.unshift(...plan.preservedUploads.filter((row) => !execution.uploadedArtifacts.some((item) => item.sha256 === row.sha256)));
-  const reviewed = await reviewOperationalApplicationForm(page, profile, artifacts, execution, {
-    context, previousEvidence: effectivePreviousEvidence, passId, resumeMode,
-  });
-  if (reviewed.evidence.captcha.manualActionRequired) {
-    return {
-      ...reviewed,
-      gate: {
-        state: 'review_required',
-        reason: `CAPTCHA remains for manual completion after one controlled form pass (${reviewed.evidence.captcha.classification}).`,
-      },
-    };
+  if (!outcome.evidence) {
+    const reviewed = await reviewOperationalApplicationForm(page, profile, artifacts, aggregate, {
+      context, previousEvidence: effectivePreviousEvidence, passId, resumeMode,
+    });
+    outcome = { ...reviewed, gate: outcome.gate };
   }
-  if (reviewed.evidence.unresolvedFields.length || reviewed.evidence.validationErrors.length) {
-    return {
-      ...reviewed,
-      gate: {
-        state: 'review_required',
-        reason: 'One controlled pass completed; unresolved fields require manual review without restarting the form.',
-      },
-    };
-  }
-  return reviewed;
+  outcome.evidence.progression = { ...progression, progressionSubmits: outcome.snapshot?.progressionSubmits || progression.stepsAdvanced };
+  outcome.evidence.operationalArtifacts.submissionGuardActiveAtHandoff = false;
+  outcome.evidence.browserOpenRequired = Boolean(outcome.gate) || outcome.evidence.userActionRequired;
+  outcome.evidence.browserSession.keepOpenRequired = outcome.evidence.browserOpenRequired;
+  outcome.evidence.evidenceHash = digest({ ...outcome.evidence, evidenceHash: undefined });
+  return outcome;
 }
 
 export {

@@ -668,6 +668,7 @@ function validateFormPreparation(value) {
     'reviewComplete', 'evidenceHash', 'passId', 'resumeMode', 'attemptLedger',
     'answerRecords', 'browserOpenRequired', 'passBudget', 'browserSession',
     'operationalArtifacts', 'uploadTopology', 'captcha',
+    'progression',
   ]), 'form preparation');
   if (![1, 2].includes(value.schemaVersion)) throw new Error('Unsupported form preparation schema version');
   for (const key of ['filledFields', 'committedSelections', 'uploadedArtifacts', 'unresolvedFields', 'validationErrors']) {
@@ -698,6 +699,17 @@ function validateFormPreparation(value) {
       'visibleChallenge', 'blockingOverlay', 'totalFields', 'accessibleFields',
       'requiredDisabledFields', 'scriptCount', 'elementCount', 'textSignal',
     ]), 'form preparation captcha evidence');
+  }
+  if (value.progression != null) {
+    assertKnownFields(value.progression, new Set([
+      'stepsAdvanced', 'transitions', 'visitedFingerprints', 'maxTransitions',
+      'transitionTimeoutMs', 'deadlineReached', 'progressionSubmits',
+    ]), 'form preparation progression');
+    if (!Number.isInteger(value.progression.stepsAdvanced) || value.progression.stepsAdvanced < 0
+        || value.progression.stepsAdvanced > 8 || !Array.isArray(value.progression.transitions)
+        || !Array.isArray(value.progression.visitedFingerprints)) {
+      throw new Error('Invalid form preparation progression evidence');
+    }
   }
   if (value.reviewComplete && (value.unresolvedFields.length || value.validationErrors.length
       || value.userActionRequired || value.finalAction?.activated !== false)) {
