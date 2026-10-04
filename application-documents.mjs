@@ -25,12 +25,14 @@ import { loadApplicationProfile, selectApprovedCv } from './application-profile.
 import { generateCustomNarrativeAnswer, normalizeFormQuestion } from './application-form-policy.mjs';
 import {
   createNarrativeProvenanceRecord,
+  NarrativeEvidenceUnavailableError,
   revalidateFactualEvidence,
   validateNarrativeProvenanceRecord,
 } from './application-evidence.mjs';
 import { mergeApplicationPdfs } from './application-pdf.mjs';
 
-export const APPLICATION_DOCUMENT_PLAN_SCHEMA_VERSION = 2;
+export const APPLICATION_DOCUMENT_PLAN_SCHEMA_VERSION = 3;
+export const COVER_LETTER_TEMPLATE_ID = 'cover-letter-v1';
 
 function clean(value) {
   return String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
@@ -94,6 +96,7 @@ export function buildGroundedCoverLetter(profile, candidate, jdText, cvSelection
   });
   const factualEvidence = revalidateFactualEvidence(profile, narrative.factualSources);
   const paragraphs = [
+    'Dear Hiring Team,',
     `I am applying for the ${candidate.title} role at ${candidate.company}.`,
     narrative.answer,
     `The job description emphasizes ${requirementText}. I would welcome an interview to discuss the role and the factual examples above.`,
@@ -110,7 +113,7 @@ export function buildGroundedCoverLetter(profile, candidate, jdText, cvSelection
     normalizedQuestion: normalizeFormQuestion('cover letter document'),
     answer: body,
     wording: 'generated',
-    templateId: 'cover-letter-v1',
+    templateId: COVER_LETTER_TEMPLATE_ID,
     factualEvidence,
   });
   return {
@@ -129,20 +132,38 @@ export function buildGroundedCoverLetter(profile, candidate, jdText, cvSelection
         role_title: candidate.title,
         company: candidate.company,
         date: now.toISOString().slice(0, 10),
-        greeting: 'Dear Hiring Team,',
-        opening: paragraphs[0],
-        profile_intro: paragraphs[1],
-        achievements: factualEvidence.map((item) => ({ lead: item.evidenceIdentity, impact: item.text })),
-        problems_section: paragraphs.at(-2),
-        closing: paragraphs.at(-1),
+        greeting: paragraphs[0],
+        opening: paragraphs[1],
+        profile_intro: paragraphs[2],
+        achievements: [],
+        problems_section: paragraphs[3],
+        closing: paragraphs[4],
       },
       audit: {
         schemaVersion: 2,
         narrativeProvenance: provenance,
         wordCount: body.split(/\s+/).filter(Boolean).length,
         requirements,
+        selectedCvVariant: cvSelection.variant,
       },
     },
+  };
+}
+
+function documentSourceHashes(profile) {
+  return Object.fromEntries(['profile', 'cv'].map((key) => {
+    const value = profile.sourceFiles[key];
+    if (!value) throw new Error(`Required document source is unavailable: ${key}`);
+    return [key, { path: value.path, sha256: value.sha256, size: value.size }];
+  }));
+}
+
+function reviewRequiredFor(error) {
+  return {
+    state: 'review_required',
+    code: 'narrative_evidence_migration_required',
+    reason: `Automatic cover-letter generation is unavailable: ${error.message}`,
+    action: 'Review the narrative field and migrate application_form.narrative_evidence to stable factual CV/profile provenance.',
   };
 }
 
@@ -151,11 +172,8 @@ export function createDocumentPlan({ manifestPath, candidateId, jdFile = null, r
   const profile = loadApplicationProfile(root);
   const jd = resolveJdEvidence(root, contract.sourceCandidate, jdFile);
   const cvSelection = selectApprovedCv(profile, contract.candidate, jd.text);
-  const cover = buildGroundedCoverLetter(profile, contract.candidate, jd.text, cvSelection, now);
-  const coverPdfFilename = coverLetterFilename(contract.candidate.company);
-  const coverTextFilename = coverPdfFilename.replace(/\.pdf$/i, '.txt');
   const documentsDir = join(dirname(contract.manifestPath), 'documents', contract.candidate.candidate_id);
-  const plan = {
+  const basePlan = {
     schemaVersion: APPLICATION_DOCUMENT_PLAN_SCHEMA_VERSION,
     batchId: contract.manifest.batchId,
     sourceRunId: contract.manifest.sourceRunId,
@@ -163,9 +181,7 @@ export function createDocumentPlan({ manifestPath, candidateId, jdFile = null, r
     createdAt: now.toISOString(),
     sourceCandidateSha256: contract.candidate.sourceCandidateSha256,
     jd: { kind: jd.kind, path: jd.path, sha256: jd.sha256, size: jd.size },
-    sourceHashes: Object.fromEntries(Object.entries(profile.sourceFiles).map(([key, value]) => [key, {
-      path: value.path, sha256: value.sha256, size: value.size,
-    }])),
+    sourceHashes: documentSourceHashes(profile),
     cv: {
       variant: cvSelection.variant,
       decision: cvSelection.decision,
@@ -173,20 +189,47 @@ export function createDocumentPlan({ manifestPath, candidateId, jdFile = null, r
       path: cvSelection.path,
       ...hashFile(cvSelection.path),
     },
-    coverLetter: {
-      required: true,
-      pdfPath: join(documentsDir, coverPdfFilename),
-      textPath: join(documentsDir, coverTextFilename),
-      payload: cover.payload,
-      text: cover.text,
-      provenance: cover.provenance,
-    },
   };
+  let plan;
+  try {
+    const cover = buildGroundedCoverLetter(profile, contract.candidate, jd.text, cvSelection, now);
+    const coverPdfFilename = coverLetterFilename(contract.candidate.company);
+    plan = {
+      ...basePlan,
+      documentState: 'ready',
+      reviewRequired: null,
+      coverLetter: {
+        required: true,
+        available: true,
+        pdfPath: join(documentsDir, coverPdfFilename),
+        textPath: join(documentsDir, coverPdfFilename.replace(/\.pdf$/i, '.txt')),
+        payload: cover.payload,
+        text: cover.text,
+        provenance: cover.provenance,
+      },
+    };
+  } catch (error) {
+    if (!(error instanceof NarrativeEvidenceUnavailableError)) throw error;
+    plan = {
+      ...basePlan,
+      documentState: 'review_required',
+      reviewRequired: reviewRequiredFor(error),
+      coverLetter: {
+        required: true,
+        available: false,
+        pdfPath: null,
+        textPath: null,
+        payload: null,
+        text: null,
+        provenance: null,
+      },
+    };
+  }
   plan.planHash = sha256Canonical(plan);
   return plan;
 }
 
-function validatePlanFresh(plan, manifestPath, root) {
+export function validateDocumentPlan(plan, manifestPath, root = ROOT) {
   if (plan.schemaVersion !== APPLICATION_DOCUMENT_PLAN_SCHEMA_VERSION) throw new Error('Unsupported application document plan schema');
   if (plan.planHash !== sha256Canonical(Object.fromEntries(Object.entries(plan).filter(([key]) => key !== 'planHash')))) {
     throw new Error('Application document plan integrity mismatch');
@@ -196,24 +239,56 @@ function validatePlanFresh(plan, manifestPath, root) {
       || contract.candidate.sourceCandidateSha256 !== plan.sourceCandidateSha256) {
     throw new Error('Application document plan no longer matches the exact batch candidate');
   }
-  for (const source of Object.values(plan.sourceHashes)) {
-    const current = hashFile(source.path);
-    if (current.sha256 !== source.sha256 || current.size !== source.size) throw new Error(`Document source changed after planning: ${source.path}`);
-  }
-  const currentCv = hashFile(plan.cv.path);
-  if (currentCv.sha256 !== plan.cv.sha256 || currentCv.size !== plan.cv.size) throw new Error('Selected CV changed after planning');
-  if (plan.jd.path) {
-    const currentJd = hashFile(plan.jd.path);
-    if (currentJd.sha256 !== plan.jd.sha256 || currentJd.size !== plan.jd.size) throw new Error('JD changed after planning');
-  }
   const profile = loadApplicationProfile(root);
+  const expectedSources = documentSourceHashes(profile);
+  if (sha256Canonical(plan.sourceHashes) !== sha256Canonical(expectedSources)) throw new Error('Document source dependencies are stale or over-broad');
+  const jd = resolveJdEvidence(root, contract.sourceCandidate, plan.jd?.path || null);
+  if (sha256Canonical(plan.jd) !== sha256Canonical({ kind: jd.kind, path: jd.path, sha256: jd.sha256, size: jd.size })) {
+    throw new Error('JD changed after planning');
+  }
+  const cvSelection = selectApprovedCv(profile, contract.candidate, jd.text);
+  const expectedCv = {
+    variant: cvSelection.variant,
+    decision: cvSelection.decision,
+    scores: cvSelection.scores,
+    path: cvSelection.path,
+    ...hashFile(cvSelection.path),
+  };
+  if (sha256Canonical(plan.cv) !== sha256Canonical(expectedCv)) throw new Error('Selected CV changed after planning');
+  if (!['ready', 'review_required'].includes(plan.documentState)) throw new Error('Document plan state is invalid');
+  if (plan.documentState === 'review_required') {
+    let unavailable;
+    try {
+      buildGroundedCoverLetter(profile, contract.candidate, jd.text, cvSelection, new Date(plan.createdAt));
+    } catch (error) {
+      if (error instanceof NarrativeEvidenceUnavailableError) unavailable = error;
+      else throw error;
+    }
+    if (!unavailable) throw new Error('Document review state is stale because grounded cover-letter evidence is now available');
+    const expectedReview = reviewRequiredFor(unavailable);
+    const expectedCover = { required: true, available: false, pdfPath: null, textPath: null, payload: null, text: null, provenance: null };
+    if (sha256Canonical(plan.reviewRequired) !== sha256Canonical(expectedReview)
+        || sha256Canonical(plan.coverLetter) !== sha256Canonical(expectedCover)) {
+      throw new Error('Document review-required state does not match current narrative evidence');
+    }
+    return { contract, profile, jd, cvSelection, expectedCover: null };
+  }
+  if (plan.reviewRequired !== null || plan.coverLetter?.available !== true) throw new Error('Ready document plan has an inconsistent review state');
+  if (plan.coverLetter?.provenance?.templateId !== COVER_LETTER_TEMPLATE_ID) {
+    throw new Error(`Unsupported cover-letter template ID: ${plan.coverLetter?.provenance?.templateId || '(missing)'}`);
+  }
+  const expectedCover = buildGroundedCoverLetter(profile, contract.candidate, jd.text, cvSelection, new Date(plan.createdAt));
   validateNarrativeProvenanceRecord(profile, plan.coverLetter.provenance, {
-    candidateId: plan.candidateId,
-    normalizedQuestion: plan.coverLetter.provenance?.normalizedQuestion,
+    candidateId: contract.candidate.candidate_id,
+    normalizedQuestion: normalizeFormQuestion('cover letter document'),
     answer: plan.coverLetter.text,
   });
-  if (profile.approvedCvs[plan.cv.variant] !== realpathSync(plan.cv.path)) {
-    throw new Error('Document plan CV is not the exact approved variant path');
+  for (const [label, actual, expected] of [
+    ['text', plan.coverLetter.text, expectedCover.text],
+    ['payload', plan.coverLetter.payload, expectedCover.payload],
+    ['provenance', plan.coverLetter.provenance, expectedCover.provenance],
+  ]) {
+    if (sha256Canonical(actual) !== sha256Canonical(expected)) throw new Error(`Document ${label} does not match deterministic ${COVER_LETTER_TEMPLATE_ID} output`);
   }
   const expectedDocumentsDir = resolve(dirname(contract.manifestPath), 'documents', plan.candidateId);
   for (const path of [plan.coverLetter.pdfPath, plan.coverLetter.textPath]) {
@@ -226,7 +301,7 @@ function validatePlanFresh(plan, manifestPath, root) {
       || /%20/i.test(`${plan.coverLetter.pdfPath}${plan.coverLetter.textPath}`)) {
     throw new Error(`Planned cover letter must use ${expectedCoverPdf} and its matching text filename`);
   }
-  return contract;
+  return { contract, profile, jd, cvSelection, expectedCover };
 }
 
 export async function prepareAndBindDocuments({
@@ -239,7 +314,10 @@ export async function prepareAndBindDocuments({
 }) {
   if (candidateId !== plan.candidateId) throw new Error('Document plan candidate does not match the exact requested candidate ID');
   if (confirmPlanHash !== plan.planHash) throw new Error(`Explicit document-plan confirmation must equal ${plan.planHash}`);
-  validatePlanFresh(plan, manifestPath, root);
+  let validation = validateDocumentPlan(plan, manifestPath, root);
+  if (plan.documentState !== 'ready') {
+    throw new Error(`${plan.reviewRequired.code}: ${plan.reviewRequired.reason}`);
+  }
   mkdirSync(dirname(plan.coverLetter.pdfPath), { recursive: true });
   const realDocumentsDir = realpathSync(dirname(plan.coverLetter.pdfPath));
   if (!inside(realpathSync(resolve(root, 'output')), realDocumentsDir)) {
@@ -248,17 +326,19 @@ export async function prepareAndBindDocuments({
   if ((existsSync(plan.coverLetter.pdfPath) || existsSync(plan.coverLetter.textPath)) && !replace) {
     throw new Error('Planned application documents already exist; use --replace explicitly');
   }
-  writeFileSync(plan.coverLetter.textPath, `${plan.coverLetter.text}\n`, { flag: replace ? 'w' : 'wx' });
   const { renderHtmlToPdf } = await import('./generate-pdf.mjs');
-  const html = buildHtml(plan.coverLetter.payload);
+  validation = validateDocumentPlan(plan, manifestPath, root);
+  const html = buildHtml(validation.expectedCover.payload);
+  writeFileSync(plan.coverLetter.textPath, `${validation.expectedCover.text}\n`, { flag: replace ? 'w' : 'wx' });
   const rendered = await renderHtmlToPdf(html, plan.coverLetter.pdfPath, {
     format: 'a4', baseDir: root, recordManifest: false,
   });
   if (rendered.pageCount !== 1) throw new Error(`Cover letter must render to exactly one page; rendered ${rendered.pageCount}`);
+  validation = validateDocumentPlan(plan, manifestPath, root);
   const records = bindCandidateArtifacts(manifestPath, candidateId, [
     { artifactType: 'cv', filePath: plan.cv.path, sourceCvVariant: plan.cv.variant },
-    { artifactType: 'cover_letter', filePath: plan.coverLetter.pdfPath, narrativeProvenance: plan.coverLetter.provenance },
-    { artifactType: 'cover_letter_text', filePath: plan.coverLetter.textPath, narrativeProvenance: plan.coverLetter.provenance },
+    { artifactType: 'cover_letter', filePath: plan.coverLetter.pdfPath, narrativeProvenance: validation.expectedCover.provenance },
+    { artifactType: 'cover_letter_text', filePath: plan.coverLetter.textPath, narrativeProvenance: validation.expectedCover.provenance },
   ], { root, replace });
   return { planHash: plan.planHash, records };
 }
@@ -343,7 +423,13 @@ async function main() {
     const planPath = join(dirname(resolve(options.manifest)), 'documents', plan.candidateId, 'plan.json');
     mkdirSync(dirname(planPath), { recursive: true });
     writeFileSync(planPath, `${JSON.stringify(plan, null, 2)}\n`, { flag: 'wx' });
-    console.log(JSON.stringify({ plan: planPath, planHash: plan.planHash, cv: basename(plan.cv.path) }, null, 2));
+    console.log(JSON.stringify({
+      plan: planPath,
+      planHash: plan.planHash,
+      documentState: plan.documentState,
+      reviewRequired: plan.reviewRequired,
+      cv: basename(plan.cv.path),
+    }, null, 2));
     return;
   }
   if (command === 'prepare') {

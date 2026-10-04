@@ -21,6 +21,13 @@ const STRUCTURED_PROFILE_ROOTS = new Set([
 ]);
 const UNSAFE_LOCATOR = /(?:^|[.\\/])\.\.(?:[.\\/]|$)|[\\/]|\0|%2e|%2f|%5c/i;
 
+export class NarrativeEvidenceUnavailableError extends Error {
+  constructor(message, options = {}) {
+    super(message, options);
+    this.name = 'NarrativeEvidenceUnavailableError';
+  }
+}
+
 function sha256(value) {
   return `sha256:${createHash('sha256').update(String(value ?? '')).digest('hex')}`;
 }
@@ -114,24 +121,29 @@ export function resolveConfiguredNarrativeEvidence(profile, requestedTopics) {
     ? profile.formRules.narrative_evidence
     : [];
   const selected = entries.filter((entry) => (entry?.topics || []).some((topic) => requestedTopics.has(clean(topic).toLowerCase().replace(/\s+/g, '_'))));
-  if (!selected.length) throw new Error(`Missing evidence for requested narrative topics: ${[...requestedTopics].join(', ')}`);
-  const resolved = [];
-  for (const entry of selected) {
-    const identity = clean(entry?.id);
-    if (!identity) throw new Error('Configured narrative evidence is missing a stable id');
-    if (entry.text || entry.evidence_refs || entry.evidenceRefs) {
-      throw new Error(`Configured narrative evidence ${identity} uses legacy unproven prose; add factual provenance`);
+  if (!selected.length) throw new NarrativeEvidenceUnavailableError(`Missing evidence for requested narrative topics: ${[...requestedTopics].join(', ')}`);
+  try {
+    const resolved = [];
+    for (const entry of selected) {
+      const identity = clean(entry?.id);
+      if (!identity) throw new Error('Configured narrative evidence is missing a stable id');
+      if (entry.text || entry.evidence_refs || entry.evidenceRefs) {
+        throw new Error(`Configured narrative evidence ${identity} uses legacy unproven prose; add factual provenance`);
+      }
+      if (!Array.isArray(entry.provenance) || entry.provenance.length === 0) {
+        throw new Error(`Configured narrative evidence ${identity} has no factual provenance`);
+      }
+      for (const spec of entry.provenance) {
+        const evidence = resolveFactualEvidence(profile, spec);
+        resolved.push({ ...evidence, configuredEvidenceId: identity });
+      }
     }
-    if (!Array.isArray(entry.provenance) || entry.provenance.length === 0) {
-      throw new Error(`Configured narrative evidence ${identity} has no factual provenance`);
-    }
-    for (const spec of entry.provenance) {
-      const evidence = resolveFactualEvidence(profile, spec);
-      resolved.push({ ...evidence, configuredEvidenceId: identity });
-    }
+    const unique = new Map(resolved.map((item) => [item.evidenceIdentity, item]));
+    return [...unique.values()];
+  } catch (error) {
+    if (error instanceof NarrativeEvidenceUnavailableError) throw error;
+    throw new NarrativeEvidenceUnavailableError(error.message, { cause: error });
   }
-  const unique = new Map(resolved.map((item) => [item.evidenceIdentity, item]));
-  return [...unique.values()];
 }
 
 export function publicFactualEvidence(evidence) {
