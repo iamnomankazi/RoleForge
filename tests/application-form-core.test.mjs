@@ -101,13 +101,32 @@ test('text-only cover fields receive the complete bound letter and one-document 
   const textPlan = buildFormPlan({
     fields: [{ fieldId: 'cover-text', tag: 'textarea', type: 'textarea', label: 'Motivation letter', required: true, visible: true }],
     controls: [{ type: 'submit', label: 'Submit', insideApplicationForm: true }],
-  }, profile, { coverLetterTextContent: fullLetter, coverLetterTextProvenance: coverProvenance() });
+  }, profile, { coverLetterTextContent: fullLetter, coverLetterTextProvenance: coverProvenance() }, { candidateId: 'fixture-cover' });
   assert.equal(textPlan.actions[0].value, fullLetter);
   const singlePlan = buildFormPlan({
     fields: [{ fieldId: 'one-doc', tag: 'input', type: 'file', label: 'Application document', required: true, visible: true }],
     controls: [],
   }, profile, { cv: { intendedFilename: 'CV.pdf' }, coverLetter: { intendedFilename: 'Cover Letter.pdf' } });
   assert.ok(singlePlan.unresolvedFields.some((field) => field.semantic === 'single_document_upload'));
+});
+
+test('legacy cover-text fill requires explicit current candidate identity and rejects cross-candidate provenance', () => {
+  const snapshot = {
+    fields: [{ fieldId: 'cover-text', tag: 'textarea', type: 'textarea', label: 'Motivation letter', required: true, visible: true }],
+    controls: [],
+  };
+  const artifacts = {
+    coverLetterTextContent: syntheticProfile.cvText,
+    coverLetterTextProvenance: coverProvenance('candidate-a'),
+  };
+  const noIdentity = buildFormPlan(snapshot, syntheticProfile, artifacts);
+  assert.equal(noIdentity.actions.length, 0);
+  assert.match(noIdentity.unresolvedFields[0].reason, /no explicit current candidate identity/);
+  const crossCandidate = buildFormPlan(snapshot, syntheticProfile, artifacts, { candidateId: 'candidate-b' });
+  assert.equal(crossCandidate.actions.length, 0);
+  assert.match(crossCandidate.unresolvedFields[0].reason, /exact candidate and question/);
+  const exactCandidate = buildFormPlan(snapshot, syntheticProfile, artifacts, { candidateId: 'candidate-a' });
+  assert.equal(exactCandidate.actions[0].value, syntheticProfile.cvText);
 });
 
 test('legacy Greenhouse flow fills deterministic fields but leaves draft-only narrative for review and never submits', async () => {
