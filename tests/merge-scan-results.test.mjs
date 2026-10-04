@@ -1,10 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { buildReviewCsv, buildReviewMarkdown, canonicalUrl, mergeCandidates, parseJsonFile } from '../merge-scan-results.mjs';
+import {
+  buildReviewCsv,
+  buildReviewMarkdown,
+  canonicalUrl,
+  mergeCandidates,
+  parseJsonFile,
+  writeImmutableScanRun,
+} from '../merge-scan-results.mjs';
 
 test('reads BOM-prefixed scan JSON', () => {
   const dir = mkdtempSync(join(tmpdir(), 'career-ops-scan-'));
@@ -112,4 +119,67 @@ test('same listing keeps candidate_id across runs while run_id changes', () => {
   assert.equal(first.candidate_id, second.candidate_id);
   assert.equal(first.run_id, 'run-one');
   assert.equal(second.run_id, 'run-two');
+});
+
+test('canonical merge rejects missing, malformed, relative, and non-HTTP(S) listing URLs', () => {
+  const invalidRows = [
+    { company: 'Missing', title: 'Engineer' },
+    { company: 'Malformed', title: 'Engineer', url: 'not-a-url' },
+    { company: 'Relative', title: 'Engineer', url: '/jobs/1' },
+    { company: 'FTP', title: 'Engineer', url: 'ftp://jobs.test/1' },
+    { company: 'JavaScript', title: 'Engineer', url: 'javascript:alert(1)' },
+    { company: 'Broken HTTP', title: 'Engineer', url: 'https://' },
+  ];
+  const result = mergeCandidates([{
+    name: 'url-guard.json',
+    rows: [...invalidRows, { company: 'Valid', title: 'Engineer', url: 'https://jobs.test/valid' }],
+  }], { runId: 'url-guard' });
+  assert.equal(result.invalid, invalidRows.length);
+  assert.deepEqual(result.candidates.map((candidate) => candidate.company), ['Valid']);
+});
+
+test('structured and handoff inputs create a consolidated review-only run without mutating the source run', () => {
+  const root = mkdtempSync(join(tmpdir(), 'career-ops-scan-authority-'));
+  try {
+    const structured = [{
+      company: 'Structured Co', title: 'Backend Engineer', url: 'https://structured.test/jobs/1',
+      source: 'greenhouse', sourceWorker: 'structured-scan', sourceQuery: 'backend',
+    }];
+    const original = writeImmutableScanRun({
+      root, outRoot: 'runs', runId: 'structured-run', inputs: [{ name: 'structured.json', rows: structured }],
+    });
+    const originalFiles = Object.fromEntries(
+      ['manifest.json', 'candidates.json', 'candidates.tsv', 'review.csv', 'review.md']
+        .map((file) => [file, readFileSync(join(original.runDir, file), 'utf8')]),
+    );
+    const structuredId = original.candidates[0].candidate_id;
+    const handoff = [{
+      company: 'Handoff Co', title: 'Python Engineer', url: 'https://handoff.test/jobs/2',
+      source: 'websearch', sourceWorker: 'agent-handoff', sourceQuery: 'site:handoff.test Python Engineer',
+      livenessStatus: 'active', livenessCode: 'apply_control_visible',
+    }];
+    const consolidated = writeImmutableScanRun({
+      root,
+      outRoot: 'runs',
+      runId: 'consolidated-run',
+      inputs: [
+        { name: 'structured-candidates.json', rows: JSON.parse(originalFiles['candidates.json']) },
+        { name: 'agent-handoff.json', rows: handoff },
+      ],
+    });
+
+    assert.equal(consolidated.manifest.artifact_authority, 'review_only');
+    assert.equal(consolidated.candidates.length, 2);
+    assert.equal(consolidated.candidates.find((candidate) => candidate.company === 'Structured Co').candidate_id, structuredId);
+    assert.equal(consolidated.candidates.find((candidate) => candidate.company === 'Structured Co').source_worker, 'structured-scan');
+    assert.ok(consolidated.candidates.find((candidate) => candidate.company === 'Handoff Co').provenance.some(
+      (entry) => entry.input === 'agent-handoff.json',
+    ));
+
+    for (const [file, contents] of Object.entries(originalFiles)) {
+      assert.equal(readFileSync(join(original.runDir, file), 'utf8'), contents, file);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

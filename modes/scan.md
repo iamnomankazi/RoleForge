@@ -257,10 +257,11 @@ Levels are additive — they are executed in order, and results are merged and d
         - Final URL contains `?error=true` (Greenhouse redirects here when an offer is closed).
         - Page contains: "job no longer available" / "no longer open" / "position has been filled" / "this job has expired" / "page not found".
         - Only navbar and footer are visible, with no JD content (content < ~300 characters).
-   d. If expired: record in `scan-history.tsv` with status `skipped_expired` and discard.
-   e. If active: continue to step 8.
+   d. If the existing executable liveness check (`node check-liveness.mjs <url>` or the equivalent liveness tool) returns a definitive closure result, record it in `scan-history.tsv` with status `skipped_expired` and discard.
+   e. If navigation or access is uncertain — timeout, DNS/TLS/transient network error, generic WAF or anti-bot 403, HTTP 429, HTTP 5xx, or a challenge/access page without proof of closure — retain the discovery as uncertain review evidence. Preserve the liveness status, code, and reason; never convert this case to permanent `skipped_expired`.
+   f. If active: continue to step 8.
 
-   **Do not interrupt the entire scan if a single URL fails.** If `browser_navigate` errors (timeout, 403, etc.), mark as `skipped_expired` and continue with the next one.
+   **Do not interrupt the entire scan if a single URL fails.** Record the existing uncertain liveness code/reason and continue with the next one. Only the executable liveness model's definitive closure signals authorize `skipped_expired`.
 
 8. **For each new verified offer that passes filters**:
    a. Add to the `pipeline.md` "Pending" section: `- [ ] {url} | {company} | {title}`
@@ -269,6 +270,29 @@ Levels are additive — they are executed in order, and results are merged and d
 9. **Offers filtered by title**: record in `scan-history.tsv` with status `skipped_title`.
 10. **Duplicate offers**: record with status `skipped_dup`.
 11. **Expired offers (Level 3)**: record with status `skipped_expired`.
+
+### Complete-scan review authority and handoffs
+
+The standard structured scanner run is the initial immutable evidence source. A complete scan must end with exactly one clearly identified immutable run as its final review authority. Review artifacts are never application authority; browser execution still requires a separate explicit application batch containing exact candidate IDs.
+
+After all configured handoffs finish:
+
+- Persist every viable manual, Playwright, or WebSearch discovery that is not already in the structured run as deterministic JSON. Use `output/scan-shards/<structured-run-id>/agent-handoff.json` (or deterministic sibling shards) with a top-level array or an object containing `candidates`, `offers`, `jobs`, or `results`.
+- Each handoff row must include `company`, `title`, and a valid absolute HTTP(S) listing `url`. Preserve existing canonical fields such as `source`, `source_worker`, `source_query`/`source_queries`, `source_url`, `resolved_url`, `location`, `description`, `posted_at`, and liveness status/code/reason when established. Do not invent candidate IDs or a second provenance schema.
+- Keep shard ordering and JSON serialization deterministic so the handoff evidence can be audited and merged reproducibly.
+
+If handoffs add one or more viable candidates, preserve the structured run byte-for-byte and merge its `candidates.json` plus the shard(s) through the existing canonical merger:
+
+```powershell
+node merge-scan-results.mjs `
+  --run-id <new-consolidated-run-id> `
+  output/scan-runs/<structured-run-id>/candidates.json `
+  output/scan-shards/<structured-run-id>/agent-handoff.json
+```
+
+The new consolidated immutable run is the one final review-authority run; shortlist IDs must come from that run. If all handoffs complete and add zero viable candidates, do not clone the structured run: explicitly report the zero-additions result and use the original structured run's candidate IDs as the final shortlist. Pipeline/history remain compatibility and evaluation surfaces only.
+
+The final or consolidated manifest must remain `artifact_authority: review_only`. Never mutate or overwrite the original structured run, and never treat an immutable review artifact as an application batch.
 
 ## Extraction of Title and Company from WebSearch Results
 

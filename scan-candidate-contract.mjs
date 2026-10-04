@@ -30,6 +30,21 @@ function first(...values) {
   return values.map(clean).find(Boolean) || '';
 }
 
+function isAbsoluteHttpUrl(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw || /\s/.test(raw) || !/^https?:\/\//i.test(raw)) return false;
+  try {
+    const parsed = new URL(raw);
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && Boolean(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function firstAbsoluteHttpUrl(...values) {
+  return values.map(clean).find(isAbsoluteHttpUrl) || '';
+}
+
 function sourceQueries(row) {
   return [...new Set([
     ...list(row?.sourceQueries ?? row?.source_queries),
@@ -58,25 +73,31 @@ export function normalizeCanonicalCandidate(row, {
 } = {}) {
   const company = first(row?.company, row?.companyName, row?.organization);
   const title = first(row?.title, row?.role, row?.position);
-  const originalUrl = first(
+  const originalUrl = firstAbsoluteHttpUrl(
     row?.original_url, row?.originalUrl, row?.url, row?.listingUrl,
     row?.job_url, row?.jobUrl, row?.apply_url, row?.applyUrl,
   );
-  const resolvedUrl = first(row?.resolved_url, row?.resolvedUrl, row?.final_url, row?.finalUrl);
-  if (!company || !title || !(originalUrl || resolvedUrl)) return null;
+  const resolvedUrl = firstAbsoluteHttpUrl(row?.resolved_url, row?.resolvedUrl, row?.final_url, row?.finalUrl);
+  const listingUrl = originalUrl || resolvedUrl;
+  if (!company || !title || !listingUrl) return null;
 
-  const identityInput = { ...row, original_url: originalUrl, resolved_url: resolvedUrl };
+  const identityInput = {
+    ...row,
+    url: listingUrl,
+    original_url: originalUrl || listingUrl,
+    resolved_url: resolvedUrl || null,
+  };
   const identityAliases = collectCandidateIdentityAliases(identityInput);
   const identity = candidateIdentityMetadata(identityInput);
   const queries = sourceQueries(row);
-  const canonicalUrl = canonicalListingUrl(originalUrl || resolvedUrl);
+  const canonicalUrl = canonicalListingUrl(listingUrl);
   const aliases = [...new Set([
     ...identityAliases.aliases,
     ...identityAliases.urls,
     originalUrl,
     resolvedUrl,
     canonicalUrl,
-  ].map(clean).filter(Boolean))];
+  ].filter(isAbsoluteHttpUrl).map(clean).filter(Boolean))];
   const blockers = list(row?.hardBlockers ?? row?.hard_blockers ?? row?.blockers);
   const cautions = list(row?.cautions ?? row?.warnings ?? row?.trustFlags);
   const seniority = list(row?.seniority ?? row?.structuredSeniority ?? row?.structured_seniority);
@@ -100,7 +121,7 @@ export function normalizeCanonicalCandidate(row, {
     company,
     title,
     canonical_url: canonicalUrl,
-    url: originalUrl || resolvedUrl,
+    url: listingUrl,
     original_url: originalUrl || null,
     resolved_url: resolvedUrl || null,
     apply_url: first(row?.apply_url, row?.applyUrl) || null,

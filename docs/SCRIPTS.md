@@ -258,6 +258,8 @@ Each URL gets a verdict: `active`, `expired`, or `uncertain` with a reason.
 
 Zero-token portal scanner. Runs configured local parsers for SSR/static career pages and hits ATS APIs (Greenhouse, Ashby, Lever) directly — no LLM tokens consumed. Reads `portals.yml`, writes one immutable canonical run under `output/scan-runs/<run-id>/`, then updates legacy pipeline/history compatibility outputs. Supply `--run-id <safe-id>` when an external workflow needs a predetermined identity; otherwise a collision-safe ID is generated. `--dry-run` writes nothing.
 
+`or:scan` and `scan:full` are specialized discovery entrypoints. Their output does not imply full standard complete-scan policy parity or final review authority. For a complete canonical review, use the standard scanner and the final-review-authority handoff workflow documented in `modes/scan.md`.
+
 ### Merging parallel discovery outputs
 
 Parallel scan workers should write separate JSON files and must not write directly
