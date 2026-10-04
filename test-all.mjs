@@ -701,13 +701,11 @@ const allowedFiles = [
 // untracked files (debate artifacts, AI tool scratch, local plans/) and
 // gitignored files can't trigger false positives because they were never
 // going to reach a commit anyway.
-const grepPathspec = scanExtensions.map(e => `'*.${e}'`).join(' ');
+const grepPathspec = scanExtensions.map(e => `*.${e}`);
 
 let leakFound = false;
 for (const pattern of leakPatterns) {
-  const result = run(
-    `git grep -n "${pattern}" -- ${grepPathspec} 2>/dev/null`
-  );
+  const result = run('git', ['grep', '-n', pattern, '--', ...grepPathspec]);
   if (result) {
     for (const line of result.split('\n')) {
       const file = line.split(':')[0];
@@ -728,13 +726,15 @@ console.log('\n7. Absolute path check');
 
 // Same git grep approach: only scans tracked files. Untracked AI tool
 // outputs, local debate artifacts, etc. can't false-positive here.
-const absPathResult = run(
-  `git grep -n "/Users/" -- '*.mjs' '*.sh' '*.md' '*.go' '*.yml' 2>/dev/null | grep -v README.md | grep -v LICENSE | grep -v CLAUDE.md | grep -v test-all.mjs`
-);
-if (!absPathResult) {
+const absPathResult = run('git', ['grep', '-n', '/Users/', '--', '*.mjs', '*.sh', '*.md', '*.go', '*.yml']);
+const unexpectedAbsPaths = (absPathResult || '').split('\n').filter(Boolean).filter((line) => {
+  const file = line.split(':')[0].replace(/\\/g, '/');
+  return !['README.md', 'LICENSE', 'CLAUDE.md', 'test-all.mjs'].includes(file);
+});
+if (unexpectedAbsPaths.length === 0) {
   pass('No absolute paths in code files');
 } else {
-  for (const line of absPathResult.split('\n').filter(Boolean)) {
+  for (const line of unexpectedAbsPaths) {
     fail(`Absolute path: ${line.slice(0, 100)}`);
   }
 }

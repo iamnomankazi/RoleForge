@@ -5,6 +5,7 @@ import {
   parseTapSummary,
   discoveredRunFailed,
 } from '../test-runner-core.mjs';
+import { run } from './helpers.mjs';
 
 test('discovered source validation rejects child-terminating helpers', () => {
   const sources = new Map([
@@ -41,4 +42,9 @@ test('missing verdict, failed child, and cancellation all fail closed', () => {
     { files: 1, exitCode: 0 },
   );
   assert.equal(discoveredRunFailed(cancelled), true);
+});
+
+test('test helper requires executable-plus-argv commands and accepts git vectors', () => {
+  assert.throws(() => run('git status --short'), /executable not in the test-helper allowlist/);
+  assert.equal(typeof run('git', ['rev-parse', '--is-inside-work-tree']), 'string');
 });
