@@ -16,14 +16,27 @@ try {
 
   // normalizeArbeitnowJob — field mapping.
   const full = normalizeArbeitnowJob(
-    { title: '  Staff AI Engineer  ', url: '  https://www.arbeitnow.com/jobs/x1  ', company_name: '  Acme Co  ', location: '  Berlin  ', remote: false, created_at: 1782693032 },
+    { title: '  Staff AI Engineer  ', url: '  https://www.arbeitnow.com/jobs/x1  ', company_name: '  Acme Co  ', location: '  Berlin  ', remote: false, description: '  <p>Minimum 5 years of professional data engineering experience.</p>  ', created_at: 1782693032 },
     'Fallback',
   );
   if (full && full.title === 'Staff AI Engineer' && full.url === 'https://www.arbeitnow.com/jobs/x1'
-      && full.company === 'Acme Co' && full.location === 'Berlin' && full.postedAt === 1782693032000) {
+      && full.company === 'Acme Co' && full.location === 'Berlin'
+      && full.description === '<p>Minimum 5 years of professional data engineering experience.</p>'
+      && full.postedAt === 1782693032000) {
     pass('normalizeArbeitnowJob maps + trims title/url/company/location and converts created_at seconds → ms');
   } else {
     fail(`normalizeArbeitnowJob full row = ${JSON.stringify(full)}`);
+  }
+
+  const missingDescriptions = [
+    normalizeArbeitnowJob({ title: 'T', url: 'https://www.arbeitnow.com/jobs/no-description' }),
+    normalizeArbeitnowJob({ title: 'T', url: 'https://www.arbeitnow.com/jobs/null-description', description: null }),
+    normalizeArbeitnowJob({ title: 'T', url: 'https://www.arbeitnow.com/jobs/empty-description', description: '   ' }),
+  ];
+  if (missingDescriptions.every(job => job && !('description' in job))) {
+    pass('normalizeArbeitnowJob safely omits absent, null, and empty descriptions');
+  } else {
+    fail(`normalizeArbeitnowJob missing descriptions = ${JSON.stringify(missingDescriptions)}`);
   }
 
   // remote:true appends "Remote" to the location.

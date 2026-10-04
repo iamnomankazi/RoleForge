@@ -59,7 +59,9 @@ function standardScanFixture(entries, runId, { experiencePolicy = false } = {}) 
   mkdirSync(providers);
   mkdirSync(data);
   const resultHelper = pathToFileURL(join(ROOT, 'providers', '_result.mjs')).href;
+  const arbeitnowProvider = pathToFileURL(join(ROOT, 'providers', 'arbeitnow.mjs')).href;
   writeFileSync(join(providers, 'fixture.mjs'), `import { markProviderCoverage } from ${JSON.stringify(resultHelper)};
+  import { normalizeArbeitnowJob } from ${JSON.stringify(arbeitnowProvider)};
   export default {
     id: 'fixture',
     async fetch(entry) {
@@ -70,6 +72,20 @@ function standardScanFixture(entries, runId, { experiencePolicy = false } = {}) 
       if (entry.mode === 'experience-stretch') return [{ company: entry.name, title: 'ML Engineer II', url: 'https://jobs.example.test/' + entry.name + '/stretch', location: 'Helsinki, Finland', description: '2-5 years of industry experience with production ML and MLOps ownership' }];
       if (entry.mode === 'experience-outside') return [{ company: entry.name, title: 'Software Engineer', url: 'https://jobs.example.test/' + entry.name + '/outside', location: 'Helsinki, Finland', description: '5+ years of commercial software engineering experience' }];
       if (entry.mode === 'experience-preferred') return [{ company: entry.name, title: 'Software Engineer', url: 'https://jobs.example.test/' + entry.name + '/preferred', location: 'Helsinki, Finland', description: '<h3>Preferred qualifications</h3><ul><li>5+ years of relevant experience</li></ul>' }];
+      if (entry.mode?.startsWith('arbeitnow-experience-')) {
+        const descriptions = {
+          'arbeitnow-experience-outside': 'Minimum 5 years of professional data engineering experience.',
+          'arbeitnow-experience-stretch': '2-5 years of backend engineering experience.',
+          'arbeitnow-experience-preferred': '5+ years preferred',
+        };
+        return [normalizeArbeitnowJob({
+          company_name: entry.name,
+          title: 'Backend Engineer',
+          url: 'https://www.arbeitnow.com/jobs/' + entry.mode,
+          location: 'Helsinki, Finland',
+          description: descriptions[entry.mode],
+        })].filter(Boolean);
+      }
       if (entry.mode === 'duplicate-evidence-sparse-first') return [
         { company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/duplicate', location: 'Helsinki, Finland', description: '' },
         { company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/duplicate', location: 'Helsinki, Finland', description: '5+ years of professional backend experience' },
@@ -203,6 +219,41 @@ test('standard scan retains configured numeric experience evidence for contextua
     assert.deepEqual(candidates.find(candidate => candidate.company === 'Preferred').hard_blockers, []);
     assert.equal(candidates.find(candidate => candidate.company === 'Normal').experience_metadata.requirements[0].strength, 'required');
     assert.match(fixture.result.stdout, /Filtered by content:\s+0/);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test('Arbeitnow list-payload descriptions reach the standard scanner experience policy', () => {
+  const fixture = standardScanFixture([
+    { name: 'Arbeitnow Required', mode: 'arbeitnow-experience-outside' },
+    { name: 'Arbeitnow Range', mode: 'arbeitnow-experience-stretch' },
+    { name: 'Arbeitnow Preferred', mode: 'arbeitnow-experience-preferred' },
+  ], 'arbeitnow-experience-policy', { experiencePolicy: true });
+  try {
+    assert.equal(fixture.result.status, 0, fixture.result.stderr);
+    const candidates = JSON.parse(readFileSync(join(fixture.runDir, 'candidates.json'), 'utf8'));
+    const byCompany = Object.fromEntries(candidates.map(candidate => [candidate.company, candidate]));
+
+    assert.match(byCompany['Arbeitnow Required'].description, /Minimum 5 years/);
+    assert.equal(byCompany['Arbeitnow Required'].experience_metadata.interpretation, 'outside');
+    assert.equal(byCompany['Arbeitnow Required'].experience_metadata.requirements[0].strength, 'required');
+    assert.equal(byCompany['Arbeitnow Required'].experience_metadata.numeric_hard_blocker, true);
+    assert.match(byCompany['Arbeitnow Required'].hard_blockers[0], /required experience starts at 5 years/);
+
+    assert.equal(byCompany['Arbeitnow Range'].experience_metadata.interpretation, 'stretch');
+    assert.deepEqual(
+      byCompany['Arbeitnow Range'].experience_metadata.requirements.map(requirement => [
+        requirement.minimum_years, requirement.maximum_years, requirement.bound, requirement.hard_blocker,
+      ]),
+      [[2, 5, 'range', false]],
+    );
+    assert.deepEqual(byCompany['Arbeitnow Range'].hard_blockers, []);
+
+    assert.equal(byCompany['Arbeitnow Preferred'].experience_metadata.interpretation, 'preferred_only');
+    assert.equal(byCompany['Arbeitnow Preferred'].experience_metadata.requirements[0].strength, 'preferred');
+    assert.equal(byCompany['Arbeitnow Preferred'].experience_metadata.numeric_hard_blocker, false);
+    assert.deepEqual(byCompany['Arbeitnow Preferred'].hard_blockers, []);
   } finally {
     rmSync(fixture.dir, { recursive: true, force: true });
   }

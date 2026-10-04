@@ -102,11 +102,13 @@ async function fetchPageWithRetry(ctx, url, options) {
  *   - company:  `company_name`, falling back to the portal entry name, then
  *               "Arbeitnow".
  *   - location: `location`, with "Remote" appended when `remote` is true.
+ *   - description: `description`, trimmed and preserved when non-empty because
+ *                  it is already present in the list payload.
  *   - postedAt: `created_at` (epoch SECONDS) → epoch ms (omitted when absent).
  *
  * @param {any} j
  * @param {string} [fallbackCompany]
- * @returns {{ title: string, url: string, company: string, location: string, postedAt?: number } | null}
+ * @returns {{ title: string, url: string, company: string, location: string, description?: string, postedAt?: number } | null}
  */
 export function normalizeArbeitnowJob(j, fallbackCompany) {
   if (!j || typeof j !== 'object') return null;
@@ -136,8 +138,10 @@ export function normalizeArbeitnowJob(j, fallbackCompany) {
   const baseLocation = typeof j.location === 'string' ? j.location.trim() : '';
   const location = [baseLocation, j.remote === true ? 'Remote' : ''].filter(Boolean).join(', ');
 
-  /** @type {{ title: string, url: string, company: string, location: string, postedAt?: number }} */
+  /** @type {{ title: string, url: string, company: string, location: string, description?: string, postedAt?: number }} */
   const job = { title, url, company, location };
+  const description = typeof j.description === 'string' ? j.description.trim() : '';
+  if (description) job.description = description;
   if (Number.isFinite(j.created_at)) job.postedAt = j.created_at * 1000; // epoch seconds → ms
   return job;
 }
