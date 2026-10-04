@@ -129,6 +129,22 @@ try {
     fail(`jobicy.fetch() normalized row = ${JSON.stringify(fetched[0])}`);
   }
 
+  const empty = await jobicy.fetch({ name: 'Jobicy' }, { fetchJson: async () => ({ jobs: [] }) });
+  if (empty.length === 0) pass('jobicy.fetch() treats a valid empty jobs array as healthy empty');
+  else fail(`jobicy.fetch() valid empty returned ${empty.length} rows`);
+
+  let malformedThrew = false;
+  try { await jobicy.fetch({}, { fetchJson: async () => ({ data: [] }) }); } catch { malformedThrew = true; }
+  if (malformedThrew) pass('jobicy.fetch() fails truthfully when jobs is missing');
+  else fail('jobicy.fetch() should reject a malformed response');
+
+  let unusableThrew = false;
+  try {
+    await jobicy.fetch({}, { fetchJson: async () => ({ jobs: [{ jobTitle: 'Broken', url: 'https://evil.example/job' }] }) });
+  } catch { unusableThrew = true; }
+  if (unusableThrew) pass('jobicy.fetch() rejects a non-empty payload with no structurally usable rows');
+  else fail('jobicy.fetch() should reject non-empty all-unusable payloads');
+
 } catch (e) {
   fail(`jobicy provider tests crashed: ${e.message}`);
 }

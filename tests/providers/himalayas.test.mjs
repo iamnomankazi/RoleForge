@@ -383,6 +383,41 @@ try {
     fail(`discovery requests = ${JSON.stringify(discoveryCalls)}`);
   }
 
+  const healthyEmpty = await fetchHimalayasPages(
+    { max_pages: 1 },
+    { fetchJson: async () => ({ offset: 0, limit: 20, totalCount: 0, jobs: [] }) },
+  );
+  if (healthyEmpty.jobs.length === 0) pass('Himalayas browse treats a valid empty jobs array as healthy empty');
+  else fail(`Himalayas valid empty returned ${healthyEmpty.jobs.length} rows`);
+
+  const expiredOnly = await fetchHimalayasPages(
+    { max_pages: 1 },
+    { fetchJson: async () => ({ offset: 0, limit: 20, totalCount: 1, jobs: [{
+      title: 'Expired', companyName: 'Old Co', status: 'expired',
+      applicationLink: 'https://himalayas.app/companies/old/jobs/expired',
+    }] }) },
+  );
+  if (expiredOnly.jobs.length === 0) pass('Himalayas explicit unavailable rows remain a truthful healthy empty result');
+  else fail('Himalayas should drop explicit unavailable rows');
+
+  let unusableBrowseThrew = false;
+  try {
+    await fetchHimalayasPages({ max_pages: 1 }, {
+      fetchJson: async () => ({ offset: 0, limit: 20, totalCount: 1, jobs: [{ title: 'Broken', companyName: 'Acme' }] }),
+    });
+  } catch { unusableBrowseThrew = true; }
+  if (unusableBrowseThrew) pass('Himalayas browse rejects non-empty all-unusable payloads');
+  else fail('Himalayas browse should reject non-empty all-unusable payloads');
+
+  let unusableSearchThrew = false;
+  try {
+    await fetchHimalayasSearchPages({ search_queries: ['data engineer'], search_max_pages: 1 }, {
+      fetchJson: async () => ({ offset: 0, limit: 20, totalCount: 1, jobs: [{ title: 'Broken', companyName: 'Acme' }] }),
+    });
+  } catch { unusableSearchThrew = true; }
+  if (unusableSearchThrew) pass('Himalayas search rejects non-empty all-unusable payloads');
+  else fail('Himalayas search should reject non-empty all-unusable payloads');
+
   const policy = { block: ['United States', 'Canada'] };
   if (classifyHimalayasLocation({ locationRestrictions: ['Worldwide'] }, policy).classification === 'Confirmed eligible'
       && classifyHimalayasLocation({ locationRestrictions: [] }, policy).classification === 'Potential, verify Finland hiring eligibility'

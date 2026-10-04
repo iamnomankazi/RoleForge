@@ -107,6 +107,22 @@ try {
     fail('jobspresso.fetch() never called fetchText');
   }
 
+  const empty = await jobspresso.fetch({}, { fetchText: async () => '<rss><channel></channel></rss>' });
+  if (empty.length === 0) pass('jobspresso.fetch() treats valid empty RSS as healthy empty');
+  else fail(`jobspresso.fetch() valid empty returned ${empty.length} rows`);
+
+  let malformedThrew = false;
+  try { await jobspresso.fetch({}, { fetchText: async () => '<html>challenge</html>' }); } catch { malformedThrew = true; }
+  if (malformedThrew) pass('jobspresso.fetch() rejects non-RSS responses');
+  else fail('jobspresso.fetch() should reject malformed RSS');
+
+  let unusableThrew = false;
+  try {
+    await jobspresso.fetch({}, { fetchText: async () => '<rss><channel><item><title>Broken</title><link>https://evil.example/job</link></item></channel></rss>' });
+  } catch { unusableThrew = true; }
+  if (unusableThrew) pass('jobspresso.fetch() rejects a non-empty feed with no structurally usable items');
+  else fail('jobspresso.fetch() should reject non-empty all-unusable RSS');
+
 } catch (e) {
   fail(`jobspresso provider tests crashed: ${e.message}`);
 }

@@ -10,6 +10,12 @@ try {
   const hn = hackernewsModule.default;
   const { parseHnComment, resolveLatestThreadId } = hackernewsModule;
 
+  if (hn.id === 'hackernews' && hn.detect({ provider: 'hackernews' }) && hn.detect({ provider: 'other' }) === null) {
+    pass('hackernews id and explicit provider detection are scoped correctly');
+  } else {
+    fail('hackernews id/detect behavior is incorrect');
+  }
+
   // resolveLatestThreadId ─ happy path
   const fakeSearch = {
     hits: [
@@ -85,6 +91,16 @@ try {
     pass('parseHnComment extracts href URL from anchor tags');
   } else {
     fail(`parseHnComment anchor URL: ${JSON.stringify(parsedHtml?.url)}`);
+  }
+
+  const numericEntityUrl = parseHnComment(
+    'Snout https:&#x2F;&#x2F;snout.com&#x2F; | Backend Engineer | Remote Europe',
+    'https://news.ycombinator.com/item?id=1',
+  );
+  if (numericEntityUrl?.url === 'https://snout.com/' && !numericEntityUrl.title.includes('&#x2F;')) {
+    pass('parseHnComment decodes numeric URL entities from current Algolia payloads');
+  } else {
+    fail(`parseHnComment numeric entity URL: ${JSON.stringify(numericEntityUrl)}`);
   }
 
   // parseHnComment ─ <p> paragraph body must not bleed into location field
@@ -198,6 +214,39 @@ try {
   } else {
     fail('hackernews.fetch() should throw when no matching thread found');
   }
+
+  const emptyJobs = await hn.fetch({ name: 'HN' }, {
+    async fetchJson(url) {
+      if (url.includes('search_by_date')) return fakeSearchResp;
+      return { children: [] };
+    },
+  });
+  if (emptyJobs.length === 0) pass('hackernews.fetch() treats a valid empty thread as healthy empty');
+  else fail(`hackernews.fetch() valid empty returned ${emptyJobs.length} rows`);
+
+  const numericCommentJobs = await hn.fetch({ name: 'HN' }, {
+    async fetchJson(url) {
+      if (url.includes('search_by_date')) return fakeSearchResp;
+      return { children: [{ id: 12345678, text: 'URL-less but valid hiring post' }] };
+    },
+  });
+  if (numericCommentJobs[0]?.url === 'https://news.ycombinator.com/item?id=12345678') {
+    pass('URL-less HN postings use a per-comment URL so scanner dedup does not collapse the whole thread');
+  } else {
+    fail(`URL-less HN posting fallback = ${JSON.stringify(numericCommentJobs[0]?.url)}`);
+  }
+
+  let malformedSearchThrew = false;
+  try { await hn.fetch({}, { fetchJson: async () => ({ results: [] }) }); } catch { malformedSearchThrew = true; }
+  if (malformedSearchThrew) pass('hackernews.fetch() rejects malformed search payloads');
+  else fail('hackernews.fetch() should reject malformed search payloads');
+
+  let malformedItemThrew = false;
+  try {
+    await hn.fetch({}, { fetchJson: async (url) => url.includes('search_by_date') ? fakeSearchResp : { comments: [] } });
+  } catch { malformedItemThrew = true; }
+  if (malformedItemThrew) pass('hackernews.fetch() rejects malformed item payloads');
+  else fail('hackernews.fetch() should reject malformed item payloads');
 } catch (e) {
   fail(`hackernews provider tests crashed: ${e.message}`);
 }
