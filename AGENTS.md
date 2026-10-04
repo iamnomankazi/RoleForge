@@ -379,8 +379,8 @@ the executor may resume and upload it.
 ## Offer Verification -- MANDATORY
 
 **NEVER trust WebSearch/WebFetch to verify if an offer is still active.** ALWAYS use Playwright:
-1. `browser_navigate` to the URL
-2. `browser_snapshot` to read content
+1. Default: `node browser-extract.mjs <url>` uses local Chromium to render and read the page. Explicit `scan.extractor: mcp` uses connected `browser_navigate` + `browser_snapshot` tools.
+2. CLI failure may fall back only to connected MCP. If neither browser path works, mark verification unconfirmed; request pasted JD text or local-runtime repair. Never infer liveness from a browser error or WebFetch/search.
 3. Only footer/navbar without JD = closed. Title + description + Apply = active.
 
 **Exception for batch workers (headless mode):** Playwright is not available in headless pipe mode. Use WebFetch as fallback and mark the report header with `**Verification:** unconfirmed (batch mode)`. The user can verify manually later.

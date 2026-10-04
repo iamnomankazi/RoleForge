@@ -73,10 +73,13 @@ you process the URL.
 
 ## Intelligent JD detection from URL
 
-1. **Playwright (preferred):** `browser_navigate` + `browser_snapshot`. Works with all SPAs.
-   - **Opt-in — CLI extractor (`scan.extractor: cli` in `config/profile.yml`):** run `node browser-extract.mjs <url>` (default `--mode jd`) instead; it returns compact `{ "url", "title", "text" }` — the JD main text at ~4–5× fewer tokens than a full snapshot. Use its `text` as the JD. **Fall back silently** to `browser_navigate` + `browser_snapshot` if it errors or is missing.
+1. **Local Playwright (default):** With absent/invalid `scan.extractor`, or explicit `cli`, run `node browser-extract.mjs <url>` (default `--mode jd`). Reuse its compact `{ "url", "title", "text" }` as the JD.
+   - **Explicit MCP (`scan.extractor: mcp`):** use connected `browser_navigate` + `browser_snapshot` tools.
+   - **Failure:** use MCP only if connected. If neither browser path works, leave liveness unconfirmed and ask for pasted JD text or local-runtime repair. Never silently assume MCP exists.
 2. **WebFetch (fallback):** For static pages or when Playwright is unavailable.
 3. **WebSearch (last resort):** Search in secondary portals that index the JD.
+
+WebFetch/search text can supply the JD, but cannot verify posting liveness. Keep URL processing stopped at the liveness gate when neither browser path produced evidence; request pasted JD text or local-runtime repair.
 
 **Special cases:**
 - **LinkedIn**: May require login → mark `[!]` and ask the user to paste the text

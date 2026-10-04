@@ -67,7 +67,8 @@ export const DASHBOARD_REBUILD_TIMEOUT_MS = parsePositiveInt(process.env.CAREER_
 export const UPDATE_PATH_CHECKOUT_BUDGET_MS = parsePositiveInt(process.env.CAREER_OPS_UPDATE_PATH_CHECKOUT_BUDGET_MS, 5000);
 export const REEXEC_BUFFER_TIMEOUT_MS = parsePositiveInt(process.env.CAREER_OPS_REEXEC_BUFFER_TIMEOUT_MS, 60000);
 
-// System layer paths — ONLY these files get updated
+// Standalone system-layer coverage manifest. Automatic upstream application
+// remains disabled by PRIVATE_FORK_UPDATE_POLICY; use reviewed backports.
 const SYSTEM_PATHS = [
   'modes/_shared.md',
   'modes/_profile.template.md',
@@ -128,6 +129,8 @@ const SYSTEM_PATHS = [
   'CODEX.md',
   'OPENCODE.md',
   'AGENTS.md',
+  'UPSTREAM.md',
+  'voice-dna.example.md',
   'GEMINI.md',
   'KIMI.md',
   'build-dashboard.mjs',
@@ -147,6 +150,8 @@ const SYSTEM_PATHS = [
   'application-integrity.mjs',
   'application-pdf.mjs',
   'application-profile.mjs',
+  'application-reasoning-provider.mjs',
+  'application-reasoning.mjs',
   'application-shared-browser.mjs',
   'application-submission.mjs',
   'candidate-identity.mjs',
@@ -155,6 +160,7 @@ const SYSTEM_PATHS = [
   'merge-scan-results.mjs',
   'package-lock.json',
   'scan-candidate-contract.mjs',
+  'scan-interamt.mjs',
   'scripts/mark-applied.mjs',
   'scripts/open-apply-batch.mjs',
   'generate-cover-letter.mjs',

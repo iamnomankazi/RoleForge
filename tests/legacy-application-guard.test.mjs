@@ -3,6 +3,10 @@ import test from 'node:test';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { legacyAuthorityViolation } from './legacy-application-audit.mjs';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const DISABLED = [
@@ -96,10 +100,57 @@ test('static guard catches new risky executables under legacy application direct
   };
   const candidates = ['scripts', 'output', 'tmp/playwright'].flatMap(walk)
     .filter((relative) => /\.(?:mjs|cjs|js)$/.test(relative));
+  const ignoredResult = spawnSync('git', ['check-ignore', '--stdin'], {
+    cwd: ROOT, encoding: 'utf8', input: candidates.join('\n'),
+  });
+  assert.ok([0, 1].includes(ignoredResult.status), ignoredResult.stderr);
+  const ignored = new Set(ignoredResult.stdout.trim().split(/\r?\n/));
   for (const relative of candidates) {
     const source = readFileSync(resolve(ROOT, relative), 'utf8');
-    if (!/apply-queue\.csv|chromium\.launch|page\.goto/.test(source) || allow.has(relative)) continue;
-    assert.match(source.slice(0, 700), /Legacy application entrypoint disabled|disableLegacyApplicationEntrypoint/, relative);
+    if (allow.has(relative)) continue;
+    assert.equal(legacyAuthorityViolation(ROOT, relative, source, { ignored: ignored.has(relative) }), null, relative);
+  }
+});
+
+test('legacy audit distinguishes authenticated evidence and browser reads from active application authority', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'roleforge-legacy-audit-'));
+  try {
+    const archive = 'output/fixture-evidence/preimages/unsafe.mjs';
+    const source = "await page.goto(url); await page.fill('#email', email);";
+    mkdirSync(resolve(root, 'output/fixture-evidence/preimages'), { recursive: true });
+    writeFileSync(resolve(root, 'output/fixture-evidence/baseline.json'), JSON.stringify({
+      hashes: { 'unsafe.mjs': createHash('sha256').update(source).digest('hex') },
+    }));
+    assert.equal(legacyAuthorityViolation(root, archive, source, { ignored: true }), null);
+    assert.ok(legacyAuthorityViolation(root, archive, source, { ignored: false }), 'tracked archive is live');
+    // Ignore rules must not exempt force-added evidence from the live audit.
+    writeFileSync(resolve(root, '.gitignore'), 'output/\n');
+    writeFileSync(resolve(root, archive), source);
+    const git = (args, input) => spawnSync('git', args, { cwd: root, encoding: 'utf8', input });
+    assert.equal(git(['init', '--quiet']).status, 0);
+    assert.equal(git(['check-ignore', '--stdin'], `${archive}\n`).status, 0);
+    assert.equal(git(['add', '--force', '--', archive]).status, 0);
+    const trackedIgnore = git(['check-ignore', '--stdin'], `${archive}\n`);
+    assert.equal(trackedIgnore.status, 1, trackedIgnore.stderr);
+    assert.equal(trackedIgnore.stdout, '');
+    assert.ok(legacyAuthorityViolation(root, archive, source, { ignored: trackedIgnore.status === 0 }));
+    assert.ok(legacyAuthorityViolation(root, archive, source + '\n// altered', { ignored: true }), 'tampered snapshot is live');
+    assert.ok(legacyAuthorityViolation(root, 'output/fake/preimages/unsafe.mjs', source, { ignored: true }), 'path alone cannot exempt a snapshot');
+    assert.equal(legacyAuthorityViolation(root, 'output/diagnostic.mjs', 'await chromium.launch(); await page.goto(url); await page.locator("h1").innerText();'), null);
+    for (const dangerous of [
+      source, "readFileSync('output/apply-queue.csv');", "await page.setInputFiles('cv.pdf');",
+      "await page.getByRole('button', { name: 'Submit' }).click();", "form.requestSubmit();",
+      "import { prepareApplication } from '../prepare-application.mjs';",
+      "import '../prepare-application.mjs';",
+      "await import('./fixture-evidence/preimages/unsafe.mjs');",
+      "import './fixture-evidence/preimages/unsafe.mjs';",
+      "export * from './fixture-evidence/preimages/unsafe.mjs';",
+      "spawnSync(process.execPath, ['output/fixture-evidence/preimages/unsafe.mjs']);",
+    ]) {
+      assert.ok(legacyAuthorityViolation(root, 'output/new-dangerous-entrypoint.mjs', dangerous, { ignored: true }), dangerous);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

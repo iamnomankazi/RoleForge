@@ -73,6 +73,8 @@ RoleForge treats these transitions as stateful work rather than a loose collecti
 | Tracking | Pipeline/application tracker tooling, normalization, deduplication, and reconciliation |
 | Interfaces | CLI scripts, optional Go dashboard, and optional local-first web UI |
 
+URL reading defaults to the local Playwright/Chromium CLI extractor (`node browser-extract.mjs <url>`). Run `node doctor.mjs` to check the runtime. A connected browser MCP remains available through explicit `scan.extractor: mcp`. If CLI extraction fails, use MCP only when connected; otherwise leave liveness unconfirmed and request pasted JD text or repair the local runtime. WebFetch/search can supply text, never verify an active posting.
+
 ## Discovery and scanning
 
 The scanner is built to reduce expensive model work before it begins. RoleForge can query configured portals, perform ATS-oriented discovery, merge worker outputs, and maintain scan history for deduplication.

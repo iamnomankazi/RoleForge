@@ -83,12 +83,9 @@ async function checkPlaywright() {
   }
 }
 
-// The browser tools (`browser_navigate` / `browser_snapshot`) that scan / pipeline /
-// apply rely on are provided by the Playwright MCP server, usually registered through a
-// project-level MCP config (for example `.mcp.json`, `.claude/settings.json`, or
-// `.claude/settings.local.json`). When no common config is detected, SPA job boards can
-// silently return empty or stale content (#522), so doctor surfaces a non-fatal warning
-// instead of letting it fail invisibly.
+// MCP is optional for the standalone CLI path. Only an explicitly selected MCP
+// extractor needs its project configuration; configuration is not proof that the
+// current agent has connected tools. Modes must check tool availability as well.
 const PLAYWRIGHT_MCP_WARNING = 'Playwright MCP tools not detected';
 
 function playwrightMcpConfigured(root) {
@@ -110,26 +107,25 @@ function playwrightMcpConfigured(root) {
   return false;
 }
 
-// Report which scan/JD extractor is active (config/profile.yml → scan.extractor).
-// `mcp` (default) uses the browser MCP; `cli` uses browser-extract.mjs. When cli
-// is selected but the helper is missing, the modes fall back to MCP — surface
-// that as a warning, never a failure.
+// Use the same default as extraction modes. Chromium launch health is checked
+// separately by checkPlaywright; a missing CLI helper cannot silently choose MCP.
 function checkScanExtractor(root) {
   const mode = resolveExtractorMode(join(root, 'config', 'profile.yml'));
-  if (mode === 'cli') {
-    if (existsSync(join(root, 'browser-extract.mjs'))) {
-      return { pass: true, label: 'Scan extractor: cli (browser-extract.mjs)' };
-    }
-    return {
-      warn: true,
-      label: 'Scan extractor: cli set, but browser-extract.mjs is missing — falls back to MCP',
-      fix: ['Restore browser-extract.mjs, or set `scan.extractor: mcp` in config/profile.yml.'],
-    };
+  if (mode === 'mcp') return { pass: true, label: 'Scan extractor: mcp (explicit)' };
+  if (existsSync(join(root, 'browser-extract.mjs'))) {
+    return { pass: true, label: 'Scan extractor: cli (standalone default; browser-extract.mjs)' };
   }
-  return { pass: true, label: 'Scan extractor: mcp (default)' };
+  return {
+    warn: true,
+    label: 'Scan extractor: cli helper missing; extraction/liveness unconfirmed',
+    fix: ['Restore browser-extract.mjs and the local Playwright/Chromium runtime. Use MCP only if connected.'],
+  };
 }
 
 function checkPlaywrightMcp(root) {
+  if (resolveExtractorMode(join(root, 'config', 'profile.yml')) !== 'mcp') {
+    return { pass: true, label: 'Playwright MCP: optional/inactive (CLI extraction selected)' };
+  }
   if (playwrightMcpConfigured(root)) {
     return { pass: true, label: 'Playwright MCP server configured' };
   }
@@ -137,10 +133,9 @@ function checkPlaywrightMcp(root) {
     warn: true,
     label: PLAYWRIGHT_MCP_WARNING,
     fix: [
-      'Browser-driven JD fetching and liveness checks (scan / pipeline / apply) need the',
-      'Playwright MCP server. No project-level MCP config was detected in `.mcp.json`',
-      'or `.claude/settings*.json`, so SPA job boards may return empty or stale content.',
-      'Tracking: https://github.com/santifer/career-ops/issues/506',
+      'Explicit scan.extractor: mcp needs connected browser_navigate/browser_snapshot tools.',
+      'No project-level Playwright MCP configuration was detected. Connect MCP or',
+      'select scan.extractor: cli and verify the local runtime with doctor.',
     ],
   };
 }
@@ -406,7 +401,9 @@ function onboardingState(root) {
   const missing = USER_LAYER_PREREQS
     .filter(({ path }) => !prereqPresent(root, path))
     .map(({ path }) => path);
-  const warnings = playwrightMcpConfigured(root) ? [] : [PLAYWRIGHT_MCP_WARNING];
+  const extractorCheck = checkScanExtractor(root);
+  const mcpCheck = checkPlaywrightMcp(root);
+  const warnings = [extractorCheck, mcpCheck].filter((check) => check.warn).map((check) => check.label);
   let plugins = [];
   try {
     const cfg = readPluginConfigSync(root);
@@ -415,7 +412,7 @@ function onboardingState(root) {
       return { id: m.id, hooks: m.hooks, enabled: s.enabled, missingEnv: s.missingEnv };
     });
   } catch { plugins = []; }
-  return { onboardingNeeded: missing.length > 0, missing, warnings, autoCopied, plugins };
+  return { onboardingNeeded: missing.length > 0, missing, warnings, autoCopied, plugins, extractor: resolveExtractorMode(join(root, 'config', 'profile.yml')) };
 }
 
 if (JSON_OUT) {

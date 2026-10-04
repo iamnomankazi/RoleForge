@@ -46,6 +46,11 @@ const userPaths = extractArray('USER_PATHS');
 const bootstrapPaths = extractArray('BOOTSTRAP_PATHS');
 
 const requiredSystemPaths = [
+  'UPSTREAM.md',
+  'application-reasoning-provider.mjs',
+  'application-reasoning.mjs',
+  'scan-interamt.mjs',
+  'voice-dna.example.md',
   'modes/email.md',
   'modes/followup.md',
   'modes/interview.md',

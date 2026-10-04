@@ -8,7 +8,7 @@ If the input is a **URL** (not pasted JD text), follow this strategy to extract 
 
 **Priority order:**
 
-1. **Playwright (preferred):** Most job portals (Lever, Ashby, Greenhouse, Workday) are SPAs. Use `browser_navigate` + `browser_snapshot` to render and read the JD.
+1. **Playwright (preferred):** Most job portals (Lever, Ashby, Greenhouse, Workday) are SPAs. Use `node browser-extract.mjs <url>` by default to render and read the JD. Explicit `scan.extractor: mcp` uses connected `browser_navigate` + `browser_snapshot` tools. On CLI failure, fall back only to connected MCP; otherwise leave liveness unconfirmed and request pasted JD text or local-runtime repair.
 2. **WebFetch (fallback):** For static pages (ZipRecruiter, WeLoveProduct, company career pages).
 3. **WebSearch (last resort):** Search for the role title + company in secondary portals that index the JD in static HTML.
 
@@ -20,7 +20,7 @@ If the input is a **URL** (not pasted JD text), follow this strategy to extract 
 
 Before running any evaluation, confirm the posting is still live. The Step 0 Playwright snapshot already holds the evidence — judge it now, before spending tokens on the A-G evaluation, the report, or a PDF. A 404/expired page silently served as a static fallback ("position filled", empty shell) otherwise scores a full evaluation against phantom content.
 
-1. From the Step 0 snapshot/fetched content, classify the posting:
+1. From the Step 0 Playwright-rendered content, classify the posting. WebFetch/search text cannot resolve this gate. If neither browser path produced evidence, leave liveness unconfirmed, stop URL processing, and request pasted JD text or local-runtime repair:
    - **active posting evidence:** title/role + a real job description or an application/apply path
    - **closed posting evidence:** expired/closed/"no longer accepting applications", missing JD with only nav/footer, hard redirect to a generic careers/search page, or 404/410
 2. If the posting appears closed or the page is a dead/fallback shell, **stop here**: do not run Step 1–Step 4. Tell the candidate the link is dead, and if the entry came from `data/pipeline.md`, mark it `- [x] ~~Company | Role~~ — oferta nieaktywna`.

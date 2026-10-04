@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * browser-extract.mjs — headless Playwright reader for the scan / JD-extraction
- * path (the opt-in alternative to the browser MCP; see #1449).
+ * path (the standalone default; an explicitly configured MCP remains supported).
  *
  * The token cost of the MCP path is `browser_snapshot` streaming a page's whole
  * accessibility tree back to the model on every navigate. This helper renders
@@ -24,7 +24,8 @@
  *
  * Output: compact JSON to stdout. Exit 0 on success; exit 1 on a hard error,
  * printing `{ "error": "...", "code": "..." }` (so a caller/mode can fall back
- * to the MCP path silently). Reuses liveness-browser.mjs's SSRF host guard and
+ * to a connected MCP, or leave extraction/liveness unconfirmed when unavailable).
+ * Reuses liveness-browser.mjs's SSRF host guard and
  * realistic-UA context so it isn't instantly bot-walled.
  */
 
@@ -51,21 +52,23 @@ const NAV_LABEL_STOPWORDS = new Set([
 ]);
 
 /**
- * Resolve the configured scan extractor: `cli` (this helper) or `mcp` (default).
+ * Resolve the configured scan extractor: `cli` (default) or explicit `mcp`.
  * Reads `scan.extractor` from config/profile.yml; anything unrecognized — or a
- * missing/unreadable file — yields `mcp` so behavior never breaks. Exported so
+ * missing/unreadable file — yields `cli`, which uses the local Playwright runtime.
+ * Availability is checked by doctor/runtime; failure never attests to liveness.
+ * Exported so
  * doctor.mjs reports the same value.
  * @param {string} [profilePath]
  * @returns {'cli'|'mcp'}
  */
 export function resolveExtractorMode(profilePath = join(CAREER_OPS, 'config/profile.yml')) {
   try {
-    if (!existsSync(profilePath)) return 'mcp';
+    if (!existsSync(profilePath)) return 'cli';
     const raw = yaml.load(readFileSync(profilePath, 'utf-8')) || {};
     const v = raw?.scan?.extractor;
-    return v === 'cli' ? 'cli' : 'mcp';
+    return v === 'mcp' ? 'mcp' : 'cli';
   } catch {
-    return 'mcp';
+    return 'cli';
   }
 }
 

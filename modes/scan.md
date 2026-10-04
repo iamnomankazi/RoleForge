@@ -122,7 +122,7 @@ During the agent's scan, keep the **`local_parser_ok`** set in memory. This set 
 
 ### Level 1 — Direct Playwright (PRIMARY)
 
-**For each company in `tracked_companies` that is not in `local_parser_ok`:** Navigate to its `careers_url` with Playwright (`browser_navigate` + `browser_snapshot`), read ALL visible job listings, and extract the title + URL for each. This is the most reliable method because:
+**For each company in `tracked_companies` that is not in `local_parser_ok`:** Read its `careers_url` with the configured Playwright extractor (local CLI by default, connected MCP when explicitly selected), read ALL visible job listings, and extract the title + URL for each. This is the most reliable method because:
 - It views the page in real time (not cached Google results)
 - It works with SPAs (Ashby, Lever, Workday)
 - It detects new offers instantly
@@ -130,7 +130,7 @@ During the agent's scan, keep the **`local_parser_ok`** set in memory. This set 
 
 **Every company MUST have a `careers_url` in portals.yml.** If it does not, search for it once, save it, and use it in future scans.
 
-> **Opt-in — CLI extractor (`scan.extractor: cli`).** When `config/profile.yml` sets `scan.extractor: cli`, run `node browser-extract.mjs <careers_url> --mode listing` for each company instead of `browser_navigate` + `browser_snapshot`. It renders the page headlessly and returns compact JSON — `{ "url": ..., "jobs": [{ "title", "url" }] }` — so the listing enters context at a fraction of a full snapshot's tokens (~2–3× smaller here). Read the `jobs` array directly; then apply `title_filter` as usual. **Fall back silently** to `browser_navigate` + `browser_snapshot` if the command errors (it prints `{ "error", "code" }` and exits non-zero) or isn't present — never let the flag break a scan. Default (`scan.extractor` absent or `mcp`): the `browser_navigate` + `browser_snapshot` flow above.
+> **Standalone default: CLI extractor.** When `scan.extractor` is absent/invalid or `cli`, run `node browser-extract.mjs <careers_url> --mode listing`. It returns compact `{ "url", "jobs": [{ "title", "url" }] }`; apply `title_filter` to the jobs as usual. Explicit `scan.extractor: mcp` uses connected `browser_navigate` + `browser_snapshot` tools. On CLI error/missing runtime, fall back to MCP only if connected. If neither browser path works, mark extraction/liveness unconfirmed and request pasted JD text or local-runtime repair. WebFetch/search can supply discovery text, never proof that a posting is active.
 
 ### Level 2 — ATS APIs / Feeds (COMPLEMENTARY)
 

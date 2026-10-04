@@ -1,7 +1,8 @@
 // tests/browser-extract.test.mjs — unit coverage for the pure logic in
 // browser-extract.mjs (config resolution + result normalizers). The Playwright
 // navigation path is exercised live, not here.
-import { pass, fail, ROOT } from './helpers.mjs';
+import { pass, fail, results, ROOT } from './helpers.mjs';
+import assert from 'node:assert/strict';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
 import { mkdtempSync, writeFileSync, rmSync } from 'fs';
@@ -13,7 +14,7 @@ try {
   const mod = await import(pathToFileURL(join(ROOT, 'browser-extract.mjs')).href);
   const { resolveExtractorMode, compactText, normalizeJd, normalizeListing, parseArgs } = mod;
 
-  // resolveExtractorMode — default mcp, explicit cli, garbage → mcp, missing → mcp
+  // Missing/invalid configuration defaults to local CLI; explicit MCP is preserved.
   const tmp = mkdtempSync(join(tmpdir(), 'career-ops-extractor-'));
   try {
     const write = (name, body) => { const p = join(tmp, name); writeFileSync(p, body); return p; };
@@ -21,14 +22,14 @@ try {
     else fail('resolveExtractorMode should read cli');
     if (resolveExtractorMode(write('mcp.yml', 'scan:\n  extractor: mcp\n')) === 'mcp') pass('resolveExtractorMode reads scan.extractor: mcp');
     else fail('resolveExtractorMode should read mcp');
-    if (resolveExtractorMode(write('none.yml', 'candidate:\n  full_name: X\n')) === 'mcp') pass('resolveExtractorMode defaults to mcp when the key is absent');
-    else fail('resolveExtractorMode should default to mcp');
-    if (resolveExtractorMode(write('bad.yml', 'scan:\n  extractor: nonsense\n')) === 'mcp') pass('resolveExtractorMode falls back to mcp for an unknown value');
-    else fail('resolveExtractorMode should fall back to mcp on garbage');
-    if (resolveExtractorMode(join(tmp, 'does-not-exist.yml')) === 'mcp') pass('resolveExtractorMode returns mcp when the profile is missing');
-    else fail('resolveExtractorMode should return mcp for a missing file');
-    if (resolveExtractorMode(write('malformed.yml', 'scan:\n  extractor: [cli\n')) === 'mcp') pass('resolveExtractorMode falls back to mcp on malformed YAML (catch branch)');
-    else fail('resolveExtractorMode should return mcp when the YAML is invalid');
+    if (resolveExtractorMode(write('none.yml', 'candidate:\n  full_name: X\n')) === 'cli') pass('resolveExtractorMode defaults to cli when the key is absent');
+    else fail('resolveExtractorMode should default to cli');
+    if (resolveExtractorMode(write('bad.yml', 'scan:\n  extractor: nonsense\n')) === 'cli') pass('resolveExtractorMode falls back to cli for an unknown value');
+    else fail('resolveExtractorMode should fall back to cli on garbage');
+    if (resolveExtractorMode(join(tmp, 'does-not-exist.yml')) === 'cli') pass('resolveExtractorMode returns cli when the profile is missing');
+    else fail('resolveExtractorMode should return cli for a missing file');
+    if (resolveExtractorMode(write('malformed.yml', 'scan:\n  extractor: [cli\n')) === 'cli') pass('resolveExtractorMode falls back to cli on malformed YAML (catch branch)');
+    else fail('resolveExtractorMode should return cli when the YAML is invalid');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -102,3 +103,5 @@ try {
 } catch (e) {
   fail(`browser-extract tests crashed: ${e.message}`);
 }
+
+assert.equal(results().failed, 0, 'browser extractor assertions must pass');

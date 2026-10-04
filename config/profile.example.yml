@@ -176,14 +176,14 @@ cover_letter:
 # ── Scan / JD extractor ─────────────────────────────────────────────────────
 #
 # How the scan and JD-extraction steps read SPA job pages.
-#   mcp (default) — the browser MCP (browser_navigate + browser_snapshot). Works
-#                   out of the box; the snapshot is token-heavy.
-#   cli           — the headless `browser-extract.mjs` helper: renders the page
-#                   and returns compact JSON, cutting per-page tokens ~2–5×. Opt-in.
-#                   If the helper isn't available, the modes fall back to mcp
-#                   silently, so nothing breaks. `doctor` reports the active mode.
+#   cli (default): local headless Playwright via browser-extract.mjs; compact JSON.
+#                   Requires installed Playwright/Chromium (checked by doctor).
+#   mcp: explicit opt-in for a connected browser MCP.
+# If CLI extraction fails, use MCP only when its tools are connected. Otherwise
+# leave extraction/liveness unconfirmed and request pasted JD text or repair the
+# local runtime. WebFetch/search may supply text, never live-posting verification.
 # scan:
-#   extractor: mcp   # mcp (default) | cli
+#   extractor: cli   # cli (default) | mcp
 
 # ── Bounded application semantic reasoning (optional) ──────────────────────
 #
