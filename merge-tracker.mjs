@@ -7,8 +7,9 @@
  * - 8-col: num\tdate\tcompany\trole\tstatus\tscore\tpdf\treport (no notes)
  * - Pipe-delimited (markdown table row): | col | col | ... |
  *
- * Dedup: company normalized + role fuzzy match + report number match
- * If duplicate with higher score → update in-place, update report link
+ * Destructive reconciliation: exact Unicode-normalized company plus explicit
+ * requisition identity, or exact role when no stronger identity exists.
+ * Compatible evidence is unioned independently of score.
  * Validates status against states.yml (rejects non-canonical, logs warning)
  *
  * Run: node career-ops/merge-tracker.mjs [--dry-run] [--verify]
@@ -19,9 +20,18 @@ import { join, basename, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
 import { normalizeReportLink as normalizeLink } from './tracker-links.mjs';
-import { roleFuzzyMatch } from './role-matcher.mjs';
-import { LEGACY_COLMAP, detectColumns, resolveScoreStatus, normalizeVia, normalizeTextKey, SEPARATOR_ROW_RE } from './tracker-parse.mjs';
-import { resolveTrackerPath, trackerLockDirFor, acquireTrackerLock, writeFileAtomic, normalizeCompany, cell } from './tracker-utils.mjs';
+import { LEGACY_COLMAP, detectColumns, resolveScoreStatus, SEPARATOR_ROW_RE } from './tracker-parse.mjs';
+import { resolveTrackerPath, trackerLockDirFor, acquireTrackerLock, writeFileAtomic, cell } from './tracker-utils.mjs';
+import {
+  appendLabeledEvidence,
+  effectiveLocation,
+  effectiveVia,
+  evidenceContains,
+  evidenceEntries,
+  meaningfulEvidence,
+  sameOpening,
+  unionEvidence,
+} from './tracker-evidence.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 // Support both layouts: data/applications.md (boilerplate) and applications.md
@@ -60,6 +70,9 @@ const REPORTS_ROOT = basename(TRACKER_DIR) === 'data' ? dirname(TRACKER_DIR) : T
  * @returns {string} Markdown report link relative to the tracker file.
  */
 const normalizeReportLink = (reportField) => normalizeLink(reportField, TRACKER_DIR, REPORTS_ROOT);
+const normalizeReportEvidence = (reportField) => unionEvidence(
+  ...evidenceEntries(reportField).map((entry) => normalizeReportLink(entry)),
+);
 
 // Ensure required directories exist (fresh setup)
 mkdirSync(join(CAREER_OPS, 'data'), { recursive: true });
@@ -143,116 +156,8 @@ function validateStatus(status) {
   return 'Evaluated';
 }
 
-// normalizeVia (Unicode-aware Via/agency key, #1596/#1603) lives in
-// tracker-parse.mjs so merge-tracker and analyze-patterns share ONE normalizer
-// and agency identity can't drift between scripts. (normalizeCompany lives in
-// tracker-utils.mjs since #1460 so every tracker writer shares one company key.)
-
-/**
- * Extract the bracketed report number from a Markdown report link.
- *
- * Report-number equality is an exact duplicate signal, but only after company
- * equality is confirmed by the caller. This helper reads links such as
- * `[123](../reports/123-company-role-date.md)` and returns the numeric id.
- *
- * @param {string} reportStr - Raw report cell from applications.md or TSV input.
- * @returns {number|null} Parsed report number, or null when absent.
- */
-function extractReportNum(reportStr) {
-  const m = reportStr.match(/\[(\d+)\]/);
-  return m ? parseInt(m[1]) : null;
-}
-
-// Matches the req/job-number labels actually seen in this tracker's free-text
-// Notes column: `R_1488728`, `Req PRACT011038`, `Req #1311`, `REQ-2026-32061`,
-// `Job 202606-116491`, `Job ID 65136`, `Posting ID 5340`, `JR00124259`,
-// `Ref R2857957`. The label is required so we don't grab an unrelated number
-// (a salary figure, a date fragment) — only text explicitly tagged as a
-// req/job/posting/reference id counts.
-const REQ_NUMBER_RE = /\b(?:job\s*id|posting\s*id|requisition|req|jr|job|posting|ref(?:erence)?|r_)[\s:#_-]*([a-z][a-z0-9-]*\d[a-z0-9-]*|\d[a-z0-9-]*)\b/i;
-
-/**
- * Extract a req/job/posting number from a tracker Notes cell, if present.
- *
- * Tier-3 duplicate detection (company + fuzzy role match) has no awareness of
- * req numbers on its own, which lets two distinct postings at the same company
- * with similarly-worded titles collapse into one row (#1524 — e.g. two TD Bank
- * L&D postings distinguished only by `R_1494379` vs `R_1488728`). This helper
- * pulls out that number so the caller can treat a confirmed mismatch as proof
- * the rows are NOT duplicates, without touching cases where no number is
- * present on either side.
- *
- * @param {string} notes - Raw Notes cell from a tracker row or TSV addition.
- * @returns {string|null} Uppercased req/job number, or null when none is found.
- */
-function extractReqNumber(notes) {
-  if (!notes) return null;
-  const m = String(notes).match(REQ_NUMBER_RE);
-  return m ? m[1].toUpperCase() : null;
-}
-
-const EMPTY_EVIDENCE = new Set(['', '-', '—', 'n/a', 'na', 'none', 'null', 'pending', '❌']);
-
-function meaningful(value) {
-  return !EMPTY_EVIDENCE.has(String(value ?? '').trim().toLowerCase());
-}
-
-function reportIdentity(value) {
-  if (!meaningful(value)) return null;
-  const number = extractReportNum(String(value));
-  return number === null ? `text:${normalizeTextKey(value)}` : `number:${number}`;
-}
-
-function concretePdfIdentity(value) {
-  if (!meaningful(value)) return null;
-  const text = String(value).trim();
-  return /\[[^\]]+\]\([^)]+\)|[\\/]|\.pdf\b/i.test(text) ? normalizeTextKey(text) : null;
-}
-
-function identitiesConflict(existing, addition) {
-  const existingReport = reportIdentity(existing.report);
-  const incomingReport = reportIdentity(addition.report);
-  if (existingReport && incomingReport && existingReport !== incomingReport) return true;
-
-  const existingReq = extractReqNumber(existing.notes);
-  const incomingReq = extractReqNumber(addition.notes);
-  if (existingReq && incomingReq && existingReq !== incomingReq) return true;
-
-  const existingVia = meaningful(existing.via) ? normalizeVia(existing.via) : null;
-  const incomingVia = meaningful(addition.via) ? normalizeVia(addition.via) : null;
-  if (existingVia && incomingVia && existingVia !== incomingVia) return true;
-
-  const existingPdf = concretePdfIdentity(existing.pdf);
-  const incomingPdf = concretePdfIdentity(addition.pdf);
-  return Boolean(existingPdf && incomingPdf && existingPdf !== incomingPdf);
-}
-
-function companiesMatch(a, b) {
-  const key = normalizeCompany(String(a));
-  if (key !== normalizeCompany(String(b))) return false;
-  return key !== '' || String(a).trim() === String(b).trim();
-}
-
-function rolesCompatible(a, b) {
-  const left = normalizeTextKey(a);
-  const right = normalizeTextKey(b);
-  return Boolean(left && left === right) || roleFuzzyMatch(a, b);
-}
-
 function mergeNotes(existingNotes, addition, oldScore, newScore) {
-  const previousRaw = String(existingNotes ?? '').trim();
-  const previous = ['—', '-', 'N/A'].includes(previousRaw)
-    ? ''
-    : previousRaw.replace(/\s*\.\s*$/, '');
-  const incoming = String(addition.notes ?? '').trim();
-  if (!meaningful(incoming)) return previousRaw;
-  const marker = `Re-eval ${addition.date} (${oldScore}→${newScore})`;
-  const clause = (value) => value.replace(/\.+$/, '').trim();
-  const incomingClause = clause(incoming);
-  const repeated = previous.toLowerCase().includes(incomingClause.toLowerCase());
-  if (repeated) return previousRaw;
-  const tail = newScore !== oldScore ? `${marker}: ${incoming}` : incoming;
-  return previous ? `${previous}. ${tail}` : tail;
+  return unionEvidence(existingNotes, addition.notes);
 }
 
 /**
@@ -282,25 +187,21 @@ function strongestStatus(existing, incoming) {
 }
 
 function evidenceValue(existing, incoming) {
-  return meaningful(existing) ? existing : (meaningful(incoming) ? incoming : existing || incoming || '—');
+  return unionEvidence(existing, incoming);
 }
 
 function mergedLocation(existing, incoming) {
-  if (!meaningful(existing)) return meaningful(incoming) ? incoming : existing || incoming || '—';
-  if (!meaningful(incoming) || normalizeTextKey(existing) === normalizeTextKey(incoming)) return existing;
-  return `${existing} / ${incoming}`;
+  return unionEvidence(existing, incoming);
 }
 
 function additionEvidenceRepresented(row, addition) {
   if (parseScore(row.score) < parseScore(addition.score)) return false;
   if ((STATUS_RANK.get(validateStatus(row.status)) ?? 0) < (STATUS_RANK.get(validateStatus(addition.status)) ?? 0)) return false;
-  if (meaningful(addition.notes) && !String(row.notes).toLowerCase().includes(String(addition.notes).trim().toLowerCase())) return false;
-  if (meaningful(addition.location) && !normalizeTextKey(row.location).includes(normalizeTextKey(addition.location))) return false;
-  if (meaningful(addition.via) && normalizeVia(row.via) !== normalizeVia(addition.via)) return false;
-  if (reportIdentity(addition.report) && reportIdentity(row.report) !== reportIdentity(addition.report)) return false;
-  const incomingPdf = concretePdfIdentity(addition.pdf);
-  if (incomingPdf && concretePdfIdentity(row.pdf) !== incomingPdf) return false;
-  if (meaningful(addition.pdf) && !meaningful(row.pdf)) return false;
+  if (!evidenceContains(row.notes, addition.notes)) return false;
+  if (!evidenceContains(effectiveLocation(row), addition.location)) return false;
+  if (!evidenceContains(effectiveVia(row), addition.via)) return false;
+  if (!evidenceContains(row.report, addition.report)) return false;
+  if (!evidenceContains(row.pdf, addition.pdf)) return false;
   return true;
 }
 
@@ -401,6 +302,37 @@ function parseAppLine(line) {
  * @returns {{via: string, location: string}|null}
  */
 function parseTsvExtras(parts, filename) {
+  {
+    const extras = parts.slice(9).map((value) => String(value).trim()).filter(Boolean);
+    let via = '';
+    let location = '';
+    let legacyLocation = '';
+    for (const extra of extras) {
+      const tagged = extra.match(/^([^=]+)=(.*)$/u);
+      if (tagged) {
+        const name = tagged[1].trim().toLowerCase();
+        const value = meaningfulEvidence(tagged[2]) ? tagged[2].trim() : '';
+        if (name === 'via') {
+          if (via) { console.warn(`Skipping ${filename}: duplicate via tag`); return null; }
+          via = value;
+        } else if (name === 'location') {
+          if (location) { console.warn(`Skipping ${filename}: duplicate location tag`); return null; }
+          location = value;
+        } else {
+          console.warn(`Skipping ${filename}: unknown extra tag "${name}"`);
+          return null;
+        }
+      } else {
+        if (legacyLocation) { console.warn(`Skipping ${filename}: multiple legacy location fields`); return null; }
+        legacyLocation = meaningfulEvidence(extra) ? extra : '';
+      }
+    }
+    if (location && legacyLocation) {
+      console.warn(`Skipping ${filename}: both tagged and legacy locations were supplied`);
+      return null;
+    }
+    return { via, location: location || legacyLocation };
+  }
   const extras = parts.slice(9).map(s => String(s).trim()).filter(s => s !== '');
   const viaTags = extras.filter(s => /^via=/i.test(s));
   const untagged = extras.filter(s => !/^via=/i.test(s));
@@ -644,86 +576,21 @@ for (const file of tsvFiles) {
   const addition = parseTsvContent(content, file);
   if (!addition) { skipped++; failedAdditions.push(file); continue; }
 
-  // A via= tag can only be stored if the tracker has a Via column — warn
-  // instead of dropping the channel silently (#1596). Clear the value too:
-  // existing rows parse with via='' on this layout, so a set addition.via would
-  // make the cross-channel duplicate guard see a channel mismatch and add a
-  // second ? row instead of updating the same-agency re-blast.
-  if (addition.via && COLMAP.via == null) {
-    console.warn(`⚠️  ${file}: carries via=${addition.via} but the tracker has no Via column — value dropped. Add it with: node merge-tracker.mjs --migrate-via`);
-    addition.via = '';
+  // Legacy layouts preserve optional fields as labeled notes.
+  if (meaningfulEvidence(addition.via) && COLMAP.via == null) {
+    addition.notes = appendLabeledEvidence(addition.notes, 'Via', addition.via);
+  }
+  if (meaningfulEvidence(addition.location) && COLMAP.location == null) {
+    addition.notes = appendLabeledEvidence(addition.notes, 'Location', addition.location);
   }
 
   // Normalize the report link to be relative to the tracker file's directory.
   // The TSV convention carries a root-relative `reports/...` link; rewrite it
   // so it resolves correctly when clicked from applications.md (see #760).
-  addition.report = normalizeReportLink(addition.report);
+  addition.report = normalizeReportEvidence(addition.report);
 
-  // Check for duplicate by:
-  // 1. Exact report number match
-  // 2. Company + role fuzzy match
-  const reportNum = extractReportNum(addition.report);
-  let duplicate = null;
-  let reportNumMatched = false;
-
-  if (reportNum) {
-    // Report-number match must also confirm company (#912). Report-file
-    // sequence and tracker-row sequence are independent, so the same number
-    // appearing for two different companies is sequence drift, not a duplicate.
-    // Without the company guard, a NewCo TSV with report [1] silently overwrites
-    // the existing tracker row [1] belonging to an unrelated company.
-    duplicate = existingApps.find(app => {
-      const existingReportNum = extractReportNum(app.report);
-      return existingReportNum === reportNum
-        && companiesMatch(app.company, addition.company)
-        && !identitiesConflict(app, addition);
-    });
-    if (duplicate) reportNumMatched = true;
-  }
-
-  if (!duplicate) {
-    // Exact entry number match — but only when the company also matches.
-    // The TSV `num` doubles as the tracker row id, yet report-file numbering
-    // and tracker-row numbering can drift out of sync (e.g. reports maxed at
-    // 067 while the tracker was already at #69). A bare num collision across
-    // *different* companies is that drift, not a duplicate — matching on num
-    // alone silently merges a brand-new role into an unrelated existing row.
-    duplicate = existingApps.find(app =>
-      app.num === addition.num
-      && companiesMatch(app.company, addition.company)
-      && rolesCompatible(addition.role, app.role)
-      && !identitiesConflict(app, addition)
-    );
-  }
-
-  if (!duplicate) {
-    // Company + role fuzzy match
-    const additionReqNum = extractReqNumber(addition.notes);
-    duplicate = existingApps.find(app => {
-      if (!companiesMatch(app.company, addition.company)) return false;
-      if (!rolesCompatible(addition.role, app.role)) return false;
-      if (identitiesConflict(app, addition)) return false;
-      // Cross-channel guard (#1596): unknown-employer rows (`?`) all normalize
-      // to the same empty company key, but the same role via two DIFFERENT
-      // agencies is two real submissions — merging them silently is exactly
-      // the double-submission hazard the Via column exists to surface. Only
-      // the same channel (the agency re-blasting one listing) is a duplicate.
-      // Via comparison is Unicode-aware (#1603): normalizeCompany() would
-      // collapse distinct non-Latin agency names to the same empty key.
-      if ((String(addition.company).trim() === '?' || String(app.company).trim() === '?')
-          && normalizeVia(addition.via || '') !== normalizeVia(app.via || '')) return false;
-      // Req/job-number guard (#1524): a similarly-worded title at the same
-      // company can still be a genuinely distinct posting when a req/job
-      // number in the Notes column proves it (employers like TD commonly run
-      // concurrent near-identical L&D/HR titles distinguished only by req#).
-      // Only treat this as evidence the rows differ when BOTH sides carry an
-      // extractable number and they disagree — if either side has none, fall
-      // back to today's fuzzy-match-only behavior unchanged.
-      const appReqNum = extractReqNumber(app.notes);
-      if (additionReqNum && appReqNum && additionReqNum !== appReqNum) return false;
-      return true;
-    });
-  }
+  // Row numbers and report/PDF files are evidence, never opening identity.
+  const duplicate = existingApps.find((app) => sameOpening(app, addition)) || null;
 
   if (duplicate) {
     const newScore = parseScore(addition.score);
@@ -733,7 +600,7 @@ for (const file of tsvFiles) {
       num: duplicate.num,
       date: higherScore ? addition.date : duplicate.date,
       company: duplicate.company,
-      role: higherScore && (reportNumMatched || rolesCompatible(addition.role, duplicate.role)) ? addition.role : duplicate.role,
+      role: duplicate.role,
       via: evidenceValue(duplicate.via, addition.via),
       location: mergedLocation(duplicate.location, addition.location),
       score: higherScore ? addition.score : duplicate.score,
@@ -780,12 +647,15 @@ for (const file of tsvFiles) {
       score: addition.score, status: addition.status, pdf: addition.pdf,
       report: addition.report, notes: addition.notes,
     });
-    newLines.push(newLine);
     const parsedNew = parseAppLine(newLine);
-    if (parsedNew) {
-      parsedNew.addedThisRun = true;
-      existingApps.push(parsedNew);
+    if (!parsedNew || !additionEvidenceRepresented(parsedNew, addition)) {
+      console.error(`New row for ${file} does not represent every meaningful TSV field; addition remains pending`);
+      failedAdditions.push(file);
+      continue;
     }
+    newLines.push(newLine);
+    parsedNew.addedThisRun = true;
+    existingApps.push(parsedNew);
     added++;
     console.log(`➕ Add #${entryNum}: ${addition.company} — ${addition.role} (${addition.score})`);
   }

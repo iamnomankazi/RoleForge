@@ -9,6 +9,7 @@ import { normalizeTextKey, isSeparatorRow } from '../tracker-parse.mjs';
 import { normalizeCompany } from '../tracker-utils.mjs';
 import { roleTokens } from '../role-matcher.mjs';
 import { fingerprintText, findCrossListings } from '../fingerprint-core.mjs';
+import { normalizeOpeningText } from '../tracker-evidence.mjs';
 
 const ROOT = dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 const HEADER = `# Applications Tracker
@@ -69,6 +70,79 @@ test('separator recognition is structural and CI/CD is one specialty token', () 
   assert.ok(roleTokens('Senior CI/CD Platform Engineer').includes('cicd'));
 });
 
+test('destructive identity preserves punctuation, seniority, and team suffixes', () => {
+  assert.notEqual(normalizeOpeningText('C&A'), normalizeOpeningText('CA'));
+  assert.notEqual(normalizeOpeningText('C++ Developer'), normalizeOpeningText('C Developer'));
+  assert.notEqual(normalizeOpeningText('Data Engineer'), normalizeOpeningText('Senior Data Engineer'));
+  assert.notEqual(normalizeOpeningText('Backend Engineer Payments'), normalizeOpeningText('Backend Engineer Identity'));
+});
+
+test('legacy tracker unions every evidence class and archives only represented new rows', () => {
+  const sb = sandbox(`${HEADER}| 1 | 2026-08-01 | Acme | Engineer | 4.0/5 | Evaluated | [CV](old.pdf) | [10](reports/010.md) | platform note |\n`);
+  try {
+    writeFileSync(join(sb.additions, '1-update.tsv'), '1\t2026-08-02\tAcme\tEngineer\tInterview\t3.5/5\t[CV](new.pdf)\t[11](reports/011.md)\tplatform\tlocation=Espoo\tvia=Referral\n');
+    writeFileSync(join(sb.additions, '2-new.tsv'), '2\t2026-08-03\tBeta\tEngineer\tEvaluated\t4.1/5\t[CV](beta.pdf)\t[20](reports/020.md)\tnew row\tlocation=\u2014\tvia=Agency\n');
+    const result = run('merge-tracker.mjs', [], sb);
+    assert.equal(result.code, 0, result.output);
+    const content = readFileSync(sb.tracker, 'utf8');
+    const acme = rowFor(content, 'Acme');
+    assert.match(acme, /Interview/);
+    assert.match(acme, /old\.pdf.*new\.pdf/);
+    assert.match(acme, /010\.md.*011\.md/);
+    assert.match(acme, /platform note; platform/);
+    assert.match(acme, /Location: Espoo/);
+    assert.match(acme, /Via: Referral/);
+    const beta = rowFor(content, 'Beta');
+    assert.match(beta, /Via: Agency/);
+    assert.doesNotMatch(beta, /location=/i);
+    assert.equal(existsSync(join(sb.additions, 'merged', '1-update.tsv')), true);
+    assert.equal(existsSync(join(sb.additions, 'merged', '2-new.tsv')), true);
+  } finally { rmSync(sb.dir, { recursive: true, force: true }); }
+});
+
+test('ambiguous and unknown TSV extras remain pending', () => {
+  const sb = sandbox();
+  try {
+    writeFileSync(join(sb.additions, '1-bad.tsv'), '1\t2026-08-01\tAcme\tEngineer\tEvaluated\t4.0/5\t-\t-\tnote\tlocation=Espoo\tlocation=Helsinki\n');
+    writeFileSync(join(sb.additions, '2-bad.tsv'), '2\t2026-08-01\tBeta\tEngineer\tEvaluated\t4.0/5\t-\t-\tnote\tchannel=Agency\n');
+    const result = run('merge-tracker.mjs', [], sb);
+    assert.notEqual(result.code, 0);
+    assert.equal(existsSync(join(sb.additions, '1-bad.tsv')), true);
+    assert.equal(existsSync(join(sb.additions, '2-bad.tsv')), true);
+    assert.equal(readFileSync(sb.tracker, 'utf8'), HEADER);
+  } finally { rmSync(sb.dir, { recursive: true, force: true }); }
+});
+
+test('dedup unions multiple reports, PDFs, and locations cluster-wide', () => {
+  const header = HEADER.replace('| Role | Score |', '| Role | Location | Score |').replace('|------|-------|', '|------|----------|-------|');
+  const sb = sandbox(`${header}| 1 | 2026-08-01 | Acme | Engineer | Helsinki | 4.2/5 | Evaluated | [CV](a.pdf) | [1](reports/1.md) | alpha |\n| 2 | 2026-08-02 | Acme | Engineer | Espoo | 3.8/5 | Interview | [CV](b.pdf) | [2](reports/2.md) | alphabet |\n`);
+  try {
+    const result = run('dedup-tracker.mjs', [], sb);
+    assert.equal(result.code, 0, result.output);
+    const row = rowFor(readFileSync(sb.tracker, 'utf8'), 'Acme');
+    assert.match(row, /Helsinki; Espoo/);
+    assert.match(row, /a\.pdf.*b\.pdf/);
+    assert.match(row, /reports\/1\.md.*reports\/2\.md/);
+    assert.match(row, /alpha; alphabet/);
+    assert.match(row, /Interview/);
+  } finally { rmSync(sb.dir, { recursive: true, force: true }); }
+});
+
+test('empty anchor cannot bridge conflicting requisition and Via identities', () => {
+  const header = HEADER.replace('| Company | Role |', '| Company | Via | Role |').replace('|---------|------|', '|---------|-----|------|');
+  const sb = sandbox(`${header}| 1 | 2026-08-01 | Acme | \u2014 | Engineer | 4.5/5 | Evaluated | - | - | anchor |\n| 2 | 2026-08-02 | Acme | Agency A | Engineer | 4.0/5 | Evaluated | - | - | Req A-100 |\n| 3 | 2026-08-03 | Acme | Agency B | Engineer | 3.9/5 | Evaluated | - | - | Req B-200 |\n`);
+  try {
+    const result = run('dedup-tracker.mjs', [], sb);
+    assert.equal(result.code, 0, result.output);
+    const content = readFileSync(sb.tracker, 'utf8');
+    assert.equal((content.match(/\| Acme \|/g) || []).length, 2);
+    assert.match(content, /Agency A/);
+    assert.match(content, /Agency B/);
+    assert.match(content, /Req A-100/);
+    assert.match(content, /Req B-200/);
+  } finally { rmSync(sb.dir, { recursive: true, force: true }); }
+});
+
 test('fingerprint company comparison is Unicode-stable', () => {
   const body = Array.from({ length: 35 }, (_, i) => `要件 ${i} reliable platform observability delivery`).join(' ');
   const fp = fingerprintText(body);
@@ -77,7 +151,7 @@ test('fingerprint company comparison is Unicode-stable', () => {
   assert.equal(findCrossListings([{ url: 'other', company: '株式会社未来', title: 'Engineer', fingerprint: fp }], history, { today: '2026-08-07' }).length, 1);
 });
 
-test('same-run merge keeps distinct roles, refreshes upgrades, and preserves notes', () => {
+test('same-run merge uses exact opening identity rather than fuzzy role similarity', () => {
   const sb = sandbox(`${HEADER}| 1 | 2026-08-01 | Ακμή | CI/CD Platform Engineer | 3.0/5 | Evaluated | ❌ | [1](reports/001-akmi.md) | original evidence |\n`);
   try {
     writeFileSync(join(sb.additions, '1-upgrade.tsv'), '1\t2026-08-02\tΑκμή\tSenior CI/CD Platform Engineer\tEvaluated\t4.2/5\t✅\t[1](reports/001-akmi.md)\tnew evidence\n');
@@ -87,11 +161,12 @@ test('same-run merge keeps distinct roles, refreshes upgrades, and preserves not
     const result = run('merge-tracker.mjs', [], sb);
     assert.equal(result.code, 0, result.output);
     const content = readFileSync(sb.tracker, 'utf8');
-    assert.match(rowFor(content, 'Ακμή'), /original evidence\. Re-eval .*: new evidence/);
-    assert.match(rowFor(content, 'Ακμή'), /Senior CI\/CD Platform Engineer/);
+    assert.equal((content.match(/\| Ακμή \|/g) || []).length, 2);
+    assert.match(content, /\| Ακμή \| CI\/CD Platform Engineer \|/);
+    assert.match(content, /\| Ακμή \| Senior CI\/CD Platform Engineer \|/);
     assert.equal((content.match(/\| 公司 \|/g) || []).length, 2);
     assert.match(rowFor(content, '公司') || '', /Payments|Identity/);
-    assert.match(content, /identity note\. Re-eval .*: identity follow-up/);
+    assert.match(content, /identity note; identity follow-up/);
   } finally {
     rmSync(sb.dir, { recursive: true, force: true });
   }

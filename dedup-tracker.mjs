@@ -13,8 +13,9 @@
 import { readFileSync, copyFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { rebuildRow, normalizeCompany, trackerLockDirFor, acquireTrackerLock, writeFileAtomic } from './tracker-utils.mjs';
-import { resolveColumns, parseTrackerRow, normalizeVia, normalizeTextKey } from './tracker-parse.mjs';
+import { rebuildRow, trackerLockDirFor, acquireTrackerLock, writeFileAtomic } from './tracker-utils.mjs';
+import { resolveColumns, parseTrackerRow, normalizeVia } from './tracker-parse.mjs';
+import { normalizeOpeningText, sameOpening, unionEvidence } from './tracker-evidence.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 // Support both layouts: data/applications.md (boilerplate) and applications.md
@@ -94,129 +95,6 @@ function statusRank(status) {
 }
 
 /**
- * Check whether a status represents a real application already in motion.
- *
- * Rows at Applied or later have user-visible history that dedup must preserve
- * unless the duplicate relationship is exact. This guard prevents fuzzy title
- * matches from silently deleting an active application record.
- *
- * @param {string} status - Raw status value from the tracker row.
- * @returns {boolean} True when the row is Applied, Responded, Interview, or Offer.
- */
-function isAdvancedStatus(status) {
-  return statusRank(status) >= STATUS_RANK.applied;
-}
-
-/**
- * Extract the report number from a Markdown report link.
- *
- * Tracker report cells are normally written as links like
- * `[123](../reports/123-company-role-date.md)`. The bracketed number is the
- * stable report identity used to distinguish exact duplicates from merely
- * similar fuzzy-title matches.
- *
- * @param {string} reportStr - Raw report cell from applications.md.
- * @returns {number|null} Parsed report number, or null when no link number exists.
- */
-function extractReportNum(reportStr) {
-  const m = String(reportStr ?? '').match(/\[(\d+)\]/);
-  return m ? parseInt(m[1]) : null;
-}
-
-const REQ_NUMBER_RE = /\b(?:job\s*id|posting\s*id|requisition|req|jr|job|posting|ref(?:erence)?|r_)[\s:#_-]*([a-z][a-z0-9-]*\d[a-z0-9-]*|\d[a-z0-9-]*)\b/i;
-const EMPTY_EVIDENCE = new Set(['', '-', '—', 'n/a', 'na', 'none', 'null', 'pending', '❌']);
-
-function meaningful(value) {
-  return !EMPTY_EVIDENCE.has(String(value ?? '').trim().toLowerCase());
-}
-
-function extractReqNumber(notes) {
-  const match = String(notes ?? '').match(REQ_NUMBER_RE);
-  return match ? match[1].toUpperCase() : null;
-}
-
-function reportIdentity(value) {
-  if (!meaningful(value)) return null;
-  const number = extractReportNum(value);
-  return number === null ? `text:${normalizeTextKey(value)}` : `number:${number}`;
-}
-
-function concretePdfIdentity(value) {
-  if (!meaningful(value)) return null;
-  const text = String(value).trim();
-  return /\[[^\]]+\]\([^)]+\)|[\\/]|\.pdf\b/i.test(text) ? normalizeTextKey(text) : null;
-}
-
-function identitiesConflict(a, b) {
-  const reportA = reportIdentity(a.report);
-  const reportB = reportIdentity(b.report);
-  if (reportA && reportB && reportA !== reportB) return true;
-  const reqA = extractReqNumber(a.notes);
-  const reqB = extractReqNumber(b.notes);
-  if (reqA && reqB && reqA !== reqB) return true;
-  const viaA = meaningful(a.via) ? normalizeVia(a.via) : null;
-  const viaB = meaningful(b.via) ? normalizeVia(b.via) : null;
-  if (viaA && viaB && viaA !== viaB) return true;
-  const pdfA = concretePdfIdentity(a.pdf);
-  const pdfB = concretePdfIdentity(b.pdf);
-  return Boolean(pdfA && pdfB && pdfA !== pdfB);
-}
-
-/**
- * Determine whether two tracker rows point to the same exact report identity.
- *
- * Exact identity is stronger than fuzzy role matching. If two rows share the
- * same bracketed report number, dedup may treat them as the same record even
- * when an advanced status is present. Tracker row numbers are not identities.
- *
- * @param {object} a - First parsed applications.md row.
- * @param {object} b - Second parsed applications.md row.
- * @returns {boolean} True when both rows represent the same report identity.
- */
-function sameReportIdentity(a, b) {
-  const reportA = extractReportNum(a.report);
-  const reportB = extractReportNum(b.report);
-  return reportA !== null && reportA === reportB;
-}
-
-/**
- * Build a stable key for logging one protected same-title pair only once.
- *
- * The nested dedup loop can encounter a protected pair during cluster building.
- * Sorting the row numbers produces the same key regardless of comparison order,
- * which keeps the warning output readable and avoids repeated noise.
- *
- * @param {object} a - First parsed applications.md row.
- * @param {object} b - Second parsed applications.md row.
- * @returns {string} Stable pair key in ascending tracker-number order.
- */
-function pairKey(a, b) {
-  return [a.num, b.num].sort((x, y) => x - y).join(':');
-}
-
-const protectedTitlePairs = new Set();
-
-/**
- * Normalize a role title into the key used for exact same-opening comparison.
- *
- * Deduplication must only collapse rows that describe the *same* opening, so
- * the comparison is exact on the meaningful title text. Only presentation noise
- * is removed — letter case and whitespace (leading, trailing, and repeated
- * internal spaces). Distinguishing words such as seniority ("Senior") or the
- * team suffix ("Data Infrastructure" vs "Agent Infrastructure") are preserved,
- * so sibling roles at one company are never merged.
- *
- * @param {string} role - Role title from an applications.md row.
- * @returns {string} Lowercase, whitespace-collapsed role key.
- */
-function normalizeRole(role) {
-  return String(role ?? '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
-}
-
-/**
  * Decide whether two same-company tracker rows should be deduplicated.
  *
  * Rows merge only when they describe the same opening: either the exact same
@@ -236,25 +114,7 @@ function normalizeRole(role) {
  * @returns {boolean} True when dedup may cluster the two rows as duplicates.
  */
 function roleMatch(a, b) {
-  if (identitiesConflict(a, b)) return false;
-  if (sameReportIdentity(a, b)) return true;
-  if (normalizeRole(a.role) !== normalizeRole(b.role)) return false;
-
-  // Exact-title duplicates that have entered the real application pipeline are
-  // kept separate. A user may already have applied to one row; deleting it
-  // because a higher-scored exact-title sibling exists would lose status,
-  // report, and notes. Keep both unless the rows point to the exact same
-  // report identity.
-  if (isAdvancedStatus(a.status) || isAdvancedStatus(b.status)) {
-    const key = pairKey(a, b);
-    if (!protectedTitlePairs.has(key)) {
-      protectedTitlePairs.add(key);
-      console.warn(`⚠️  Keep #${a.num} and #${b.num}: exact-title match but advanced status requires exact report identity`);
-    }
-    return false;
-  }
-
-  return true;
+  return sameOpening(a, b);
 }
 
 /**
@@ -324,12 +184,12 @@ console.log(`📊 ${entries.length} entries loaded`);
 // normalize to the same empty key, so they group by their Via channel instead:
 // the same agency re-blasting one listing IS a duplicate, while the same role
 // via two different agencies is two real submissions and must never merge.
-const BLIND_KEY = ' blind-via:';
+const BLIND_KEY = '__blind-via__:';
 const groups = new Map();
 for (const entry of entries) {
   const key = String(entry.company).trim() === '?'
     ? BLIND_KEY + normalizeVia(entry.via || '')
-    : normalizeCompany(entry.company);
+    : normalizeOpeningText(entry.company);
   if (!groups.has(key)) groups.set(key, []);
   groups.get(key).push(entry);
 }
@@ -363,7 +223,7 @@ for (const [company, companyEntries] of groups) {
 
     for (let j = i + 1; j < companyEntries.length; j++) {
       if (processed.has(j)) continue;
-      if (roleMatch(companyEntries[i], companyEntries[j])
+      if (cluster.every((member) => roleMatch(member, companyEntries[j]))
           && (!isBlindGroup || withinBlindWindow(companyEntries[i].date, companyEntries[j].date))) {
         cluster.push(companyEntries[j]);
         processed.add(j);
@@ -388,15 +248,7 @@ for (const [company, companyEntries] of groups) {
       }
     }
 
-    let mergedNotes = String(keeper.notes || '').trim();
-    for (let k = 1; k < cluster.length; k++) {
-      const duplicateNotes = String(cluster[k].notes || '').trim();
-      if (meaningful(duplicateNotes) && !mergedNotes.toLowerCase().includes(duplicateNotes.toLowerCase())) {
-        mergedNotes = meaningful(mergedNotes)
-          ? `${mergedNotes}; ${duplicateNotes}`
-          : duplicateNotes;
-      }
-    }
+    const mergedNotes = unionEvidence(...cluster.map((entry) => entry.notes));
 
     if (keeper.lineIdx !== undefined) {
       const parts = lines[keeper.lineIdx].split('|').map((value) => value.trim());
@@ -405,12 +257,7 @@ for (const [company, companyEntries] of groups) {
         console.log(`  📝 #${keeper.num}: status promoted to "${bestStatus}" (from #${cluster.find(e => e.status === bestStatus)?.num})`);
       }
       for (const field of ['report', 'pdf', 'via', 'location']) {
-        if (COLMAP[field] == null || meaningful(parts[COLMAP[field]])) continue;
-        const donor = cluster.slice(1).find((entry) => meaningful(entry[field]));
-        if (donor) {
-          parts[COLMAP[field]] = donor[field];
-          console.log(`  📝 #${keeper.num}: ${field} preserved from #${donor.num}`);
-        }
+        if (COLMAP[field] != null) parts[COLMAP[field]] = unionEvidence(...cluster.map((entry) => entry[field]));
       }
       if (COLMAP.notes != null) parts[COLMAP.notes] = mergedNotes;
       lines[keeper.lineIdx] = rebuildRow(parts);
