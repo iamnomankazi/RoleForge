@@ -1,8 +1,10 @@
 // HTTP transport helpers shared across providers.
 // Files prefixed with _ are never loaded as providers by scan.mjs.
+import './_dns-cache.mjs';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (compatible; career-ops/1.3)';
+export const BROWSER_LIKE_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36';
 
 async function fetchWithTimeout(url, { timeoutMs = DEFAULT_TIMEOUT_MS, headers = {}, method = 'GET', body = null, redirect = 'follow' } = {}) {
   const controller = new AbortController();

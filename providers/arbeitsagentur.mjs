@@ -30,6 +30,8 @@
 const API_URL = 'https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4/jobs';
 const API_KEY = 'jobboerse-jobsuche'; // public client key the arbeitsagentur.de UI uses
 const DETAIL_BASE = 'https://www.arbeitsagentur.de/jobsuche/jobdetail/';
+const DETAIL_API = 'https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4/jobdetails/';
+const VERIFY_BATCH = 5;
 const REMOTE_RE = /(remote|homeoffice|home[-\s]?office|ortsunabh|deutschlandweit|bundesweit|100\s*%|full[-\s]?remote|fully remote)/i;
 
 // Clamp a runtime integer into [min, max], falling back to `def` for NaN, so a
@@ -95,6 +97,25 @@ export function normalizeJob(job) {
     location: buildLocation(job && job.arbeitsort),
     refnr: String(refnr),
   };
+}
+
+export async function verifyFullyRemote(jobs, ctx) {
+  const confirmed = new Set();
+  for (let i = 0; i < jobs.length; i += VERIFY_BATCH) {
+    await Promise.all(jobs.slice(i, i + VERIFY_BATCH).map(async (job) => {
+      try {
+        const json = await ctx.fetchJson(DETAIL_API + Buffer.from(job.refnr).toString('base64'), {
+          headers: { 'X-API-Key': API_KEY, accept: 'application/json' },
+          redirect: 'error',
+          timeoutMs: 12_000,
+        });
+        if (String(json?.homeofficetyp || '') === 'VOLLSTAENDIG') confirmed.add(job.refnr);
+      } catch {
+        // Unverifiable is not fully remote.
+      }
+    }));
+  }
+  return confirmed;
 }
 
 /** @type {Provider} */
@@ -172,18 +193,21 @@ export default {
           errors.push(`"${kw}" (remote pass): ${(err && err.message) || err}`);
         }
       }
-      // Pass A (commutable) keeps its city as-is. Pass B roles are remote, so we
-      // append a `Deutschlandweit (Homeoffice)` marker — remote ignores distance,
-      // and this lets scan.mjs's commute-based location_filter pass them via its
-      // always_allow rescue instead of dropping them on the far office city.
+      // Pass A keeps its actual city. The server's nv_true filter includes
+      // hybrid roles, so only detail-confirmed VOLLSTAENDIG rows may receive
+      // the nationwide marker.
       for (const raw of primary) {
         const job = normalizeJob(raw);
         if (job && !byRef.has(job.refnr)) byRef.set(job.refnr, job);
       }
-      for (const raw of wide) {
-        const job = normalizeJob(raw);
-        if (!job) continue;
-        job.location = job.location ? `${job.location} · Deutschlandweit (Homeoffice)` : 'Deutschlandweit (Homeoffice)';
+      const wideJobs = [...new Map(wide.map(normalizeJob).filter(Boolean).filter((job) => !byRef.has(job.refnr)).map((job) => [job.refnr, job])).values()];
+      const fullyRemote = remoteMatch === 'filter' && wideJobs.length
+        ? await verifyFullyRemote(wideJobs, ctx)
+        : null;
+      for (const job of wideJobs) {
+        if (!fullyRemote || fullyRemote.has(job.refnr)) {
+          job.location = job.location ? `${job.location} · Deutschlandweit (Homeoffice)` : 'Deutschlandweit (Homeoffice)';
+        }
         if (!byRef.has(job.refnr)) byRef.set(job.refnr, job);
       }
     }

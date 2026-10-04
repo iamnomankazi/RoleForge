@@ -150,6 +150,7 @@ export default {
     const jobs = [];
     const seen = new Set();
     let total = null;
+    let succeededOnce = false;
 
     for (let page = 0; page < maxPages; page++) {
       if (page > 0) await wait(PAGE_DELAY_MS);
@@ -183,9 +184,11 @@ export default {
             locationData: {},
           }),
         });
-      } catch {
+      } catch (error) {
+        if (!succeededOnce) throw error;
         break; // keep jobs collected so far — a transient mid-scan failure shouldn't discard earlier pages
       }
+      succeededOnce = true;
       const { total: pageTotal, rows } = parseRefineSearch(json, cfg);
       if (total === null) total = pageTotal;
       if (rows.length === 0) break;

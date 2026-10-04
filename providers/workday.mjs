@@ -11,6 +11,8 @@
 // "Posted 5 Days Ago", "Posted 30+ Days Ago"); postedAt is derived from it
 // and omitted for the unbounded "30+ Days Ago" form.
 
+import { BROWSER_LIKE_USER_AGENT } from './_http.mjs';
+
 const PAGE_SIZE = 20;
 
 // Safety cap on pagination — applied regardless of what the upstream reports
@@ -132,6 +134,7 @@ function resolveEndpoint(entry) {
       // externalPath is relative to the site, not the host root — without the
       // site segment the URL 404s.
       jobBase: `${origin}/${site}`,
+      origin,
     };
   }
   return null;
@@ -188,7 +191,18 @@ export default {
     const ep = resolveEndpoint(entry);
     if (!ep) throw new Error(`workday: cannot derive CXS endpoint for ${entry.name}`);
 
-    const postOpts = { method: 'POST', redirect: 'error', headers: { 'content-type': 'application/json', accept: 'application/json' } };
+    const postOpts = {
+      method: 'POST',
+      redirect: 'error',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json',
+        'user-agent': BROWSER_LIKE_USER_AGENT,
+        'accept-language': 'en-US,en;q=0.9',
+        origin: ep.origin,
+        referer: `${ep.jobBase}/`,
+      },
+    };
     const makeBody = (offset) => JSON.stringify({ limit: PAGE_SIZE, offset, searchText: '', appliedFacets: {} });
     const sinceMs = typeof ctx?.sinceMs === 'number' ? ctx.sinceMs : null;
 

@@ -44,6 +44,42 @@ function toEpochMs(value) {
   return Number.isNaN(parsed) ? undefined : parsed;
 }
 
+const WORK_MODEL = /^(?:hybrid|in[-\s]?office|on[-\s]?site|distributed|remote|flexible)$/i;
+
+export function isWorkModelOnly(name) {
+  if (typeof name !== 'string') return false;
+  const parts = name.split(';').map((part) => part.trim()).filter(Boolean);
+  return parts.length > 0 && parts.every((part) => WORK_MODEL.test(part));
+}
+
+export function officesUrlFor(apiUrl) {
+  const match = apiUrl.match(/^(https:\/\/[^/]+\/v1\/boards\/[^/]+)\/jobs(?:$|[?#])/);
+  return match ? `${match[1]}/offices` : null;
+}
+
+export function buildOfficeMap(json) {
+  const map = new Map();
+  const walk = (offices) => {
+    if (!Array.isArray(offices)) return;
+    for (const office of offices) {
+      if (!office || typeof office !== 'object') continue;
+      const name = typeof office.name === 'string' ? office.name.trim() : '';
+      if (name) {
+        for (const department of Array.isArray(office.departments) ? office.departments : []) {
+          for (const job of Array.isArray(department?.jobs) ? department.jobs : []) {
+            if (!job || job.id == null) continue;
+            if (!map.has(job.id)) map.set(job.id, new Set());
+            map.get(job.id).add(name);
+          }
+        }
+      }
+      walk(office.children);
+    }
+  };
+  walk(json?.offices);
+  return map;
+}
+
 /** @type {Provider} */
 export default {
   id: 'greenhouse',
@@ -65,12 +101,32 @@ export default {
     // assertGreenhouseUrl above it guarantees the final hostname stays in the allowlist.
     const json = /** @type {any} */ (await ctx.fetchJson(apiUrl, { redirect: 'error' }));
     const jobs = Array.isArray(json?.jobs) ? json.jobs : [];
-    return jobs.filter(/** @param {any} j */ j => j.absolute_url).map(/** @param {any} j */ j => ({
-      title: j.title || '',
-      url: j.absolute_url,
-      company: entry.name,
-      location: j.location?.name || '',
-      postedAt: toEpochMs(j.first_published),
-    }));
+    const usable = jobs.filter(/** @param {any} j */ j => j.absolute_url);
+    let officeMap = null;
+    if (usable.some(/** @param {any} j */ j => isWorkModelOnly(j.location?.name))) {
+      const officesUrl = officesUrlFor(apiUrl);
+      if (officesUrl) {
+        try {
+          assertGreenhouseUrl(officesUrl);
+          officeMap = buildOfficeMap(await ctx.fetchJson(officesUrl, { redirect: 'error' }));
+        } catch (error) {
+          console.error(`⚠️  greenhouse: ${entry.name} office enrichment failed — ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }
+    return usable.map(/** @param {any} j */ (j) => {
+      let location = j.location?.name || '';
+      if (officeMap && isWorkModelOnly(location)) {
+        const offices = officeMap.get(j.id);
+        if (offices?.size) location = [location, ...offices].join(' · ');
+      }
+      return {
+        title: j.title || '',
+        url: j.absolute_url,
+        company: entry.name,
+        location,
+        postedAt: toEpochMs(j.first_published),
+      };
+    });
   },
 };

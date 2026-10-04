@@ -28,7 +28,7 @@
  *   node scan-ats-full.mjs --help               # print this usage block and exit
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, renameSync, unlinkSync } from 'fs';
 import { pathToFileURL } from 'url';
 import path from 'path';
 import yaml from 'js-yaml';
@@ -38,9 +38,10 @@ import greenhouse from './providers/greenhouse.mjs';
 import lever from './providers/lever.mjs';
 import ashby from './providers/ashby.mjs';
 import workday from './providers/workday.mjs';
-import { buildTitleFilter, buildLocationFilter, loadSeenUrls, appendToPipeline, appendToScanHistory } from './scan.mjs';
+import { buildTitleFilter, buildLocationFilter, loadSeenUrls, appendToPipeline, appendToScanHistory, normalizeUrlForDedup, parseSinceDays } from './scan.mjs';
 import { SEED_SOURCES, toPortalEntry } from './seeds/vc-portfolios.mjs';
 import { writeImmutableScanRun } from './scan-candidate-contract.mjs';
+import { isResolverFailure } from './providers/_dns-cache.mjs';
 
 // ── Config ──────────────────────────────────────────────────────────
 
@@ -56,6 +57,8 @@ const CACHE_TTL_HOURS = 24;
 // so a tampered dataset can at worst name boards that don't exist.
 const DATASET_BASE = 'https://raw.githubusercontent.com/Feashliaa/job-board-aggregator/main/data';
 const CONCURRENCY = 20;
+const RESOLVER_FAILURE_LIMIT = Number(process.env.CAREER_OPS_RESOLVER_FAILURE_LIMIT) || 50;
+const CHECKPOINT_PATH = process.env.CAREER_OPS_ATS_CHECKPOINT || 'data/cache/ats-full-checkpoint.json';
 
 // Dataset entries are external input destined for URL interpolation — reject
 // anything outside a conservative slug charset.
@@ -118,7 +121,7 @@ const SOURCES = {
 
 const KNOWN_FLAGS = [
   '--run-id', '--since', '--limit', '--ats', '--seeds', '--dry-run', '--liveness',
-  '--verbose', '--md-out', '--json', '--include-undated', '--shuffle',
+  '--verbose', '--md-out', '--json', '--include-undated', '--shuffle', '--resume',
   '--help', '-h',
 ];
 
@@ -169,7 +172,7 @@ function parseArgs(argv) {
     const kv = args.find(a => a.startsWith(flag + '='));
     return kv ? kv.split('=').slice(1).join('=') : null;
   };
-  const sinceDays = Number(valueOf('--since')) || 3;
+  const sinceDays = parseSinceDays(args, 3);
   const runId = valueOf('--run-id');
   if (!runId || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(runId)) {
     throw new Error('Explicit --run-id with 1-120 safe filename characters is required');
@@ -211,7 +214,21 @@ function parseArgs(argv) {
     json: args.includes('--json'),
     includeUndated: args.includes('--include-undated'),
     shuffle: args.includes('--shuffle'),
+    resume: args.includes('--resume'),
   };
+}
+
+export function writeAtsCheckpoint(payload, filePath = CHECKPOINT_PATH) {
+  mkdirSync(path.dirname(filePath), { recursive: true });
+  const temporary = `${filePath}.${process.pid}.tmp`;
+  writeFileSync(temporary, JSON.stringify(payload, null, 2), 'utf8');
+  renameSync(temporary, filePath);
+  return true;
+}
+
+export function loadAtsCheckpoint(filePath = CHECKPOINT_PATH) {
+  if (!existsSync(filePath)) return null;
+  try { return JSON.parse(readFileSync(filePath, 'utf8')); } catch { return null; }
 }
 
 export function persistFullAtsScanRun({ root = process.cwd(), runId, offers, createdAt = new Date().toISOString(), metadata = {} }) {
@@ -354,9 +371,10 @@ export async function runSeedScan(seedId, opts, ctx, seenUrls, label) {
       if (dateClass === 'stale') continue;
       if (dateClass === 'undated' && !opts.includeUndated) continue;
       if (!opts.titleFilter(job.title)) continue;
-      if (!opts.locationFilter(job.location)) continue;
-      if (seenUrls.has(job.url)) continue;
-      seenUrls.add(job.url);
+      if (!opts.locationFilter(job.location, job.url, job.title)) continue;
+      const urlKey = normalizeUrlForDedup(job.url);
+      if (seenUrls.has(urlKey)) continue;
+      seenUrls.add(urlKey);
       offers.push({ ...job, source: sourceName, dateStatus: job.postedAt ? 'dated' : 'unknown' });
     }
   });
@@ -366,15 +384,26 @@ export async function runSeedScan(seedId, opts, ctx, seenUrls, label) {
 
 // ── Parallel fetch with concurrency limit ───────────────────────────
 
-async function parallelEach(items, limit, fn) {
+export async function parallelEach(items, limit, fn, onItemDone = null, shouldStop = null) {
   let i = 0;
+  let done = 0;
+  const inFlight = new Set();
+  let resumeAt = 0;
   async function worker() {
     while (i < items.length) {
-      const item = items[i++];
-      await fn(item);
+      if (shouldStop?.()) return;
+      const index = i++;
+      inFlight.add(index);
+      try { await fn(items[index]); } finally {
+        inFlight.delete(index);
+        done++;
+        resumeAt = inFlight.size > 0 ? Math.min(...inFlight) : i;
+        onItemDone?.({ done, resumeAt });
+      }
     }
   }
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+  return { done, resumeAt };
 }
 
 // ── Liveness verification (reuses liveness-browser.mjs) ────────────
@@ -447,11 +476,20 @@ async function main() {
   const ctx = { ...makeHttpCtx(), sinceMs: cutoff, includeUndated: opts.includeUndated };
   const date = new Date().toISOString().slice(0, 10);
 
-  const newOffers = [];
-  let totalCompaniesScanned = 0;
-  let totalCompaniesAvailable = 0;
-  let totalErrors = 0;
-  let droppedNoDate = 0;
+  const checkpoint = opts.resume ? loadAtsCheckpoint() : null;
+  if (opts.resume && !checkpoint) throw new Error('--resume requested but no readable ATS checkpoint exists');
+  if (checkpoint && checkpoint.runId !== opts.runId) {
+    throw new Error(`checkpoint belongs to run ${checkpoint.runId}; resume with --run-id ${checkpoint.runId}`);
+  }
+  const newOffers = Array.isArray(checkpoint?.offers) ? checkpoint.offers : [];
+  for (const offer of newOffers) {
+    if (offer?.url) seenUrls.add(normalizeUrlForDedup(offer.url));
+  }
+  const completedSources = new Set(checkpoint?.completedSources || []);
+  let totalCompaniesScanned = checkpoint?.counters?.totalCompaniesScanned || 0;
+  let totalCompaniesAvailable = checkpoint?.counters?.totalCompaniesAvailable || 0;
+  let totalErrors = checkpoint?.counters?.totalErrors || 0;
+  let droppedNoDate = checkpoint?.counters?.droppedNoDate || 0;
   let capHit = false;
   // Aggregated from providers/workday.mjs's jobs.workdayNoDateSkip tag — see
   // there for why this is a counter instead of a per-company console.error
@@ -460,22 +498,34 @@ async function main() {
   let noDateSkipCompanies = 0;
   let noDateSkipJobs = 0;
   const datasetStatus = {};
+  let stoppedByOutage = false;
 
   for (const name of opts.ats) {
+    if (completedSources.has(name)) continue;
     const source = SOURCES[name];
     const { list, status } = await loadCompanyList(name, source.dataset);
     datasetStatus[name] = status;
-    totalCompaniesAvailable += list.length;
+    const resumingCurrent = checkpoint?.current?.name === name;
+    if (!resumingCurrent) totalCompaniesAvailable += list.length;
     if (opts.limit < list.length) capHit = true;
-    const entries = sampleCompanies(list, opts.limit, opts.shuffle).map(source.toEntry).filter(Boolean);
+    const startAt = resumingCurrent ? Number(checkpoint.current.resumeAt) || 0 : 0;
+    const sampledEntries = sampleCompanies(list, opts.limit, opts.shuffle).map(source.toEntry).filter(Boolean);
+    const entries = resumingCurrent && Array.isArray(checkpoint.current.remainingEntries)
+      ? checkpoint.current.remainingEntries
+      : sampledEntries.slice(startAt);
     totalCompaniesScanned += entries.length;
-    log(`\n⚙  ${name} — ${entries.length} companies${status !== 'ok' ? ` (dataset: ${status})` : ''}`);
+    log(`\n⚙  ${name} — ${entries.length} companies${status !== 'ok' ? ` (dataset: ${status})` : ''}${startAt ? ` (resuming at ${startAt})` : ''}`);
 
-    let done = 0;
     let errors = 0;
+    let consecutiveResolverFailures = 0;
+    let resolverOutage = false;
+    let outageCompany = null;
+    let lastDone = 0;
+    let lastResumeAt = 0;
     await parallelEach(entries, CONCURRENCY, async (entry) => {
       try {
         const jobs = await source.provider.fetch(entry, ctx);
+        consecutiveResolverFailures = 0;
         if (jobs.workdayNoDateSkip) { noDateSkipCompanies++; noDateSkipJobs += jobs.length; }
         for (const job of jobs) {
           if (!job.url || !job.title) continue;
@@ -486,28 +536,60 @@ async function main() {
           if (dateClass === 'stale') continue;
           if (dateClass === 'undated' && !opts.includeUndated) { droppedNoDate++; continue; }
           if (!titleFilter(job.title)) continue;
-          if (!locationFilter(job.location)) continue;
-          if (seenUrls.has(job.url)) continue;
-          seenUrls.add(job.url); // intra-scan dedup
+          if (!locationFilter(job.location, job.url, job.title)) continue;
+          const urlKey = normalizeUrlForDedup(job.url);
+          if (seenUrls.has(urlKey)) continue;
+          seenUrls.add(urlKey); // intra-scan dedup
           newOffers.push({ ...job, source: `${name}-full`, dateStatus: job.postedAt ? 'dated' : 'unknown' });
         }
       } catch (err) {
         // Mostly defunct boards in the public dataset — expected noise, so the
         // default stays quiet; --verbose surfaces per-board failures.
         errors++;
+        if (isResolverFailure(err)) {
+          if (++consecutiveResolverFailures >= RESOLVER_FAILURE_LIMIT && !resolverOutage) {
+            resolverOutage = true;
+            outageCompany = entry.name;
+          }
+        } else {
+          consecutiveResolverFailures = 0;
+        }
         if (opts.verbose) console.error(`  ✗ ${name}/${entry.name}: ${err.message}`);
       }
-      done++;
+    }, ({ done, resumeAt }) => {
+      lastDone = done;
+      lastResumeAt = resumeAt;
       if (done % 200 === 0 || done === entries.length) {
         progress(`  ${done}/${entries.length} scanned, ${newOffers.length} total matches\r`);
       }
-    });
+    }, () => resolverOutage);
     totalErrors += errors;
+    if (resolverOutage) {
+      stoppedByOutage = true;
+      totalCompaniesScanned -= entries.length - lastDone;
+      if (!opts.dryRun) {
+        writeAtsCheckpoint({
+          version: 1,
+          runId: opts.runId,
+          current: {
+            name,
+            resumeAt: startAt + lastResumeAt,
+            remainingEntries: entries.slice(lastResumeAt),
+          },
+          completedSources: [...completedSources],
+          counters: { totalCompaniesScanned, totalCompaniesAvailable, totalErrors, droppedNoDate },
+          offers: newOffers,
+        });
+      }
+      log(`\n  ⛔ stopped ${name}/${outageCompany}: ${RESOLVER_FAILURE_LIMIT} consecutive resolver failures; checkpoint preserved for --resume`);
+      break;
+    }
+    completedSources.add(name);
     log(`\n  done (${errors} unreachable boards skipped)`);
   }
 
   // ── VC portfolio seed sources (--seeds flag) ───────────────────────
-  for (const seedId of opts.seeds) {
+  for (const seedId of stoppedByOutage ? [] : opts.seeds) {
     const seedSource = SEED_SOURCES[seedId];
     log(`\n🌱 ${seedSource.label} (${seedId}-seed) — fetching portfolio...`);
     const result = await runSeedScan(seedId, opts, ctx, seenUrls, seedSource.label);
@@ -520,7 +602,7 @@ async function main() {
   }
 
   let offers = newOffers;
-  if (offers.length && opts.liveness) offers = await filterLive(newOffers);
+  if (offers.length && opts.liveness && !stoppedByOutage) offers = await filterLive(newOffers);
   offers.sort((a, b) => (b.postedAt || 0) - (a.postedAt || 0));
 
   log(`\n${'━'.repeat(45)}`);
@@ -551,7 +633,7 @@ async function main() {
   // Persist (unless dry-run, or nothing to save).
   let saved = false;
   let immutableRun = null;
-  if (!opts.dryRun) {
+  if (!opts.dryRun && !stoppedByOutage) {
     immutableRun = persistFullAtsScanRun({
       runId: opts.runId,
       offers,
@@ -559,7 +641,7 @@ async function main() {
     });
     log(`\nImmutable canonical run: ${immutableRun.runDir}`);
   }
-  if (offers.length && !opts.dryRun) {
+  if (offers.length && !opts.dryRun && !stoppedByOutage) {
     // appendToPipeline assumes the file exists (onboarding creates it) — cover fresh setups.
     if (!existsSync(PIPELINE_PATH)) {
       mkdirSync(path.dirname(PIPELINE_PATH), { recursive: true });
@@ -594,6 +676,8 @@ async function main() {
   // The authoritative machine-readable result: lets a caller (e.g. the web)
   // tell a *degraded* scan (capped / stale dataset / undated dropped) apart
   // from a genuinely *empty* one. In --json mode stdout carries ONLY this.
+  if (checkpoint && !opts.dryRun && !stoppedByOutage && existsSync(CHECKPOINT_PATH)) unlinkSync(CHECKPOINT_PATH);
+
   if (opts.json) {
     process.stdout.write(JSON.stringify({
       date,
@@ -609,6 +693,8 @@ async function main() {
       saved,
       runId: opts.runId,
       immutableRunDir: immutableRun?.runDir || null,
+      stoppedByOutage,
+      resumed: Boolean(checkpoint),
       offers: offers.map(o => ({
         company: o.company,
         title: o.title,
@@ -622,6 +708,10 @@ async function main() {
     return;
   }
 
+  if (stoppedByOutage) {
+    log(`\nSweep paused by resolver outage. Resume with --resume --run-id ${opts.runId}.`);
+    return;
+  }
   if (!offers.length) {
     log('\nNothing new.');
     return;

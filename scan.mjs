@@ -44,6 +44,7 @@ import { fingerprintText, findCrossListings } from './fingerprint-core.mjs';
 import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
 import { atsIdentityFromUrl, deriveCandidateId } from './candidate-identity.mjs';
 import { writeImmutableScanRun } from './scan-candidate-contract.mjs';
+import { appendPortalHealth, loadPortalHealth, computeConsecutiveFailures } from './portal-health.mjs';
 
 try {
   const { config } = await import('dotenv');
@@ -166,14 +167,54 @@ export function buildLocationFilter(locationFilter) {
   const allow = normalizeKeywordList(locationFilter.allow);
   const block = normalizeKeywordList(locationFilter.block);
 
-  return (location) => {
-    if (typeof location !== 'string' || location.trim() === '') return true;
-    const lower = location.toLowerCase();
-    if (alwaysAllow.length > 0 && alwaysAllow.some(k => lower.includes(k))) return true;
-    if (block.length > 0 && block.some(k => lower.includes(k))) return false;
-    if (allow.length === 0) return true;
-    return allow.some(k => lower.includes(k));
+  const escape = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const matches = (text, keyword) => {
+    if (!/^[\p{L}\p{N}]+$/u.test(keyword)) return text.includes(keyword);
+    return new RegExp(`(^|[^\\p{L}\\p{N}])${escape(keyword)}(?=$|[^\\p{L}\\p{N}])`, 'u').test(text);
   };
+
+  return (location, url = '', title = '') => {
+    const locationText = typeof location === 'string' ? location.trim() : '';
+    let urlText = '';
+    try { urlText = decodeURIComponent(new URL(url).pathname).replace(/[-_/]+/g, ' '); } catch {}
+    const remoteTitle = /\bremote\b/i.test(title) ? ' remote ' : '';
+    const lower = `${locationText} ${urlText}${remoteTitle}`.toLowerCase();
+    if (!locationText && ![...alwaysAllow, ...allow, ...block].some((keyword) => matches(lower, keyword))) return true;
+    if (alwaysAllow.length > 0 && alwaysAllow.some(k => matches(lower, k))) return true;
+    if (block.length > 0 && block.some(k => matches(lower, k))) return false;
+    if (allow.length === 0) return true;
+    return allow.some(k => matches(lower, k));
+  };
+}
+
+export function parseSinceDays(args, defaultDays = null) {
+  const index = args.indexOf('--since');
+  const equals = args.find((arg) => arg.startsWith('--since='));
+  const raw = index >= 0 ? args[index + 1] : (equals ? equals.slice('--since='.length) : null);
+  if (raw == null) return defaultDays;
+  if (raw === '' || (index >= 0 && raw.startsWith('--'))) throw new Error('--since requires a non-negative number of days');
+  const days = Number(raw);
+  if (!Number.isFinite(days) || days < 0) throw new Error(`--since requires a non-negative number of days, got "${raw}"`);
+  return days;
+}
+
+const COSMETIC_QUERY_KEYS = new Set([
+  'gh_src', 'lever-source', 'source', 'ref', 'referrer', 'rltr',
+]);
+
+export function normalizeUrlForDedup(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    url.hash = '';
+    for (const key of [...url.searchParams.keys()]) {
+      if (/^utm_/i.test(key) || COSMETIC_QUERY_KEYS.has(key.toLowerCase())) url.searchParams.delete(key);
+    }
+    url.searchParams.sort();
+    url.pathname = url.pathname.replace(/\/{2,}/g, '/').replace(/\/+$/, '').toLowerCase() || '/';
+    return url.toString();
+  } catch {
+    return String(rawUrl ?? '').trim();
+  }
 }
 
 // ── Content filter ──────────────────────────────────────────────────
@@ -544,7 +585,7 @@ export function loadSeenUrls(policy = {}) {
     for (const line of lines.slice(1)) { // skip header
       const [url, firstSeen, , , , status = 'added'] = line.split('\t');
       if (!url) continue;
-      if (shouldDedupScanHistoryRow({ firstSeen, status }, policy)) seen.add(url);
+      if (shouldDedupScanHistoryRow({ firstSeen, status }, policy)) seen.add(normalizeUrlForDedup(url));
       else recheckEligible++;
     }
   }
@@ -553,7 +594,7 @@ export function loadSeenUrls(policy = {}) {
   if (existsSync(PIPELINE_PATH)) {
     const text = readFileSync(PIPELINE_PATH, 'utf-8');
     for (const match of text.matchAll(/- \[[ x]\] (https?:\/\/\S+)/g)) {
-      seen.add(match[1]);
+      seen.add(normalizeUrlForDedup(match[1]));
     }
   }
 
@@ -561,7 +602,7 @@ export function loadSeenUrls(policy = {}) {
   if (existsSync(APPLICATIONS_PATH)) {
     const text = readFileSync(APPLICATIONS_PATH, 'utf-8');
     for (const match of text.matchAll(/https?:\/\/[^\s|)]+/g)) {
-      seen.add(match[0]);
+      seen.add(normalizeUrlForDedup(match[0]));
     }
   }
 
@@ -972,6 +1013,8 @@ function guardStatusFor(code) {
 async function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes('--dry-run');
+  const sinceDays = parseSinceDays(args);
+  const sinceMs = sinceDays == null ? null : Date.now() - sinceDays * 86_400_000;
   const runIdFlag = args.indexOf('--run-id');
   const requestedRunId = runIdFlag === -1 ? '' : args[runIdFlag + 1];
   if (runIdFlag !== -1 && (!requestedRunId || requestedRunId.startsWith('--'))) {
@@ -1115,6 +1158,7 @@ async function main() {
   let totalFilteredTitle = 0;
   let totalFilteredTier = 0;
   let totalFilteredLocation = 0;
+  let totalFilteredPostingAge = 0;
   let totalFilteredSalary = 0;
   let totalFilteredContent = 0;
   let totalDupes = 0;
@@ -1127,7 +1171,7 @@ async function main() {
 
   const tasks = targets.map(company => async () => {
     let provider = company._provider;
-    const ctx = makeHttpCtx();
+    const ctx = { ...makeHttpCtx(), ...(sinceMs == null ? {} : { sinceMs }) };
     let sourceName = provider.id === 'local-parser' ? 'local-parser' : `${provider.id}-api`;
     try {
       let jobs;
@@ -1172,11 +1216,18 @@ async function main() {
           totalFilteredTitle++;
           continue;
         }
+        if (sinceMs != null && job.postedAt != null) {
+          const postedMs = typeof job.postedAt === 'number' ? job.postedAt : Date.parse(job.postedAt);
+          if (Number.isFinite(postedMs) && postedMs < sinceMs) {
+            totalFilteredPostingAge++;
+            continue;
+          }
+        }
         if (classifyTier && skipTiers.includes(classifyTier(job.title))) {
           totalFilteredTier++;
           continue;
         }
-        if (!locationFilter(job.location)) {
+        if (!locationFilter(job.location, job.url, job.title)) {
           totalFilteredLocation++;
           continue;
         }
@@ -1189,8 +1240,9 @@ async function main() {
           continue;
         }
         const scanCandidateId = deriveCandidateId(job);
-        if (seenUrls.has(job.url) || newOffersByCandidateId.has(scanCandidateId)) {
-          const existingOffer = newOffersByUrl.get(job.url);
+        const urlKey = normalizeUrlForDedup(job.url);
+        if (seenUrls.has(urlKey) || newOffersByCandidateId.has(scanCandidateId)) {
+          const existingOffer = newOffersByUrl.get(urlKey);
           const identityOffer = newOffersByCandidateId.get(scanCandidateId);
           if (existingOffer || identityOffer) mergeSourceQueryMetadata(existingOffer || identityOffer, job);
           totalDupes++;
@@ -1216,7 +1268,7 @@ async function main() {
           continue;
         }
         // Mark as seen to avoid intra-scan dupes
-        seenUrls.add(job.url);
+        seenUrls.add(urlKey);
         seenCompanyRoles.add(key);
         // Tag with the company's careers domain so verify can offer a 404/410
         // rediscovery fallback. A null domain (no careers_url) marks the offer
@@ -1228,7 +1280,7 @@ async function main() {
           tracked: Boolean(careersUrlDomain),
           careersUrlDomain,
         };
-        newOffersByUrl.set(job.url, offer);
+        newOffersByUrl.set(urlKey, offer);
         newOffersByCompanyRole.set(key, offer);
         newOffersByCandidateId.set(scanCandidateId, offer);
         newOffers.push(offer);
@@ -1349,6 +1401,7 @@ async function main() {
     console.log(`Filtered by tier:      ${totalFilteredTier} removed`);
   }
   console.log(`Filtered by location:  ${totalFilteredLocation} removed`);
+  if (sinceDays != null) console.log(`Filtered by --since:   ${totalFilteredPostingAge} removed (older than ${sinceDays}d)`);
   console.log(`Filtered by salary:   ${totalFilteredSalary} removed`);
   console.log(`Filtered by content:  ${totalFilteredContent} removed`);
   if (Object.keys(windows).length > 0 || totalFilteredCooldown > 0) {
@@ -1410,6 +1463,17 @@ async function main() {
   const unreachableTargets = errors.filter((e) => e.kind === 'slug_gone');
   const networkTargets = errors.filter((e) => e.kind === 'network');
   const otherErrors = errors.filter((e) => e.kind !== 'slug_gone' && e.kind !== 'network');
+  const nowStr = new Date().toISOString();
+  const errorKindByCompany = new Map(errors.filter((error) => error.kind).map((error) => [error.company, error.kind]));
+  const healthRecords = targets.map((target) => ({
+    timestamp: nowStr,
+    company: target.name,
+    status: errorKindByCompany.get(target.name) || (emptyTargets.includes(target.name) ? 'empty' : 'reachable'),
+  }));
+  const streaks = computeConsecutiveFailures([...loadPortalHealth(), ...healthRecords]);
+  const threshold = Number(config.portal_health_threshold) > 0 ? Number(config.portal_health_threshold) : 3;
+  const persistent = [...new Set(errors.filter((error) => (streaks.get(error.company) || 0) >= threshold).map((error) => error.company))];
+  if (persistent.length > 0) console.log(`\n🚨 Persistent portal failures (${threshold}+ runs): ${persistent.join(', ')}`);
 
   if (unreachableTargets.length > 0) {
     const names = unreachableTargets.map((e) => e.company).join(', ');
@@ -1452,6 +1516,7 @@ async function main() {
   // Persist this run's counters (#1604) — guarded exactly like the other
   // writes; a --dry-run must leave no trace.
   if (!dryRun) {
+    await appendPortalHealth(healthRecords);
     appendScanRunSummary({
       timestamp: new Date().toISOString(), status: 'completed',
       companies: summaryCompanies, boards: summaryBoards, found: totalFound,

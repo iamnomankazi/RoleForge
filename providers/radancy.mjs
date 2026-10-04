@@ -119,6 +119,7 @@ export default {
     const maxPages = resolveMaxPages(entry);
     const jobs = [];
     const seen = new Set();
+    let succeededOnce = false;
 
     for (let page = 1; page <= maxPages; page++) {
       if (page > 1) await wait(PAGE_DELAY_MS);
@@ -126,9 +127,11 @@ export default {
       try {
         const html = await ctx.fetchText(`${listUrl}?p=${page}`, { headers: { accept: 'text/html' } });
         rows = parseResults(html, origin);
-      } catch {
+      } catch (error) {
+        if (!succeededOnce) throw error;
         break; // keep jobs collected so far — a transient mid-scan failure shouldn't discard earlier pages
       }
+      succeededOnce = true;
       if (rows.length === 0) break; // past the last page
 
       let fresh = 0;

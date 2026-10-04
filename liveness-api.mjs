@@ -32,6 +32,11 @@ const TIMEOUT_MS = 8_000;
 // rejected before it can reach the fixed-host API URL template.
 const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/;
 
+function isSafeValue(value) {
+  if (typeof value !== 'string' || value.length === 0) return false;
+  return value.split('/').every((segment) => segment.length > 0 && SAFE_SEGMENT.test(segment) && !segment.includes('..'));
+}
+
 // Each ATS: detect its posting URL, then map to a public JSON API URL.
 // `match` returns the extracted path params (or null); `api` builds the FIXED-host URL.
 // Optional per-provider fields:
@@ -87,6 +92,19 @@ const ATS_PROVIDERS = [
       return classifyAshbyBoard(json, jobId);
     },
   },
+  {
+    id: 'workday',
+    match(u) {
+      const match = `${u.hostname}${u.pathname}`.match(
+        /^([\w-]+)\.(wd[\w-]*)\.myworkdayjobs\.com\/(?:[a-z]{2}-[A-Z]{2}\/)?([^/?#]+)\/job\/(.+?)\/?$/,
+      );
+      if (!match) return null;
+      const [, tenant, shard, site, jobPath] = match;
+      return { tenant, shard, site, jobPath };
+    },
+    api: ({ tenant, shard, site, jobPath }) =>
+      `https://${tenant}.${shard}.myworkdayjobs.com/wday/cxs/${tenant}/${site}/job/${jobPath}`,
+  },
 ];
 
 /**
@@ -131,7 +149,7 @@ export function resolveAtsApi(rawUrl) {
     const parts = provider.match(u);
     if (!parts) continue;
     // SSRF guard: every derived segment must be a single safe path segment.
-    if (!Object.values(parts).every((v) => SAFE_SEGMENT.test(v) && !v.includes('..'))) return null;
+    if (!Object.values(parts).every(isSafeValue)) return null;
     return { ats: provider.id, apiUrl: provider.api(parts), parts, timeoutMs: provider.timeoutMs, interpret: provider.interpret };
   }
   return null;

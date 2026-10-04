@@ -290,7 +290,7 @@ function resolveCsbMaxPages(entry) {
 // by id across locales+pages. `total` from the first page bounds pagination;
 // an empty/short page also stops the loop.
 /** @param {import('./_types.js').PortalEntry} entry @param {any} cfg @param {import('./_types.js').Context} ctx */
-async function fetchCsb(entry, cfg, ctx) {
+async function fetchCsb(entry, cfg, ctx, { probe = false } = {}) {
   let locales = CSB_DEFAULT_LOCALES;
   try {
     const html = await ctx.fetchText(cfg.searchPage, { redirect: 'error', headers: { accept: 'text/html' } });
@@ -303,6 +303,8 @@ async function fetchCsb(entry, cfg, ctx) {
   const maxPages = resolveCsbMaxPages(entry);
   const jobs = [];
   const seen = new Set();
+  let succeededOnce = false;
+  let firstError = null;
 
   for (const locale of locales) {
     if (jobs.length >= MAX_JOBS) break;
@@ -316,9 +318,11 @@ async function fetchCsb(entry, cfg, ctx) {
           headers: { 'content-type': 'application/json', accept: 'application/json' },
           body: JSON.stringify({ keywords: '', locale, location: '', pageNumber: page, sortBy: 'recent' }),
         });
-      } catch {
+      } catch (error) {
+        firstError ??= error;
         break; // this locale failed (e.g. 307 legacy redirect) — try the next
       }
+      succeededOnce = true;
       if (total === null) {
         total = typeof json?.totalJobs === 'number' ? json.totalJobs : null;
       }
@@ -344,6 +348,7 @@ async function fetchCsb(entry, cfg, ctx) {
       if (rawCount < CSB_PAGE_SIZE) break;
     }
   }
+  if (!probe && !succeededOnce && firstError) throw firstError;
   return jobs;
 }
 
@@ -405,6 +410,6 @@ export default {
     }
     const rmkJobs = await fetchRmk(entry, cfg, ctx);
     if (rmkJobs.length > 0) return rmkJobs;
-    return fetchCsb(entry, cfg, ctx);
+    return fetchCsb(entry, cfg, ctx, { probe: true });
   },
 };

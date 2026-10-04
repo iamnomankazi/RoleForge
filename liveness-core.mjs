@@ -89,6 +89,9 @@ export function classifyLiveness({ status = 0, finalUrl = '', bodyText = '', app
   if (status === 503) {
     return { result: 'uncertain', code: 'access_blocked', reason: 'HTTP 503 (access blocked, likely anti-bot)' };
   }
+  if (status >= 500) {
+    return { result: 'uncertain', code: 'server_error', reason: `HTTP ${status} (transient server error)` };
+  }
 
   const expiredUrl = firstMatch(EXPIRED_URL_PATTERNS, finalUrl);
   if (expiredUrl) {

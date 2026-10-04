@@ -134,6 +134,7 @@ try {
     { name: 'AA', arbeitsagentur: { keywords: ['ML'], wo: 'Berlin', remoteNationwide: true, remoteMatch: 'filter', remoteMaxPages: 5, size: 2 } },
     {
       fetchJson: async (url) => {
+        if (url.includes('/pc/v4/jobdetails/')) return { homeofficetyp: 'VOLLSTAENDIG' };
         const sp = new URL(url).searchParams;
         if (sp.has('wo')) {
           return { stellenangebote: [{ refnr: 'L', titel: 'ML Engineer', arbeitgeber: 'Co', arbeitsort: { ort: 'Berlin' } }] };

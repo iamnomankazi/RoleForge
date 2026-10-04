@@ -179,6 +179,8 @@ const SYSTEM_PATHS = [
   'scan.mjs',
   'classify-tier.mjs',
   'scan-ats-full.mjs',
+  'portal-health.mjs',
+  'portal-health-lock.mjs',
   'match-star.mjs',
   'prepare-application.mjs',
   'providers/',
