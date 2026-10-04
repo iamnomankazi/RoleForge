@@ -138,6 +138,30 @@ test('non-experience durations are ignored while concise candidate requirements 
   }
 });
 
+test('candidate activity context is preserved while organization and benefit durations are rejected', () => {
+  for (const text of [
+    'We are looking for candidates who have 5 years of professional backend experience.',
+    'You have been building backend services for 5 years.',
+    'Applicants should have experience operating Kubernetes clusters for 5 years.',
+    '5 years of professional engineering experience, with generous vacation benefits.',
+  ]) {
+    const result = classifyExperienceRequirements(text, policy);
+    assert.equal(result.interpretation, 'outside', text);
+    assert.equal(result.requirements[0].strength, 'required', text);
+    assert.equal(result.numeric_hard_blocker, true, text);
+  }
+
+  for (const text of [
+    'The company has been building software for 10+ years.',
+    'We have been operating for 20+ years.',
+    'This role lasts 5 years.',
+    '<h3>Benefits</h3><li>Minimum 5 years for pension vesting.</li>',
+  ]) {
+    const result = classifyExperienceRequirements(text, policy);
+    assert.equal(result, null, text);
+  }
+});
+
 test('section context is recognized but local evidence still controls interpretation', () => {
   const required = classifyExperienceRequirements('<h3>Requirements</h3><li>5+ years</li>', policy);
   const preferred = classifyExperienceRequirements('<h3>Preferred qualifications</h3><li>5+ years</li>', policy);

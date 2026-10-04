@@ -12,14 +12,29 @@ const NON_REQUIREMENT_SECTION = /^(?:about\s+(?:us|the\s+company|company)|benefi
 const DIRECT_PREFERRED_PREFIX = /(?:^|[:(]\s*)(?:ideally|preferably|nice\s+to\s+have(?:s|'s)?|bonus(?:\s+points\s+for)?|preferred(?:\s+qualifications?)?)\s*[,;:]?\s*$/i;
 const DIRECT_PREFERRED_SUFFIX = /^[\s,;:]*(?:\(\s*)?(?:(?:of\s+(?:[\p{L}\p{N}/+_-]+\s+){0,4})?experience\s*[,;:]?\s*)?(?:preferred\b|(?:is\s+)?a\s+plus\b)(?:\s*\))?/iu;
 const UNKNOWN_NUMERIC_RANGE_SEPARATOR = /[\p{Dash_Punctuation}\u2212]/u;
+const EXPERIENCE_DURATION = String.raw`\d+(?:\.\d+)?\s*(?:(?:\+)|(?:[-\u2010-\u2014\u2212]\s*\d+(?:\.\d+)?)|(?:\bto\b\s*\d+(?:\.\d+)?))?\s*(?:years?|yrs?)\b`;
+const ORGANIZATION_HISTORY = new RegExp(
+  String.raw`\b(?:we|company|business|organization|product|our\s+(?:company|business|organization|product)|the\s+(?:company|business|organization|product))\b[\s\S]{0,60}\b(?:operated|operating|served|serving|existed|exists|existing|built|building|founded|established|run|running|maintained|maintaining)\b[\s\S]{0,80}${EXPERIENCE_DURATION}`,
+  'i',
+);
+const ROLE_DURATION = new RegExp(
+  String.raw`\b(?:this|the)\s+role\b[\s\S]{0,30}\b(?:lasts?|runs?)\b[\s\S]{0,30}${EXPERIENCE_DURATION}`,
+  'i',
+);
+const BENEFIT_DURATION = new RegExp(
+  String.raw`\b(?:years?|yrs?)\b[\s\S]{0,45}\b(?:for|until|before)\s+(?:pension|vesting|benefits?|vacation|leave)\b`,
+  'i',
+);
 const NEGATIVE_EXPERIENCE_CONTEXT = [
   /\b(?:years?|yrs?)\s+(?:old|ago|of\s+age|in\s+business|of\s+(?:service|employment|tenure|vacation|leave|benefits?|history|company(?:\s+history)?|business(?:\s+history)?|product(?:\s+history)?))\b/i,
-  /\b(?:founded|established|operated|operating|served|serving|existed|exists|built|building)\b[\s\S]{0,80}\b\d+(?:\.\d+)?\s*(?:years?|yrs?)\b/i,
+  ORGANIZATION_HISTORY,
   /\b(?:company|business|organization|product)\s+(?:age|history)\b[\s\S]{0,40}\b\d+(?:\.\d+)?\s*(?:years?|yrs?)\b/i,
-  /\b(?:we|our|the\s+company|our\s+company|the\s+business|our\s+product)\b[\s\S]{0,60}\b(?:have|has|is|was|been|operated|operating|served|serving|existed|built|building)\b[\s\S]{0,80}\b\d+(?:\.\d+)?\s*(?:years?|yrs?)\b/i,
-  /\b(?:vacation|leave|benefits?|tenure|probation)\b/i,
+  ROLE_DURATION,
+  BENEFIT_DURATION,
 ];
-const CANDIDATE_EVIDENCE = /\b(?:applicant|candidate|you|your|must\s+have|required|minimum|at\s+least|need(?:s)?|seeking|professional|relevant|industry|commercial|hands?[- ]on|experience|role|domain|skill|requirements?|building|working|developing|engineering|designing|managing|operating|serving)\b/i;
+const CANDIDATE_EVIDENCE = /\b(?:professional|relevant|industry|commercial|hands?[- ]on|experience)\b/i;
+const CANDIDATE_SUBJECT_EVIDENCE = /\b(?:applicants?|candidates?|you|your|must\s+have|required|requires?|at\s+least|seeking|need(?:s)?)\b/i;
+const CANDIDATE_ACTIVITY_EVIDENCE = /\b(?:building|working|developing|engineering|designing|managing|operating|serving)\b/i;
 
 function finiteNumber(value, fallback) {
   const number = Number(value);
@@ -137,11 +152,13 @@ function isCandidateExperienceEvidence(text, start, end, sectionState) {
 
   const { left, right } = clauseBounds(text, start, end);
   const clause = text.slice(left, right);
-  const explicitCandidateRequirement = CANDIDATE_EVIDENCE.test(clause);
+  const explicitCandidateRequirement = CANDIDATE_SUBJECT_EVIDENCE.test(clause);
+  const explicitExperience = CANDIDATE_EVIDENCE.test(clause);
+  const candidateActivity = CANDIDATE_ACTIVITY_EVIDENCE.test(clause);
   if (sectionState === 'non_requirement') {
-    return explicitCandidateRequirement && /\b(?:applicant|candidate|you|your|must\s+have|required|minimum|at\s+least)\b/i.test(clause);
+    return explicitCandidateRequirement && (explicitExperience || candidateActivity);
   }
-  return hasConciseNumericLead(text, start) || explicitCandidateRequirement;
+  return hasConciseNumericLead(text, start) || explicitExperience || explicitCandidateRequirement;
 }
 
 function interpretationFor(requirement, policy) {
