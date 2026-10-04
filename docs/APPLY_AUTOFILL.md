@@ -146,6 +146,15 @@ prepared. Stored answer reuse additionally requires the exact candidate and
 normalized question, a matching answer hash, non-empty versioned provenance,
 and unchanged current source/evidence hashes.
 
+Document planning uses the same boundary. A proven plan records
+`documentState: ready` and reconstructs the exact `cover-letter-v1` text and
+candidate-facing payload from the current candidate, JD, profile/CV bindings,
+and factual evidence immediately before rendering and again before binding.
+Legacy or missing narrative provenance instead records
+`documentState: review_required`, preserves the exact JD and selected CV, and
+contains no generated cover-letter text, payload, path, or artifact binding.
+Changing answer-bank draft wording does not invalidate a proven document plan.
+
 ## ATS patterns
 
 Repository-controlled fixtures cover Greenhouse-style, Lever-style,
