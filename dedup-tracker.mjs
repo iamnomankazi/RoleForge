@@ -14,7 +14,7 @@ import { readFileSync, copyFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { rebuildRow, normalizeCompany, trackerLockDirFor, acquireTrackerLock, writeFileAtomic } from './tracker-utils.mjs';
-import { resolveColumns, parseTrackerRow, normalizeVia } from './tracker-parse.mjs';
+import { resolveColumns, parseTrackerRow, normalizeVia, normalizeTextKey } from './tracker-parse.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 // Support both layouts: data/applications.md (boilerplate) and applications.md
@@ -123,12 +123,51 @@ function extractReportNum(reportStr) {
   return m ? parseInt(m[1]) : null;
 }
 
+const REQ_NUMBER_RE = /\b(?:job\s*id|posting\s*id|requisition|req|jr|job|posting|ref(?:erence)?|r_)[\s:#_-]*([a-z][a-z0-9-]*\d[a-z0-9-]*|\d[a-z0-9-]*)\b/i;
+const EMPTY_EVIDENCE = new Set(['', '-', '—', 'n/a', 'na', 'none', 'null', 'pending', '❌']);
+
+function meaningful(value) {
+  return !EMPTY_EVIDENCE.has(String(value ?? '').trim().toLowerCase());
+}
+
+function extractReqNumber(notes) {
+  const match = String(notes ?? '').match(REQ_NUMBER_RE);
+  return match ? match[1].toUpperCase() : null;
+}
+
+function reportIdentity(value) {
+  if (!meaningful(value)) return null;
+  const number = extractReportNum(value);
+  return number === null ? `text:${normalizeTextKey(value)}` : `number:${number}`;
+}
+
+function concretePdfIdentity(value) {
+  if (!meaningful(value)) return null;
+  const text = String(value).trim();
+  return /\[[^\]]+\]\([^)]+\)|[\\/]|\.pdf\b/i.test(text) ? normalizeTextKey(text) : null;
+}
+
+function identitiesConflict(a, b) {
+  const reportA = reportIdentity(a.report);
+  const reportB = reportIdentity(b.report);
+  if (reportA && reportB && reportA !== reportB) return true;
+  const reqA = extractReqNumber(a.notes);
+  const reqB = extractReqNumber(b.notes);
+  if (reqA && reqB && reqA !== reqB) return true;
+  const viaA = meaningful(a.via) ? normalizeVia(a.via) : null;
+  const viaB = meaningful(b.via) ? normalizeVia(b.via) : null;
+  if (viaA && viaB && viaA !== viaB) return true;
+  const pdfA = concretePdfIdentity(a.pdf);
+  const pdfB = concretePdfIdentity(b.pdf);
+  return Boolean(pdfA && pdfB && pdfA !== pdfB);
+}
+
 /**
  * Determine whether two tracker rows point to the same exact report identity.
  *
  * Exact identity is stronger than fuzzy role matching. If two rows share the
- * same tracker number or bracketed report number, dedup may treat them as the
- * same record even when an advanced status is present.
+ * same bracketed report number, dedup may treat them as the same record even
+ * when an advanced status is present. Tracker row numbers are not identities.
  *
  * @param {object} a - First parsed applications.md row.
  * @param {object} b - Second parsed applications.md row.
@@ -137,8 +176,7 @@ function extractReportNum(reportStr) {
 function sameReportIdentity(a, b) {
   const reportA = extractReportNum(a.report);
   const reportB = extractReportNum(b.report);
-  if (reportA !== null && reportA === reportB) return true;
-  return a.num === b.num && normalizeRole(a.role) === normalizeRole(b.role);
+  return reportA !== null && reportA === reportB;
 }
 
 /**
@@ -182,7 +220,7 @@ function normalizeRole(role) {
  * Decide whether two same-company tracker rows should be deduplicated.
  *
  * Rows merge only when they describe the same opening: either the exact same
- * report identity (same tracker number or bracketed report number), or an exact
+ * bracketed report identity, or an exact
  * role-title match after normalizing case and whitespace. Fuzzy title matching
  * is deliberately NOT used here — it collapsed distinct sibling roles at one
  * company (e.g. "Software Engineer, Data Infrastructure" vs "Senior Software
@@ -198,6 +236,7 @@ function normalizeRole(role) {
  * @returns {boolean} True when dedup may cluster the two rows as duplicates.
  */
 function roleMatch(a, b) {
+  if (identitiesConflict(a, b)) return false;
   if (sameReportIdentity(a, b)) return true;
   if (normalizeRole(a.role) !== normalizeRole(b.role)) return false;
 
@@ -337,7 +376,8 @@ for (const [company, companyEntries] of groups) {
     cluster.sort((a, b) => parseScore(b.score) - parseScore(a.score));
     const keeper = cluster[0];
 
-    // Check if any removed entry has more advanced status
+    // Reconcile every compatible field before removing a row. Score chooses
+    // the keeper, but evidence and status are independent of score.
     let bestStatusRank = statusRank(keeper.status);
     let bestStatus = keeper.status;
     for (let k = 1; k < cluster.length; k++) {
@@ -348,34 +388,34 @@ for (const [company, companyEntries] of groups) {
       }
     }
 
-    // Update keeper's status if a removed entry had a more advanced one
-    if (bestStatus !== keeper.status) {
-      const lineIdx = keeper.lineIdx;
-      if (lineIdx !== undefined) {
-        const parts = lines[lineIdx].split('|').map(s => s.trim());
-        parts[COLMAP.status] = bestStatus;
-        lines[lineIdx] = rebuildRow(parts);
-        console.log(`  📝 #${keeper.num}: status promoted to "${bestStatus}" (from #${cluster.find(e => e.status === bestStatus)?.num})`);
-      }
-    }
-
     let mergedNotes = String(keeper.notes || '').trim();
-    const originalNotes = mergedNotes;
     for (let k = 1; k < cluster.length; k++) {
       const duplicateNotes = String(cluster[k].notes || '').trim();
-      if (duplicateNotes && !['N/A', '❌', 'pending', '-', '—'].includes(duplicateNotes)
-          && !mergedNotes.split('; ').includes(duplicateNotes)) {
-        mergedNotes = mergedNotes && !['N/A', '-', '—'].includes(mergedNotes)
+      if (meaningful(duplicateNotes) && !mergedNotes.toLowerCase().includes(duplicateNotes.toLowerCase())) {
+        mergedNotes = meaningful(mergedNotes)
           ? `${mergedNotes}; ${duplicateNotes}`
           : duplicateNotes;
       }
     }
-    if (mergedNotes !== originalNotes && keeper.lineIdx !== undefined && COLMAP.notes != null) {
+
+    if (keeper.lineIdx !== undefined) {
       const parts = lines[keeper.lineIdx].split('|').map((value) => value.trim());
-      parts[COLMAP.notes] = mergedNotes;
+      if (bestStatus !== keeper.status) {
+        parts[COLMAP.status] = bestStatus;
+        console.log(`  📝 #${keeper.num}: status promoted to "${bestStatus}" (from #${cluster.find(e => e.status === bestStatus)?.num})`);
+      }
+      for (const field of ['report', 'pdf', 'via', 'location']) {
+        if (COLMAP[field] == null || meaningful(parts[COLMAP[field]])) continue;
+        const donor = cluster.slice(1).find((entry) => meaningful(entry[field]));
+        if (donor) {
+          parts[COLMAP[field]] = donor[field];
+          console.log(`  📝 #${keeper.num}: ${field} preserved from #${donor.num}`);
+        }
+      }
+      if (COLMAP.notes != null) parts[COLMAP.notes] = mergedNotes;
       lines[keeper.lineIdx] = rebuildRow(parts);
       keeper.notes = mergedNotes;
-      console.log(`  📝 #${keeper.num}: notes merged`);
+      keeper.status = bestStatus;
     }
 
     // Remove duplicates

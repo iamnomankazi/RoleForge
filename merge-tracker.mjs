@@ -20,7 +20,7 @@ import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
 import { normalizeReportLink as normalizeLink } from './tracker-links.mjs';
 import { roleFuzzyMatch } from './role-matcher.mjs';
-import { LEGACY_COLMAP, detectColumns, resolveScoreStatus, normalizeVia, SEPARATOR_ROW_RE } from './tracker-parse.mjs';
+import { LEGACY_COLMAP, detectColumns, resolveScoreStatus, normalizeVia, normalizeTextKey, SEPARATOR_ROW_RE } from './tracker-parse.mjs';
 import { resolveTrackerPath, trackerLockDirFor, acquireTrackerLock, writeFileAtomic, normalizeCompany, cell } from './tracker-utils.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
@@ -191,10 +191,52 @@ function extractReqNumber(notes) {
   return m ? m[1].toUpperCase() : null;
 }
 
+const EMPTY_EVIDENCE = new Set(['', '-', '—', 'n/a', 'na', 'none', 'null', 'pending', '❌']);
+
+function meaningful(value) {
+  return !EMPTY_EVIDENCE.has(String(value ?? '').trim().toLowerCase());
+}
+
+function reportIdentity(value) {
+  if (!meaningful(value)) return null;
+  const number = extractReportNum(String(value));
+  return number === null ? `text:${normalizeTextKey(value)}` : `number:${number}`;
+}
+
+function concretePdfIdentity(value) {
+  if (!meaningful(value)) return null;
+  const text = String(value).trim();
+  return /\[[^\]]+\]\([^)]+\)|[\\/]|\.pdf\b/i.test(text) ? normalizeTextKey(text) : null;
+}
+
+function identitiesConflict(existing, addition) {
+  const existingReport = reportIdentity(existing.report);
+  const incomingReport = reportIdentity(addition.report);
+  if (existingReport && incomingReport && existingReport !== incomingReport) return true;
+
+  const existingReq = extractReqNumber(existing.notes);
+  const incomingReq = extractReqNumber(addition.notes);
+  if (existingReq && incomingReq && existingReq !== incomingReq) return true;
+
+  const existingVia = meaningful(existing.via) ? normalizeVia(existing.via) : null;
+  const incomingVia = meaningful(addition.via) ? normalizeVia(addition.via) : null;
+  if (existingVia && incomingVia && existingVia !== incomingVia) return true;
+
+  const existingPdf = concretePdfIdentity(existing.pdf);
+  const incomingPdf = concretePdfIdentity(addition.pdf);
+  return Boolean(existingPdf && incomingPdf && existingPdf !== incomingPdf);
+}
+
 function companiesMatch(a, b) {
   const key = normalizeCompany(String(a));
   if (key !== normalizeCompany(String(b))) return false;
   return key !== '' || String(a).trim() === String(b).trim();
+}
+
+function rolesCompatible(a, b) {
+  const left = normalizeTextKey(a);
+  const right = normalizeTextKey(b);
+  return Boolean(left && left === right) || roleFuzzyMatch(a, b);
 }
 
 function mergeNotes(existingNotes, addition, oldScore, newScore) {
@@ -203,12 +245,13 @@ function mergeNotes(existingNotes, addition, oldScore, newScore) {
     ? ''
     : previousRaw.replace(/\s*\.\s*$/, '');
   const incoming = String(addition.notes ?? '').trim();
+  if (!meaningful(incoming)) return previousRaw;
   const marker = `Re-eval ${addition.date} (${oldScore}→${newScore})`;
   const clause = (value) => value.replace(/\.+$/, '').trim();
   const incomingClause = clause(incoming);
-  const repeated = incoming !== '' && previous.split(/\.\s+/).map(clause)
-    .some((value) => value === incomingClause || value.endsWith(`: ${incomingClause}`));
-  const tail = incoming && !repeated ? `${marker}: ${incoming}` : marker;
+  const repeated = previous.toLowerCase().includes(incomingClause.toLowerCase());
+  if (repeated) return previousRaw;
+  const tail = newScore !== oldScore ? `${marker}: ${incoming}` : incoming;
   return previous ? `${previous}. ${tail}` : tail;
 }
 
@@ -223,8 +266,42 @@ function mergeNotes(existingNotes, addition, oldScore, newScore) {
  * @returns {number} Parsed score, or 0 when no numeric value is present.
  */
 function parseScore(s) {
-  const m = s.replace(/\*\*/g, '').match(/([\d.]+)/);
+  const m = String(s ?? '').replace(/\*\*/g, '').match(/([\d.]+)/);
   return m ? parseFloat(m[1]) : 0;
+}
+
+const STATUS_RANK = new Map([
+  ['SKIP', 0], ['Discarded', 0], ['Rejected', 1], ['Evaluated', 2],
+  ['Applied', 3], ['Responded', 4], ['Interview', 5], ['Offer', 6], ['Hired', 7],
+]);
+
+function strongestStatus(existing, incoming) {
+  const left = validateStatus(String(existing ?? ''));
+  const right = validateStatus(String(incoming ?? ''));
+  return (STATUS_RANK.get(right) ?? 0) > (STATUS_RANK.get(left) ?? 0) ? right : left;
+}
+
+function evidenceValue(existing, incoming) {
+  return meaningful(existing) ? existing : (meaningful(incoming) ? incoming : existing || incoming || '—');
+}
+
+function mergedLocation(existing, incoming) {
+  if (!meaningful(existing)) return meaningful(incoming) ? incoming : existing || incoming || '—';
+  if (!meaningful(incoming) || normalizeTextKey(existing) === normalizeTextKey(incoming)) return existing;
+  return `${existing} / ${incoming}`;
+}
+
+function additionEvidenceRepresented(row, addition) {
+  if (parseScore(row.score) < parseScore(addition.score)) return false;
+  if ((STATUS_RANK.get(validateStatus(row.status)) ?? 0) < (STATUS_RANK.get(validateStatus(addition.status)) ?? 0)) return false;
+  if (meaningful(addition.notes) && !String(row.notes).toLowerCase().includes(String(addition.notes).trim().toLowerCase())) return false;
+  if (meaningful(addition.location) && !normalizeTextKey(row.location).includes(normalizeTextKey(addition.location))) return false;
+  if (meaningful(addition.via) && normalizeVia(row.via) !== normalizeVia(addition.via)) return false;
+  if (reportIdentity(addition.report) && reportIdentity(row.report) !== reportIdentity(addition.report)) return false;
+  const incomingPdf = concretePdfIdentity(addition.pdf);
+  if (incomingPdf && concretePdfIdentity(row.pdf) !== incomingPdf) return false;
+  if (meaningful(addition.pdf) && !meaningful(row.pdf)) return false;
+  return true;
 }
 
 // Column layout for the applications.md table. The tracker may use the original
@@ -597,7 +674,9 @@ for (const file of tsvFiles) {
     // the existing tracker row [1] belonging to an unrelated company.
     duplicate = existingApps.find(app => {
       const existingReportNum = extractReportNum(app.report);
-      return existingReportNum === reportNum && companiesMatch(app.company, addition.company);
+      return existingReportNum === reportNum
+        && companiesMatch(app.company, addition.company)
+        && !identitiesConflict(app, addition);
     });
     if (duplicate) reportNumMatched = true;
   }
@@ -610,8 +689,10 @@ for (const file of tsvFiles) {
     // *different* companies is that drift, not a duplicate — matching on num
     // alone silently merges a brand-new role into an unrelated existing row.
     duplicate = existingApps.find(app =>
-      app.num === addition.num && companiesMatch(app.company, addition.company)
-      && (!app.addedThisRun || roleFuzzyMatch(addition.role, app.role))
+      app.num === addition.num
+      && companiesMatch(app.company, addition.company)
+      && rolesCompatible(addition.role, app.role)
+      && !identitiesConflict(app, addition)
     );
   }
 
@@ -620,7 +701,8 @@ for (const file of tsvFiles) {
     const additionReqNum = extractReqNumber(addition.notes);
     duplicate = existingApps.find(app => {
       if (!companiesMatch(app.company, addition.company)) return false;
-      if (!roleFuzzyMatch(addition.role, app.role)) return false;
+      if (!rolesCompatible(addition.role, app.role)) return false;
+      if (identitiesConflict(app, addition)) return false;
       // Cross-channel guard (#1596): unknown-employer rows (`?`) all normalize
       // to the same empty company key, but the same role via two DIFFERENT
       // agencies is two real submissions — merging them silently is exactly
@@ -646,29 +728,37 @@ for (const file of tsvFiles) {
   if (duplicate) {
     const newScore = parseScore(addition.score);
     const oldScore = parseScore(duplicate.score);
-
-    if (newScore > oldScore) {
-      console.log(`🔄 Update: #${duplicate.num} ${addition.company} — ${addition.role} (${oldScore}→${newScore})`);
-      const updatedLine = buildRow({
-          num: duplicate.num, date: addition.date, company: addition.company,
-          role: reportNumMatched ? addition.role : duplicate.role,
-          via: addition.via || duplicate.via || '—',
-          location: addition.location || duplicate.location || '—',
-          score: addition.score, status: duplicate.status, pdf: duplicate.pdf,
-          report: addition.report,
-          notes: mergeNotes(duplicate.notes, addition, oldScore, newScore),
-        });
+    const higherScore = newScore > oldScore;
+    const updatedLine = buildRow({
+      num: duplicate.num,
+      date: higherScore ? addition.date : duplicate.date,
+      company: duplicate.company,
+      role: higherScore && (reportNumMatched || rolesCompatible(addition.role, duplicate.role)) ? addition.role : duplicate.role,
+      via: evidenceValue(duplicate.via, addition.via),
+      location: mergedLocation(duplicate.location, addition.location),
+      score: higherScore ? addition.score : duplicate.score,
+      status: strongestStatus(duplicate.status, addition.status),
+      pdf: evidenceValue(duplicate.pdf, addition.pdf),
+      report: evidenceValue(duplicate.report, addition.report),
+      notes: mergeNotes(duplicate.notes, addition, oldScore, newScore),
+    });
+    const reconciled = parseAppLine(updatedLine);
+    if (!reconciled || !additionEvidenceRepresented(reconciled, addition)) {
+      console.error(`❌ ${file}: compatible evidence could not be represented in tracker row #${duplicate.num}; addition remains pending`);
+      failedAdditions.push(file);
+      continue;
+    }
+    if (updatedLine !== duplicate.raw) {
+      console.log(`🔄 Reconcile: #${duplicate.num} ${addition.company} — ${addition.role} (${oldScore}→${Math.max(oldScore, newScore)})`);
       if (replaceTrackerLine(duplicate.raw, updatedLine)) {
-        const refreshed = parseAppLine(updatedLine);
-        if (refreshed) Object.assign(duplicate, refreshed);
-        else duplicate.raw = updatedLine;
+        Object.assign(duplicate, reconciled);
         updated++;
       } else {
         console.error(`❌ ${file}: tracker row #${duplicate.num} could not be located; addition was not merged`);
         failedAdditions.push(file);
       }
     } else {
-      console.log(`⏭️  Skip: ${addition.company} — ${addition.role} (existing #${duplicate.num} ${oldScore} >= new ${newScore})`);
+      console.log(`⏭️  Skip: ${addition.company} — ${addition.role} (all evidence already represented by #${duplicate.num})`);
       skipped++;
     }
   } else {

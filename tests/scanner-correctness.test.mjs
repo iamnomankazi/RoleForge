@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import {
   buildLocationFilter,
   normalizeUrlForDedup,
@@ -19,6 +21,93 @@ import successfactors from '../providers/successfactors.mjs';
 import greenhouse from '../providers/greenhouse.mjs';
 import { verifyFullyRemote } from '../providers/arbeitsagentur.mjs';
 
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+
+function writePortals(file, entries) {
+  writeFileSync(file, [
+    'tracked_companies:',
+    ...entries.flatMap((entry) => [
+      `  - name: ${entry.name}`,
+      '    provider: fixture',
+      `    mode: ${entry.mode}`,
+    ]),
+    'title_filter:',
+    '  positive: [Engineer]',
+  ].join('\n') + '\n');
+}
+
+function standardScanFixture(entries, runId) {
+  const dir = mkdtempSync(join(tmpdir(), 'career-ops-standard-cli-'));
+  const providers = join(dir, 'providers');
+  const data = join(dir, 'data');
+  mkdirSync(providers);
+  mkdirSync(data);
+  writeFileSync(join(providers, 'fixture.mjs'), `export default {
+    id: 'fixture',
+    async fetch(entry) {
+      if (entry.mode === 'throw') throw new Error('fictional provider unavailable');
+      if (entry.mode === 'job') return [{ company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/Role', location: 'Helsinki, Finland' }];
+      return [];
+    },
+  };\n`);
+  const portals = join(dir, 'portals.yml');
+  writePortals(portals, entries);
+  const pipeline = join(data, 'pipeline.md');
+  const history = join(data, 'scan-history.tsv');
+  writeFileSync(pipeline, '# Pipeline\n\n## Pending\n');
+  writeFileSync(history, 'url\tfirst_seen\tportal\ttitle\tcompany\tstatus\tlocation\n');
+  const result = spawnSync(process.execPath, [join(ROOT, 'scan.mjs'), '--run-id', runId], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      CAREER_OPS_PORTALS: portals,
+      CAREER_OPS_PROFILE: join(dir, 'missing-profile.yml'),
+      CAREER_OPS_PROVIDERS_DIR: providers,
+      CAREER_OPS_SCAN_ROOT: dir,
+      CAREER_OPS_NO_DNS_CACHE: '1',
+    },
+  });
+  return { dir, data, pipeline, history, result, runDir: join(dir, 'output', 'scan-runs', runId) };
+}
+
+function reverseScanFixture({ resolver = false } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'career-ops-reverse-cli-'));
+  const providers = join(dir, 'providers');
+  const cache = join(dir, 'data', 'cache', 'ats-companies');
+  mkdirSync(providers, { recursive: true });
+  mkdirSync(cache, { recursive: true });
+  writeFileSync(join(providers, 'greenhouse.mjs'), `export default {
+    id: 'greenhouse',
+    async fetch() {
+      const error = new Error('fictional ${resolver ? 'resolver' : 'provider'} outage');
+      ${resolver ? "error.code = 'EREFUSED';" : ''}
+      throw error;
+    },
+  };\n`);
+  writeFileSync(join(cache, 'greenhouse.json'), JSON.stringify(['acme-one', 'acme-two', 'acme-three', 'acme-four']));
+  const portals = join(dir, 'portals.yml');
+  writeFileSync(portals, 'title_filter:\n  positive: [Engineer]\n');
+  const checkpoint = join(dir, 'data', 'cache', 'checkpoint.json');
+  const runId = resolver ? 'resolver-paused' : 'providers-failed';
+  const result = spawnSync(process.execPath, [
+    join(ROOT, 'scan-ats-full.mjs'), '--run-id', runId, '--ats', 'greenhouse', '--json', '--include-undated',
+  ], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      CAREER_OPS_PORTALS: portals,
+      CAREER_OPS_ATS_PROVIDERS_DIR: providers,
+      CAREER_OPS_ATS_CHECKPOINT: checkpoint,
+      CAREER_OPS_RESOLVER_FAILURE_LIMIT: '2',
+      CAREER_OPS_NO_DNS_CACHE: '1',
+      DOTENV_CONFIG_QUIET: 'true',
+    },
+  });
+  return { dir, checkpoint, result, runDir: join(dir, 'output', 'scan-runs', runId) };
+}
+
 test('--since accepts zero and rejects negative or malformed values', () => {
   assert.equal(parseSinceDays([], null), null);
   assert.equal(parseSinceDays(['--since', '0'], 3), 0);
@@ -27,11 +116,58 @@ test('--since accepts zero and rejects negative or malformed values', () => {
   assert.throws(() => parseSinceDays(['--since=soon'], 3), /non-negative/);
 });
 
-test('URL dedup removes cosmetic tracking and normalizes path presentation', () => {
-  const left = normalizeUrlForDedup('https://EXAMPLE.com/Jobs/Role/?utm_source=x&rltr=abc#apply');
-  const right = normalizeUrlForDedup('https://example.com/jobs/role');
+test('URL dedup removes cosmetic presentation without changing path case', () => {
+  const left = normalizeUrlForDedup('https://EXAMPLE.com/Jobs//Role/?utm_source=x&rltr=abc#apply');
+  const right = normalizeUrlForDedup('https://example.com/Jobs/Role');
   assert.equal(left, right);
+  assert.notEqual(normalizeUrlForDedup('https://example.com/Jobs/Role'), normalizeUrlForDedup('https://example.com/jobs/role'));
   assert.notEqual(normalizeUrlForDedup('https://example.com/jobs/role?team=one'), right);
+});
+
+test('standard scan CLI distinguishes healthy empty, failed, and partial completion', () => {
+  const healthy = standardScanFixture([{ name: 'Healthy', mode: 'empty' }], 'healthy-empty');
+  const failed = standardScanFixture([{ name: 'BrokenA', mode: 'throw' }, { name: 'BrokenB', mode: 'throw' }], 'all-failed');
+  const partial = standardScanFixture([{ name: 'Working', mode: 'job' }, { name: 'Broken', mode: 'throw' }], 'partial-run');
+  try {
+    assert.equal(healthy.result.status, 0, healthy.result.stderr);
+    assert.match(healthy.result.stdout, /Completion status:\s+completed/);
+    assert.equal(existsSync(healthy.runDir), true);
+
+    assert.notEqual(failed.result.status, 0);
+    assert.match(failed.result.stdout + failed.result.stderr, /every attempted target was unavailable/i);
+    assert.equal(existsSync(failed.runDir), false);
+    assert.equal(readFileSync(failed.pipeline, 'utf8'), '# Pipeline\n\n## Pending\n');
+    assert.equal(readFileSync(failed.history, 'utf8'), 'url\tfirst_seen\tportal\ttitle\tcompany\tstatus\tlocation\n');
+
+    assert.equal(partial.result.status, 0, partial.result.stderr);
+    assert.match(partial.result.stdout, /Completion status:\s+partial \(degraded\)/);
+    assert.equal(existsSync(partial.runDir), true);
+    assert.match(readFileSync(partial.pipeline, 'utf8'), /Backend Engineer/);
+  } finally {
+    for (const fixture of [healthy, failed, partial]) rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test('reverse ATS CLI fails closed and preserves resolver checkpoints', () => {
+  const failed = reverseScanFixture();
+  const paused = reverseScanFixture({ resolver: true });
+  try {
+    const failedJson = JSON.parse(failed.result.stdout);
+    assert.notEqual(failed.result.status, 0);
+    assert.equal(failedJson.status, 'failed');
+    assert.equal(failedJson.immutableRunDir, null);
+    assert.equal(existsSync(failed.runDir), false);
+
+    const pausedJson = JSON.parse(paused.result.stdout);
+    assert.notEqual(paused.result.status, 0);
+    assert.equal(pausedJson.status, 'paused');
+    assert.equal(pausedJson.immutableRunDir, null);
+    assert.equal(existsSync(paused.checkpoint), true);
+    assert.equal(existsSync(paused.runDir), false);
+  } finally {
+    rmSync(failed.dir, { recursive: true, force: true });
+    rmSync(paused.dir, { recursive: true, force: true });
+  }
 });
 
 test('location filtering uses word boundaries, URL fallback, and title remote evidence', () => {

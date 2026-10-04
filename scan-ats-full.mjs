@@ -117,6 +117,23 @@ const SOURCES = {
   },
 };
 
+async function runtimeSources() {
+  const fixtureDir = process.env.CAREER_OPS_ATS_PROVIDERS_DIR;
+  if (!fixtureDir) return SOURCES;
+  const resolved = {};
+  for (const [name, source] of Object.entries(SOURCES)) {
+    const modulePath = path.resolve(fixtureDir, `${name}.mjs`);
+    if (!existsSync(modulePath)) {
+      resolved[name] = source;
+      continue;
+    }
+    const provider = (await import(pathToFileURL(modulePath).href)).default;
+    if (!provider || typeof provider.fetch !== 'function') throw new Error(`fixture provider ${name} must export { fetch }`);
+    resolved[name] = { ...source, provider };
+  }
+  return resolved;
+}
+
 // ── CLI args ────────────────────────────────────────────────────────
 
 const KNOWN_FLAGS = [
@@ -317,7 +334,8 @@ const SEED_PROVIDERS = [greenhouse, lever, ashby];
  * @param {object}   ctx         HTTP context from makeHttpCtx().
  * @param {Set}      seenUrls    Shared dedup set (mutated in place).
  * @param {string}   label       Human-readable source label for logs.
- * @returns {Promise<object[]>}  New job offers (same shape as ATS scan offers).
+ * @returns {Promise<{offers: object[], errors: number, total: number,
+ *   attempted: number, succeeded: number, sourceUnavailable: boolean}>}
  */
 export async function runSeedScan(seedId, opts, ctx, seenUrls, label) {
   const source = SEED_SOURCES[seedId];
@@ -328,7 +346,7 @@ export async function runSeedScan(seedId, opts, ctx, seenUrls, label) {
     companies = await source.fetch();
   } catch (err) {
     console.error(`⚠️  ${seedId}: could not fetch portfolio — ${err.message}`);
-    return [];
+    return { offers: [], errors: 1, total: 0, attempted: 0, succeeded: 0, sourceUnavailable: true };
   }
 
   // Apply the --limit cap here too (by slug, consistent with sampleCompanies).
@@ -341,6 +359,8 @@ export async function runSeedScan(seedId, opts, ctx, seenUrls, label) {
   const cutoff = Date.now() - opts.sinceDays * 86_400_000;
   const offers = [];
   let errors = 0;
+  let attempted = 0;
+  let succeeded = 0;
 
   await parallelEach(capped, CONCURRENCY, async (company) => {
     const entry = toPortalEntry(company);
@@ -356,8 +376,10 @@ export async function runSeedScan(seedId, opts, ctx, seenUrls, label) {
     if (!provider) return; // No ATS detected — skip silently (or log in --verbose).
 
     let jobs;
+    attempted++;
     try {
       jobs = await provider.fetch(entry, ctx);
+      succeeded++;
     } catch (err) {
       errors++;
       if (opts.verbose) console.error(`  ✗ ${seedId}/${entry.name}: ${err.message}`);
@@ -379,7 +401,7 @@ export async function runSeedScan(seedId, opts, ctx, seenUrls, label) {
     }
   });
 
-  return { offers, errors, total: capped.length };
+  return { offers, errors, total: capped.length, attempted, succeeded, sourceUnavailable: capped.length === 0 };
 }
 
 // ── Parallel fetch with concurrency limit ───────────────────────────
@@ -442,6 +464,7 @@ async function filterLive(offers) {
 
 async function main() {
   const opts = parseArgs(process.argv);
+  const activeSources = await runtimeSources();
   const cutoff = Date.now() - opts.sinceDays * 86_400_000;
   // In --json mode, stdout is reserved for the single machine-readable result,
   // so every human-facing line goes to stderr instead.
@@ -489,6 +512,8 @@ async function main() {
   let totalCompaniesScanned = checkpoint?.counters?.totalCompaniesScanned || 0;
   let totalCompaniesAvailable = checkpoint?.counters?.totalCompaniesAvailable || 0;
   let totalErrors = checkpoint?.counters?.totalErrors || 0;
+  let totalAttemptedTargets = checkpoint?.counters?.totalAttemptedTargets || 0;
+  let totalSuccessfulTargets = checkpoint?.counters?.totalSuccessfulTargets || 0;
   let droppedNoDate = checkpoint?.counters?.droppedNoDate || 0;
   let capHit = false;
   // Aggregated from providers/workday.mjs's jobs.workdayNoDateSkip tag — see
@@ -498,13 +523,15 @@ async function main() {
   let noDateSkipCompanies = 0;
   let noDateSkipJobs = 0;
   const datasetStatus = {};
+  let unavailableSources = 0;
   let stoppedByOutage = false;
 
   for (const name of opts.ats) {
     if (completedSources.has(name)) continue;
-    const source = SOURCES[name];
+    const source = activeSources[name];
     const { list, status } = await loadCompanyList(name, source.dataset);
     datasetStatus[name] = status;
+    if (list.length === 0) unavailableSources++;
     const resumingCurrent = checkpoint?.current?.name === name;
     if (!resumingCurrent) totalCompaniesAvailable += list.length;
     if (opts.limit < list.length) capHit = true;
@@ -523,8 +550,10 @@ async function main() {
     let lastDone = 0;
     let lastResumeAt = 0;
     await parallelEach(entries, CONCURRENCY, async (entry) => {
+      totalAttemptedTargets++;
       try {
         const jobs = await source.provider.fetch(entry, ctx);
+        totalSuccessfulTargets++;
         consecutiveResolverFailures = 0;
         if (jobs.workdayNoDateSkip) { noDateSkipCompanies++; noDateSkipJobs += jobs.length; }
         for (const job of jobs) {
@@ -577,7 +606,7 @@ async function main() {
             remainingEntries: entries.slice(lastResumeAt),
           },
           completedSources: [...completedSources],
-          counters: { totalCompaniesScanned, totalCompaniesAvailable, totalErrors, droppedNoDate },
+          counters: { totalCompaniesScanned, totalCompaniesAvailable, totalErrors, totalAttemptedTargets, totalSuccessfulTargets, droppedNoDate },
           offers: newOffers,
         });
       }
@@ -596,10 +625,22 @@ async function main() {
     if (result && result.offers) {
       totalCompaniesScanned += result.total || 0;
       totalErrors += result.errors || 0;
+      totalAttemptedTargets += result.attempted || 0;
+      totalSuccessfulTargets += result.succeeded || 0;
+      if (result.sourceUnavailable) unavailableSources++;
       newOffers.push(...result.offers);
       log(`  done — ${result.total} companies probed, ${result.offers.length} matches (${result.errors} errors)`);
     }
   }
+
+  const degradedDataset = Object.values(datasetStatus).some((status) => status !== 'ok');
+  const allUnavailable = !stoppedByOutage && totalSuccessfulTargets === 0
+    && (totalAttemptedTargets > 0 || unavailableSources > 0 || opts.ats.length + opts.seeds.length > 0);
+  const completionStatus = stoppedByOutage
+    ? 'paused'
+    : allUnavailable
+      ? 'failed'
+      : (totalErrors > 0 || degradedDataset || unavailableSources > 0 ? 'partial' : 'completed');
 
   let offers = newOffers;
   if (offers.length && opts.liveness && !stoppedByOutage) offers = await filterLive(newOffers);
@@ -609,7 +650,9 @@ async function main() {
   log(`Reverse ATS Scan — ${date}`);
   log(`${'━'.repeat(45)}`);
   log(`Companies scanned:  ${totalCompaniesScanned}${capHit ? ` of ${totalCompaniesAvailable} (capped)` : ''}`);
+  log(`Targets succeeded:  ${totalSuccessfulTargets}/${totalAttemptedTargets}`);
   log(`Unreachable boards: ${totalErrors}`);
+  log(`Completion status:  ${completionStatus}${completionStatus === 'partial' ? ' (degraded)' : ''}`);
   // noDateSkipJobs is a subset of droppedNoDate, not a separate pool: every
   // no-postedOn workday posting counted here also hits the per-job undated
   // filter in the scan loop above and gets dropped there too. Report it as
@@ -633,15 +676,19 @@ async function main() {
   // Persist (unless dry-run, or nothing to save).
   let saved = false;
   let immutableRun = null;
-  if (!opts.dryRun && !stoppedByOutage) {
+  if (!opts.dryRun && !stoppedByOutage && !allUnavailable) {
     immutableRun = persistFullAtsScanRun({
       runId: opts.runId,
       offers,
-      metadata: { sources: opts.ats, seeds: opts.seeds, since_days: opts.sinceDays, artifact_authority: 'review_only' },
+      metadata: {
+        sources: opts.ats, seeds: opts.seeds, since_days: opts.sinceDays,
+        artifact_authority: 'review_only', completion_status: completionStatus,
+        targets_attempted: totalAttemptedTargets, targets_succeeded: totalSuccessfulTargets,
+      },
     });
     log(`\nImmutable canonical run: ${immutableRun.runDir}`);
   }
-  if (offers.length && !opts.dryRun && !stoppedByOutage) {
+  if (offers.length && !opts.dryRun && !stoppedByOutage && !allUnavailable) {
     // appendToPipeline assumes the file exists (onboarding creates it) — cover fresh setups.
     if (!existsSync(PIPELINE_PATH)) {
       mkdirSync(path.dirname(PIPELINE_PATH), { recursive: true });
@@ -676,7 +723,7 @@ async function main() {
   // The authoritative machine-readable result: lets a caller (e.g. the web)
   // tell a *degraded* scan (capped / stale dataset / undated dropped) apart
   // from a genuinely *empty* one. In --json mode stdout carries ONLY this.
-  if (checkpoint && !opts.dryRun && !stoppedByOutage && existsSync(CHECKPOINT_PATH)) unlinkSync(CHECKPOINT_PATH);
+  if (checkpoint && !opts.dryRun && !stoppedByOutage && !allUnavailable && existsSync(CHECKPOINT_PATH)) unlinkSync(CHECKPOINT_PATH);
 
   if (opts.json) {
     process.stdout.write(JSON.stringify({
@@ -694,6 +741,9 @@ async function main() {
       runId: opts.runId,
       immutableRunDir: immutableRun?.runDir || null,
       stoppedByOutage,
+      status: completionStatus,
+      targetsAttempted: totalAttemptedTargets,
+      targetsSucceeded: totalSuccessfulTargets,
       resumed: Boolean(checkpoint),
       offers: offers.map(o => ({
         company: o.company,
@@ -705,11 +755,18 @@ async function main() {
         source: o.source,
       })),
     }) + '\n');
+    if (stoppedByOutage || allUnavailable) process.exitCode = 1;
     return;
   }
 
   if (stoppedByOutage) {
     log(`\nSweep paused by resolver outage. Resume with --resume --run-id ${opts.runId}.`);
+    process.exitCode = 1;
+    return;
+  }
+  if (allUnavailable) {
+    log('\nSweep failed: every selected dataset/provider was unavailable; no completed candidate run was created.');
+    process.exitCode = 1;
     return;
   }
   if (!offers.length) {

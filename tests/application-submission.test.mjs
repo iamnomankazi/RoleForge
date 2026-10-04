@@ -17,11 +17,11 @@ import { deriveCandidateId } from '../candidate-identity.mjs';
 
 const HERE = resolve(import.meta.dirname, '..');
 
-function fixture({ prepare = true } = {}) {
+function fixture({ prepare = true, candidateTitle = 'Backend Engineer', trackerRole = candidateTitle } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'career-ops-submission-'));
   const runId = 'submission-run';
   const url = 'https://jobs.example.test/acme/123';
-  const candidate = { company: 'Acme', title: 'Backend Engineer', url, source: 'fixture', run_id: runId };
+  const candidate = { company: 'Acme', title: candidateTitle, url, source: 'fixture', run_id: runId };
   candidate.candidate_id = deriveCandidateId(candidate);
   const runDir = join(root, 'output', 'scan-runs', runId);
   mkdirSync(runDir, { recursive: true });
@@ -41,7 +41,7 @@ function fixture({ prepare = true } = {}) {
     '',
     '| # | Date | Company | Role | Score | Status | PDF | Report | Notes |',
     '|---|------|---------|------|-------|--------|-----|--------|-------|',
-    '| 7 | 2026-07-13 | Acme | Backend Engineer | 4.5/5 | Evaluated | ✅ | — | ready |',
+    `| 7 | 2026-07-13 | Acme | ${trackerRole} | 4.5/5 | Evaluated | ✅ | — | ready |`,
   ].join('\n'));
   const created = createApplicationBatch({
     root, sourceRunId: runId, batchId: 'submission-batch', selectedCandidateIds: [candidate.candidate_id],
@@ -156,6 +156,10 @@ test('submission requires form_prepared and an exact tracker identity', () => us
   writeFileSync(f.tracker, readFileSync(f.tracker, 'utf8').replace('Backend Engineer', 'Unrelated Role'));
   assert.throws(() => buildSubmissionPreview(options), /does not match the manifest candidate/);
 }));
+
+test('submission proof keeps distinct non-Latin role titles distinct', () => usingFixture((f) => {
+  assert.throws(() => buildSubmissionPreview(previewOptions(f)), /does not match the manifest candidate/);
+}, { candidateTitle: 'データエンジニア', trackerRole: 'バックエンドエンジニア' }));
 
 test('submission is unavailable before the form is prepared', () => usingFixture((f) => {
   assert.throws(() => buildSubmissionPreview(previewOptions(f)), /requires form_prepared/);

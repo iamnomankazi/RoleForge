@@ -97,6 +97,66 @@ test('same-run merge keeps distinct roles, refreshes upgrades, and preserves not
   }
 });
 
+test('pre-existing tracker-number collision cannot merge a different role', () => {
+  const sb = sandbox(`${HEADER}| 1 | 2026-08-01 | Acme | Data Engineer | 4.0/5 | Evaluated | ❌ | [10](reports/010-data.md) | Req DATA-10 |\n`);
+  try {
+    writeFileSync(join(sb.additions, '1-backend.tsv'), '1\t2026-08-02\tAcme\tBackend Engineer\tEvaluated\t4.2/5\t❌\t—\tReq BACK-20\n');
+    const result = run('merge-tracker.mjs', [], sb);
+    assert.equal(result.code, 0, result.output);
+    const content = readFileSync(sb.tracker, 'utf8');
+    assert.equal((content.match(/\| Acme \|/g) || []).length, 2);
+    assert.match(content, /\| 1 \|[^\n]+\| Acme \| Data Engineer \|/);
+    assert.match(content, /\| 2 \|[^\n]+\| Acme \| Backend Engineer \|/);
+  } finally {
+    rmSync(sb.dir, { recursive: true, force: true });
+  }
+});
+
+test('merge keeps conflicting report and requisition identities separate', () => {
+  const sb = sandbox(`${HEADER}| 1 | 2026-08-01 | Acme | Engineer | 4.0/5 | Evaluated | ❌ | [21](reports/021-a.md) | Req ENG-21 |\n`);
+  try {
+    writeFileSync(join(sb.additions, '1-conflict.tsv'), '1\t2026-08-02\tAcme\tEngineer\tEvaluated\t4.2/5\t❌\t[22](reports/022-b.md)\tReq ENG-22\n');
+    const result = run('merge-tracker.mjs', [], sb);
+    assert.equal(result.code, 0, result.output);
+    const content = readFileSync(sb.tracker, 'utf8');
+    assert.equal((content.match(/\| Acme \| Engineer \|/g) || []).length, 2);
+    assert.match(content, /\| 1 \|[^\n]+\[21\]\(reports\/021-a\.md\)/);
+    assert.match(content, /\| 2 \|[^\n]+\[22\]\(reports\/022-b\.md\)/);
+  } finally {
+    rmSync(sb.dir, { recursive: true, force: true });
+  }
+});
+
+test('merge reconciles notes and complementary evidence independently of score', () => {
+  const tracker = `# Applications Tracker
+
+| # | Date | Company | Via | Role | Location | Score | Status | PDF | Report | Notes |
+|---|------|---------|-----|------|----------|-------|--------|-----|--------|-------|
+| 1 | 2026-08-01 | LowCo | Direct | Engineer | Helsinki | 4.5/5 | Interview | [CV](output/low.pdf) | [11](reports/011-low.md) | original |
+| 2 | 2026-08-01 | EqualCo | — | Engineer | — | 4.0/5 | Evaluated | — | — | baseline |
+| 3 | 2026-08-01 | HighCo | Direct | Engineer | Tampere | 3.0/5 | Responded | [CV](output/high.pdf) | [13](reports/013-high.md) | existing |
+`;
+  const sb = sandbox(tracker);
+  try {
+    writeFileSync(join(sb.additions, '1-low.tsv'), '1\t2026-08-02\tLowCo\tEngineer\tEvaluated\t3.5/5\t—\t[11](reports/011-low.md)\tnew lower-score note\tlocation=—\tvia=Direct\n');
+    writeFileSync(join(sb.additions, '2-equal.tsv'), '2\t2026-08-02\tEqualCo\tEngineer\tInterview\t4.0/5\t[PDF](output/equal.pdf)\t[12](reports/012-equal.md)\tequal-score report evidence\tEspoo\tvia=Referral\n');
+    writeFileSync(join(sb.additions, '3-high.tsv'), '3\t2026-08-03\tHighCo\tEngineer\tEvaluated\t4.8/5\t—\t—\thigher score placeholder report\tlocation=—\tvia=Direct\n');
+    const result = run('merge-tracker.mjs', [], sb);
+    assert.equal(result.code, 0, result.output);
+    const content = readFileSync(sb.tracker, 'utf8');
+    const low = rowFor(content, 'LowCo') || '';
+    const equal = rowFor(content, 'EqualCo') || '';
+    const high = rowFor(content, 'HighCo') || '';
+    assert.match(low, /new lower-score note/);
+    assert.match(low, /\| 4\.5\/5 \| Interview \| \[CV\]/);
+    assert.match(equal, /\| Referral \| Engineer \| Espoo \| 4\.0\/5 \| Interview \| \[PDF\]\(output\/equal\.pdf\) \| \[12\]/);
+    assert.match(high, /\| 4\.8\/5 \| Responded \| \[CV\]\(output\/high\.pdf\) \| \[13\]/);
+    assert.equal(readFileSync(join(sb.additions, 'merged', '1-low.tsv'), 'utf8').includes('new lower-score note'), true);
+  } finally {
+    rmSync(sb.dir, { recursive: true, force: true });
+  }
+});
+
 test('missing separator and malformed additions fail without consuming evidence', () => {
   const missingSeparator = sandbox('# Applications Tracker\n\n| # | Date | Company | Role | Score | Status | PDF | Report | Notes |\n');
   try {
@@ -137,6 +197,40 @@ test('dedup preserves Unicode Via channels, strongest status, and all notes', ()
     assert.match(content, /Hired/);
     assert.match(content, /first note; hired note/);
     assert.match(content, /パーソル/);
+  } finally {
+    rmSync(sb.dir, { recursive: true, force: true });
+  }
+});
+
+test('dedup preserves complementary report and PDF before removing a row', () => {
+  const tracker = `${HEADER}`
+    + '| 1 | 2026-08-01 | Acme | Platform Engineer | 4.8/5 | Evaluated | — | — | keeper note |\n'
+    + '| 2 | 2026-08-02 | Acme | Platform Engineer | 4.0/5 | Evaluated | [CV](output/acme.pdf) | [20](reports/020-acme.md) | evidence note |\n';
+  const sb = sandbox(tracker);
+  try {
+    const result = run('dedup-tracker.mjs', [], sb);
+    assert.equal(result.code, 0, result.output);
+    const content = readFileSync(sb.tracker, 'utf8');
+    assert.equal((content.match(/Platform Engineer/g) || []).length, 1);
+    assert.match(content, /\| Evaluated \| \[CV\]\(output\/acme\.pdf\) \| \[20\]\(reports\/020-acme\.md\) \| keeper note; evidence note \|/);
+  } finally {
+    rmSync(sb.dir, { recursive: true, force: true });
+  }
+});
+
+test('dedup keeps conflicting report and requisition identities separate', () => {
+  const tracker = `${HEADER}`
+    + '| 1 | 2026-08-01 | Acme | Engineer | 4.8/5 | Evaluated | ❌ | [21](reports/021-a.md) | Req ENG-21 |\n'
+    + '| 2 | 2026-08-02 | Acme | Engineer | 4.0/5 | Evaluated | ❌ | [22](reports/022-b.md) | Req ENG-22 |\n'
+    + '| 3 | 2026-08-03 | Beta | Analyst | 4.2/5 | Evaluated | ❌ | — | Req ANA-1 |\n'
+    + '| 4 | 2026-08-04 | Beta | Analyst | 3.9/5 | Evaluated | ❌ | — | Req ANA-2 |\n';
+  const sb = sandbox(tracker);
+  try {
+    const result = run('dedup-tracker.mjs', [], sb);
+    assert.equal(result.code, 0, result.output);
+    const content = readFileSync(sb.tracker, 'utf8');
+    assert.equal((content.match(/\| Acme \| Engineer \|/g) || []).length, 2);
+    assert.equal((content.match(/\| Beta \| Analyst \|/g) || []).length, 2);
   } finally {
     rmSync(sb.dir, { recursive: true, force: true });
   }

@@ -14,15 +14,11 @@ import {
   recordSubmissionConfirmation,
 } from './application-batch.mjs';
 import { sha256Canonical } from './application-integrity.mjs';
-import { parseTrackerRow, resolveColumns } from './tracker-parse.mjs';
+import { parseTrackerRow, resolveColumns, normalizeTextKey } from './tracker-parse.mjs';
 import { normalizeCompany } from './tracker-utils.mjs';
 
 function inline(value) {
   return String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
-}
-
-function normalizedRole(value) {
-  return inline(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
 function exactTrackerRow(trackerPath, trackerRow) {
@@ -68,7 +64,7 @@ export function buildSubmissionPreview({
   }
   const tracker = exactTrackerRow(exactTracker, Number(trackerRow));
   if (normalizeCompany(candidate.company) !== normalizeCompany(tracker.company)
-      || normalizedRole(candidate.title) !== normalizedRole(tracker.role)) {
+      || normalizeTextKey(candidate.title) !== normalizeTextKey(tracker.role)) {
     throw new Error('Exact tracker row company/role does not match the manifest candidate');
   }
   const envelope = {

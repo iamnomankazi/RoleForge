@@ -63,7 +63,10 @@ const SCAN_HISTORY_PATH = 'data/scan-history.tsv';
 const PIPELINE_PATH = 'data/pipeline.md';
 const APPLICATIONS_PATH = 'data/applications.md';
 const PROJECT_ROOT = path.dirname(fileURLToPath(import.meta.url));
-const PROVIDERS_DIR = path.resolve(PROJECT_ROOT, 'providers');
+const SCAN_ROOT = process.env.CAREER_OPS_SCAN_ROOT ? path.resolve(process.env.CAREER_OPS_SCAN_ROOT) : PROJECT_ROOT;
+const PROVIDERS_DIR = process.env.CAREER_OPS_PROVIDERS_DIR
+  ? path.resolve(process.env.CAREER_OPS_PROVIDERS_DIR)
+  : path.resolve(PROJECT_ROOT, 'providers');
 
 // Ensure required directories exist (fresh setup)
 mkdirSync('data', { recursive: true });
@@ -210,7 +213,7 @@ export function normalizeUrlForDedup(rawUrl) {
       if (/^utm_/i.test(key) || COSMETIC_QUERY_KEYS.has(key.toLowerCase())) url.searchParams.delete(key);
     }
     url.searchParams.sort();
-    url.pathname = url.pathname.replace(/\/{2,}/g, '/').replace(/\/+$/, '').toLowerCase() || '/';
+    url.pathname = url.pathname.replace(/\/{2,}/g, '/').replace(/\/+$/, '') || '/';
     return url.toString();
   } catch {
     return String(rawUrl ?? '').trim();
@@ -855,7 +858,7 @@ export function generateStandardScanRunId(now = new Date(), pid = process.pid) {
 export function persistStandardScanRun({
   runId,
   offers,
-  root = PROJECT_ROOT,
+  root = SCAN_ROOT,
   createdAt = new Date().toISOString(),
   metadata = {},
 }) {
@@ -1168,6 +1171,7 @@ async function main() {
   const newOffersByCandidateId = new Map();
   const errors = [...resolveErrors];
   const emptyTargets = [];
+  let successfulTargets = 0;
 
   const tasks = targets.map(company => async () => {
     let provider = company._provider;
@@ -1192,6 +1196,7 @@ async function main() {
       if (!Array.isArray(jobs)) {
         throw new Error(`${provider.id}: fetch() did not return an array`);
       }
+      successfulTargets++;
       totalFound += jobs.length;
       if (!company._isBoard && jobs.length === 0) {
         emptyTargets.push(company.name);
@@ -1295,6 +1300,9 @@ async function main() {
   });
 
   await parallelFetch(tasks, CONCURRENCY);
+  const attemptedTargets = targets.length;
+  const allFailed = successfulTargets === 0 && (attemptedTargets > 0 || resolveErrors.length > 0);
+  const completionStatus = allFailed ? 'failed' : (errors.length > 0 ? 'partial' : 'completed');
 
   // 5.5. Optional liveness verification — drop expired and guard-rejected postings
   let verifiedOffers = newOffers;
@@ -1328,7 +1336,7 @@ async function main() {
 
   // 6. Write results
   let immutableRun = null;
-  if (!dryRun) {
+  if (!dryRun && !allFailed) {
     // Immutable authority is committed first. A repeated run ID or incomplete
     // run write fails before legacy pipeline/history outputs can be mutated.
     immutableRun = persistStandardScanRun({
@@ -1338,6 +1346,10 @@ async function main() {
         liveness_verified: verify,
         rediscovery_enabled: rediscover,
         source: 'scan.mjs',
+        completion_status: completionStatus,
+        targets_attempted: attemptedTargets,
+        targets_succeeded: successfulTargets,
+        targets_failed: errors.length,
       },
     });
   }
@@ -1395,6 +1407,8 @@ async function main() {
   const summaryBoards = targets.filter(t => t._isBoard).length;
   console.log(`Companies scanned:     ${summaryCompanies}`);
   if (summaryBoards > 0) console.log(`Job boards scanned:    ${summaryBoards}`);
+  console.log(`Targets succeeded:     ${successfulTargets}/${attemptedTargets}`);
+  console.log(`Completion status:     ${completionStatus}${completionStatus === 'partial' ? ' (degraded)' : ''}`);
   console.log(`Total jobs found:      ${totalFound}`);
   console.log(`Filtered by title:     ${totalFilteredTitle} removed`);
   if (skipTiers.length > 0) {
@@ -1509,8 +1523,10 @@ async function main() {
       console.log(`\nResults saved to ${PIPELINE_PATH} and ${SCAN_HISTORY_PATH}`);
       console.log(`Immutable scan run: ${immutableRun.runDir}`);
     }
-  } else if (!dryRun) {
+  } else if (!dryRun && immutableRun) {
     console.log(`\nImmutable empty scan run: ${immutableRun.runDir}`);
+  } else if (allFailed) {
+    console.error('\n❌ Scan failed: every attempted target was unavailable; no completed candidate run was created.');
   }
 
   // Persist this run's counters (#1604) — guarded exactly like the other
@@ -1518,13 +1534,18 @@ async function main() {
   if (!dryRun) {
     await appendPortalHealth(healthRecords);
     appendScanRunSummary({
-      timestamp: new Date().toISOString(), status: 'completed',
+      timestamp: new Date().toISOString(), status: completionStatus,
       companies: summaryCompanies, boards: summaryBoards, found: totalFound,
       filteredTitle: totalFilteredTitle, filteredTier: totalFilteredTier,
       filteredLocation: totalFilteredLocation, filteredSalary: totalFilteredSalary,
       filteredContent: totalFilteredContent, filteredCooldown: totalFilteredCooldown,
       dupes: totalDupes, newAdded: verifiedOffers.length, errors: errors.length,
     });
+  }
+
+  if (allFailed) {
+    process.exitCode = 1;
+    return;
   }
 
   console.log(`\n→ Run /career-ops pipeline to evaluate new offers.`);

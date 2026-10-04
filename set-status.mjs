@@ -39,7 +39,7 @@
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
+import { resolveColumns, parseTrackerRow, normalizeTextKey } from './tracker-parse.mjs';
 import { roleFuzzyMatch } from './role-matcher.mjs';
 import { assertPreflightConfirmed, loadBatchState } from './application-batch.mjs';
 import {
@@ -359,9 +359,8 @@ if (newStatus === 'Applied') {
         || submission.scopeHash !== `sha256:${String(submission.eventId || '').replace(/^submission_v1_/, '')}`) {
       throw new Error('Submission proof is missing, mismatched, or not pending for this exact tracker row');
     }
-    const normalizedRole = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
     if (normalizeCompany(manifestCandidate.company) !== normalizeCompany(target.company)
-        || normalizedRole(manifestCandidate.title) !== normalizedRole(target.role)) {
+        || normalizeTextKey(manifestCandidate.title) !== normalizeTextKey(target.role)) {
       throw new Error('Tracker company/role does not exactly match the confirmed manifest candidate');
     }
   } catch (error) {

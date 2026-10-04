@@ -3787,11 +3787,11 @@ try {
       '| 23 | 2026-01-08 | Acme | Staff Software Engineer, API | 4.0/5 | Evaluated | ❌ | [23](../reports/023-api.md) | acronym sibling |\n' +
       '| 24 | 2026-01-08 | Acme | Staff Software Engineer, SDK | 4.2/5 | Evaluated | ❌ | [24](../reports/024-sdk.md) | acronym sibling |\n' +
       '| 25 | 2026-01-08 | Acme | Product Engineer, Growth | 3.8/5 | Evaluated | ❌ | [25](../reports/025-growth-old.md) | duplicate old |\n' +
-      '| 26 | 2026-01-09 | Acme | Product Engineer, Growth | 4.0/5 | Evaluated | ❌ | [26](../reports/026-growth-new.md) | duplicate new |\n' +
+      '| 26 | 2026-01-09 | Acme | Product Engineer, Growth | 4.0/5 | Evaluated | ❌ | [25](../reports/025-growth-old.md) | duplicate new |\n' +
       '| 27 | 2026-01-08 | Acme | Solutions Engineer, Revenue | 3.0/5 | Applied | ❌ | [27](../reports/027-revenue-applied.md) | applied exact-title row |\n' +
       '| 28 | 2026-01-09 | Acme | Solutions Engineer, Revenue | 4.6/5 | Evaluated | ❌ | [28](../reports/028-revenue-eval.md) | evaluated exact-title row |\n' +
       '| 29 | 2026-01-08 | Acme | Data Engineer, Search | 3.1/5 | Applied | ❌ | [29](../reports/029-search-old.md) | malformed duplicate-number old row |\n' +
-      '| 29 | 2026-01-09 | Acme | Data Engineer, Search | 4.1/5 | Evaluated | ❌ | [30](../reports/030-search-new.md) | malformed duplicate-number new row |\n' +
+      '| 29 | 2026-01-09 | Acme | Data Engineer, Search | 4.1/5 | Evaluated | ❌ | [29](../reports/029-search-old.md) | malformed duplicate-number new row |\n' +
       // Distinct sibling roles at one company that the old fuzzy matcher
       // false-merged (shared [software, engineer, infrastructure] → Jaccard 0.6).
       // Exact company+title matching must keep both openings.
@@ -3799,7 +3799,7 @@ try {
       '| 32 | 2026-01-10 | Cohere | Senior Software Engineer, Agent Infrastructure | 4.0/5 | Evaluated | ❌ | [32](../reports/014-cohere-agent-infra.md) | distinct role — higher score |\n' +
       // Exact company+role duplicate of #32 (same title, both Evaluated) — must
       // collapse to one, keeping the higher score.
-      '| 33 | 2026-01-11 | Cohere | Senior Software Engineer, Agent Infrastructure | 3.7/5 | Evaluated | ❌ | [33](../reports/033-cohere-agent-dup.md) | exact-title duplicate |\n');
+      '| 33 | 2026-01-11 | Cohere | Senior Software Engineer, Agent Infrastructure | 3.7/5 | Evaluated | ❌ | [32](../reports/014-cohere-agent-infra.md) | exact-title duplicate |\n');
 
     const dedupResult = run(NODE, ['dedup-tracker.mjs'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker } });
     if (dedupResult === null) {
@@ -3885,7 +3885,7 @@ try {
       '| # | Date | Company | Role | Score | Status | PDF | Report | Notes |\n' +
       '|---|------|---------|------|-------|--------|-----|--------|-------|\n' +
       '| 50 | 2026-02-01 | Globex | Widget Engineer | 4.5/5 | Rejected | ❌ | [50](../reports/050-widget.md) | KEEPER_NOTE_SENTINEL\n' +
-      '| 51 | 2026-02-02 | Globex | Widget Engineer | 3.0/5 | Evaluated | ❌ | [51](../reports/051-widget.md) | dup row |\n');
+      '| 51 | 2026-02-02 | Globex | Widget Engineer | 3.0/5 | Evaluated | ❌ | [50](../reports/050-widget.md) | dup row |\n');
 
     const r = run(NODE, ['dedup-tracker.mjs'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker } });
     if (r === null) {
@@ -4069,7 +4069,7 @@ try {
       '| # | Date | Company | Role | Location | Score | Status | PDF | Report | Notes |\n' +
       '|---|------|---------|------|----------|-------|--------|-----|--------|-------|\n' +
       '| 60 | 2026-02-01 | Globex | Widget Engineer | Berlin | 4.5/5 | Rejected | ❌ | [60](r.md) | LOC_SENTINEL |\n' +
-      '| 61 | 2026-02-02 | Globex | Widget Engineer | Berlin | 3.0/5 | Evaluated | ❌ | [61](r.md) | dup |\n');
+      '| 61 | 2026-02-02 | Globex | Widget Engineer | Berlin | 3.0/5 | Evaluated | ❌ | [60](r.md) | dup |\n');
 
     const r = run(NODE, ['dedup-tracker.mjs'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker } });
     if (r === null) {
@@ -4124,7 +4124,7 @@ try {
     writeFileSync(join(additionsDir, '004-uber.tsv'),
       '4\t2026-01-05\tUber\tSenior Software Engineer, UberEats Feed\tEvaluated\t4.1/5\t❌\t[4](reports/004-uber-2026-01-05.md)\tdistinct team (#751)\n');
     writeFileSync(join(additionsDir, '005-streamco.tsv'),
-      '5\t2026-01-06\tStreamCo\tFull Stack Engineer 5, Ads Reporting\tEvaluated\t4.5/5\t❌\t[5](reports/005-streamco-2026-01-06.md)\trepost\n');
+      '5\t2026-01-06\tStreamCo\tFull Stack Engineer 5, Ads Reporting\tEvaluated\t4.5/5\t❌\t—\trepost\n');
 
     const mergeResult = run(NODE, ['merge-tracker.mjs'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_ADDITIONS: additionsDir } });
     if (mergeResult === null) {
@@ -4190,7 +4190,7 @@ try {
       '2\t2026-01-05\t?\tBackend Engineer, Payments Platform\tEvaluated\t4.1/5\t❌\t[2](reports/002-unknown-2026-01-05.md)\tsecond agency\tvia=パーソル\n');
     // Same role, SAME agency re-blasting the listing → duplicate, update in place.
     writeFileSync(join(additionsDir, '003-unknown.tsv'),
-      '3\t2026-01-06\t?\tBackend Engineer, Payments Platform\tEvaluated\t4.2/5\t❌\t[3](reports/003-unknown-2026-01-06.md)\tre-blast\tvia=リクルート\n');
+      '3\t2026-01-06\t?\tBackend Engineer, Payments Platform\tEvaluated\t4.2/5\t❌\t—\tre-blast\tvia=リクルート\n');
 
     const viaResult = run(NODE, ['merge-tracker.mjs'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_ADDITIONS: additionsDir } });
     if (viaResult === null) {
@@ -4412,13 +4412,13 @@ try {
       '4\t2026-01-02\tFabrikam\tLearning Development Curriculum Designer\tEvaluated\t4.5/5\t❌\t[4](reports/004-fabrikam-2026-01-02.md)\tReq R_1000002 — distinct posting (#1524)\n');
     // (b) Same-looking title, SAME req number → still a duplicate (lower score → skipped, row untouched).
     writeFileSync(join(reqAdditions, '005-fabrikam.tsv'),
-      '5\t2026-01-02\tFabrikam\tLearning Development Designer III (Repost)\tEvaluated\t3.0/5\t❌\t[5](reports/005-fabrikam-2026-01-02.md)\tReq R_1000001 — same posting repost\n');
+      '5\t2026-01-02\tFabrikam\tLearning Development Designer III (Repost)\tEvaluated\t3.0/5\t❌\t—\tReq R_1000001 — same posting repost\n');
     // (c) No req number on either side → existing fuzzy-match behavior unchanged (still deduped).
     writeFileSync(join(reqAdditions, '006-fabrikam.tsv'),
-      '6\t2026-01-02\tFabrikam\tCurriculum Program Coordinator II\tEvaluated\t3.9/5\t❌\t[6](reports/006-fabrikam-2026-01-02.md)\tno req number, higher score\n');
+      '6\t2026-01-02\tFabrikam\tCurriculum Program Coordinator II\tEvaluated\t3.9/5\t❌\t—\tno req number, higher score\n');
     // (d) Req number on only one side → can't prove a mismatch, falls back to fuzzy-match (still deduped).
     writeFileSync(join(reqAdditions, '007-northwind.tsv'),
-      '7\t2026-01-02\tNorthwind\tOperations Analyst\tEvaluated\t3.2/5\t❌\t[7](reports/007-northwind-2026-01-02.md)\tno req number on this side\n');
+      '7\t2026-01-02\tNorthwind\tOperations Analyst\tEvaluated\t3.2/5\t❌\t—\tno req number on this side\n');
 
     const reqResult = run(NODE, ['merge-tracker.mjs'], { env: { ...process.env, CAREER_OPS_TRACKER: reqTracker, CAREER_OPS_ADDITIONS: reqAdditions } });
     if (reqResult === null) {
