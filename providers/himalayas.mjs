@@ -1,6 +1,8 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
 
+import { requireUsableRows } from './_payload.mjs';
+
 // Himalayas provider - targeted search plus a bounded board-wide latest feed.
 // Browse (https://himalayas.app/jobs/api) uses offset pagination; search
 // (https://himalayas.app/jobs/api/search) uses q + 1-based page pagination.
@@ -350,6 +352,10 @@ export async function fetchHimalayasPages(entry, ctx) {
 
     if (responseRows.length === 0) break;
 
+    const candidateRows = rows.filter((item) => !isUnavailable(item, toEpochMs(item?.expiryDate)));
+    const structurallyUsable = candidateRows.map(normalizeHimalayasJob).filter(Boolean);
+    requireUsableRows(candidateRows, structurallyUsable, `himalayas browse page ${page + 1}`);
+
     const signature = rows.map(rawJobKey).join('\u0001');
     if (pageSignatures.has(signature)) {
       stats.repeatedPages += 1;
@@ -480,6 +486,10 @@ export async function fetchHimalayasSearchPages(entry, ctx) {
       }
 
       if (responseRows.length === 0) break;
+
+      const candidateRows = responseRows.filter((item) => !isUnavailable(item, toEpochMs(item?.expiryDate)));
+      const structurallyUsable = candidateRows.map(normalizeHimalayasJob).filter(Boolean);
+      requireUsableRows(candidateRows, structurallyUsable, `himalayas search "${query}" page ${page}`);
       if (pageSignatures.has(signature) || (pageOffset !== undefined && responseOffsets.has(pageOffset))) {
         stats.repeatedPages += 1;
         queryStats.repeatedPages += 1;

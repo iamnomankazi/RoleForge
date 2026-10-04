@@ -1,6 +1,8 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
 
+import { decodeEntities } from './_html-entities.mjs';
+
 // Hacker News "Ask HN: Who is hiring?" provider — no auth required.
 //
 // Algorithm:
@@ -33,19 +35,6 @@ function extractUrl(text) {
   return m ? m[0].replace(/[.,;!?)]+$/, '') : '';
 }
 
-// Named HTML entities we decode in comment bodies. Kept in single map
-/** @type {Record<string, string>} */
-const ENTITY_MAP = {
-  '&amp;': '&',
-  '&lt;': '<',
-  '&gt;': '>',
-  '&quot;': '"',
-  '&#x27;': "'",
-  '&#39;': "'",
-  '&nbsp;': ' ',
-};
-const ENTITY_RE = /&amp;|&lt;|&gt;|&quot;|&#x27;|&#39;|&nbsp;/g;
-
 /**
  * Parse a single HN comment text into a normalized job object.
  * The canonical format is "Company | Role | Location | URL" on the first line,
@@ -70,7 +59,7 @@ export function parseHnComment(text, threadUrl = '') {
     .replace(/<a\s[^>]*href="([^"]+)"[^>]*>.*?<\/a>/gi, (_, href) => href)
     .replace(/<\/?(?:p|br|div|li|h[1-6])\b[^>]*>/gi, '\n')
     .replace(/<[^>]+>/g, ' ')
-    .replace(ENTITY_RE, (m) => ENTITY_MAP[m])
+    .replace(/&[A-Za-z#0-9]+;/g, (entity) => decodeEntities(entity))
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n');
 
@@ -135,9 +124,16 @@ export function resolveLatestThreadId(data) {
 export default {
   id: 'hackernews',
 
+  detect(entry) {
+    return entry?.provider === 'hackernews' ? { url: SEARCH_URL } : null;
+  },
+
   async fetch(entry, ctx) {
     // Step 1: Find the latest "Who is hiring?" story id.
     const searchData = await ctx.fetchJson(SEARCH_URL, { redirect: 'error' });
+    if (!searchData || typeof searchData !== 'object' || !Array.isArray(searchData.hits)) {
+      throw new Error('hackernews: malformed search response (expected hits array)');
+    }
     const threadId = resolveLatestThreadId(searchData);
     if (!threadId) {
       throw new Error('hackernews: could not find "Ask HN: Who is hiring?" thread in search results');
@@ -152,17 +148,25 @@ export default {
     }
 
     const children = /** @type {any} */ (item).children;
-    if (!Array.isArray(children)) return [];
+    if (!Array.isArray(children)) {
+      throw new Error(`hackernews: malformed item response for thread ${threadId} (expected children array)`);
+    }
 
     // Step 3: Parse each comment.
     const jobs = [];
+    let candidateComments = 0;
     for (const child of children) {
       // Skip deleted / dead / empty comments.
       if (!child || child.deleted || child.dead) continue;
       const text = typeof child.text === 'string' ? child.text : '';
       if (!text.trim()) continue;
+      candidateComments += 1;
 
-      const parsed = parseHnComment(text, threadHnUrl);
+      const childId = String(child.id ?? child.objectID ?? '');
+      const commentUrl = /^\d+$/.test(childId)
+        ? `https://news.ycombinator.com/item?id=${childId}`
+        : threadHnUrl;
+      const parsed = parseHnComment(text, commentUrl);
       if (!parsed) continue;
 
       jobs.push({
@@ -175,6 +179,10 @@ export default {
           ? { postedAt: Date.parse(child.created_at) || undefined }
           : {}),
       });
+    }
+
+    if (candidateComments > 0 && jobs.length === 0) {
+      throw new Error(`hackernews: malformed thread response (${candidateComments} candidate comment(s), none structurally usable)`);
     }
 
     return jobs;

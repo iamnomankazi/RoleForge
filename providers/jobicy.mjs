@@ -1,6 +1,8 @@
 // @ts-check
 /** @typedef {import('./_types.js').Provider} Provider */
 
+import { requiredArray, requireUsableRows } from './_payload.mjs';
+
 // Jobicy provider — board-wide remote-jobs aggregator feed
 // (https://jobicy.com/api/v2/remote-jobs?count=50). Returns { jobs: [...] }.
 //
@@ -25,11 +27,9 @@ export default {
   async fetch(entry, ctx) {
     // redirect:'error' prevents SSRF via server-side redirects
     const json = await ctx.fetchJson(FEED_URL, { redirect: 'error' });
-    if (!json || !Array.isArray(json.jobs)) {
-      throw new Error(`jobicy: unexpected API response — expected { jobs: [...] }, got keys: [${json ? Object.keys(json).join(', ') : 'null'}]`);
-    }
-
-    return parseJobicyResponse(json, entry.name || 'Jobicy');
+    const rows = requiredArray(json, 'jobs', 'jobicy');
+    const jobs = parseJobicyResponse({ jobs: rows }, entry.name || 'Jobicy');
+    return requireUsableRows(rows, jobs, 'jobicy');
   },
 };
 

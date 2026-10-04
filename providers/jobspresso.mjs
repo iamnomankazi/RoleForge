@@ -49,7 +49,15 @@ export default {
     // redirect:'error' prevents SSRF via server-side redirects; combined with
     // assertJobspressoUrl above it keeps the request pinned to jobspresso.co.
     const text = await ctx.fetchText(feedUrl, { redirect: "error" });
-    return parseJobspressoFeed(text);
+    if (typeof text !== "string" || !/<rss\b/i.test(text) || !/<channel\b/i.test(text)) {
+      throw new Error("jobspresso: malformed RSS response");
+    }
+    const rawItems = text.match(/<item\b[^>]*>[\s\S]*?<\/item>/gi) || [];
+    const jobs = parseJobspressoFeed(text);
+    if (rawItems.length > 0 && jobs.length === 0) {
+      throw new Error(`jobspresso: malformed RSS response (${rawItems.length} item(s), none structurally usable)`);
+    }
+    return jobs;
   },
 };
 
