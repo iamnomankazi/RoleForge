@@ -109,6 +109,34 @@ test('standard scan artifacts preserve structured experience evidence and hard b
   }
 });
 
+test('canonical duplicate merge preserves blockers and adopts only missing experience metadata', () => {
+  const metadata = {
+    interpretation: 'outside',
+    numeric_hard_blocker: true,
+    hard_blocker_reason: 'required experience starts at 5 years (outside configured target)',
+    requirements: [{ text: '5+ years', minimum_years: 5, maximum_years: null, bound: 'minimum', strength: 'required', interpretation: 'outside', hard_blocker: true }],
+  };
+  const shared = { company: 'Acme', title: 'Backend Engineer', url: 'https://jobs.example.com/roles/123' };
+  const merge = (rows) => mergeCanonicalCandidates([{ name: 'duplicates.json', rows }], { runId: 'duplicate-run' }).candidates[0];
+
+  for (const rows of [
+    [{ ...shared, description: '' }, { ...shared, description: '5+ years of professional backend experience', experienceMetadata: metadata, hardBlockers: [metadata.hard_blocker_reason] }],
+    [{ ...shared, description: '5+ years of professional backend experience', experienceMetadata: metadata, hardBlockers: [metadata.hard_blocker_reason] }, { ...shared, description: '' }],
+  ]) {
+    const candidate = merge(rows);
+    assert.deepEqual(candidate.experience_metadata, metadata);
+    assert.deepEqual(candidate.hard_blockers, [metadata.hard_blocker_reason]);
+    assert.match(candidate.description, /professional backend experience/);
+  }
+
+  const conflict = merge([
+    { ...shared, description: 'Keep this established description', experienceMetadata: metadata },
+    { ...shared, description: 'Do not replace the established description', experienceMetadata: { interpretation: 'normal' } },
+  ]);
+  assert.equal(conflict.description, 'Keep this established description');
+  assert.deepEqual(conflict.experience_metadata, metadata);
+});
+
 test('different requisitions with the same company and title remain distinct', () => {
   const root = mkdtempSync(join(tmpdir(), 'career-ops-standard-req-'));
   try {

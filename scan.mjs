@@ -825,6 +825,48 @@ function mergeSourceQueryMetadata(target, incoming) {
   if (!target.sourceId && incoming?.sourceId) target.sourceId = incoming.sourceId;
 }
 
+function evidenceBlockers(record) {
+  return [record?.hardBlockers, record?.hard_blockers]
+    .flatMap((value) => Array.isArray(value) ? value : (value == null ? [] : [value]))
+    .filter((value) => value !== '' && value != null);
+}
+
+function evidenceExperienceMetadata(record) {
+  const values = [record?.experienceMetadata, record?.experience_metadata];
+  return values.find((value) => value != null && (typeof value !== 'string' || value.trim())) ?? null;
+}
+
+function evidenceDescription(record) {
+  const values = [record?.description, record?.jobDescription, record?.job_description];
+  return values.find((value) => typeof value === 'string' && value.trim()) || '';
+}
+
+function mergeDuplicateEvidence(target, incoming) {
+  mergeSourceQueryMetadata(target, incoming);
+
+  const blockers = [...new Set([...evidenceBlockers(target), ...evidenceBlockers(incoming)])];
+  const hasCamelBlockers = Object.prototype.hasOwnProperty.call(target, 'hardBlockers')
+    || Object.prototype.hasOwnProperty.call(incoming, 'hardBlockers');
+  const hasSnakeBlockers = Object.prototype.hasOwnProperty.call(target, 'hard_blockers')
+    || Object.prototype.hasOwnProperty.call(incoming, 'hard_blockers');
+  if (hasCamelBlockers || (!hasSnakeBlockers && blockers.length > 0)) target.hardBlockers = blockers;
+  if (hasSnakeBlockers) target.hard_blockers = blockers;
+
+  const existingExperience = evidenceExperienceMetadata(target);
+  const incomingExperience = evidenceExperienceMetadata(incoming);
+  if (!existingExperience && incomingExperience) {
+    target.experienceMetadata = incomingExperience;
+    if (Object.prototype.hasOwnProperty.call(target, 'experience_metadata')) {
+      target.experience_metadata = incomingExperience;
+    }
+  }
+
+  if (!evidenceDescription(target)) {
+    const incomingDescription = evidenceDescription(incoming);
+    if (incomingDescription) target.description = incomingDescription;
+  }
+}
+
 const MARKDOWN_ESCAPE_CHARS = {
   '\\': '\\\\',
   '[': '\\[',
@@ -1478,7 +1520,7 @@ async function main() {
         if (seenUrls.has(urlKey) || newOffersByCandidateId.has(scanCandidateId)) {
           const existingOffer = newOffersByUrl.get(urlKey);
           const identityOffer = newOffersByCandidateId.get(scanCandidateId);
-          if (existingOffer || identityOffer) mergeSourceQueryMetadata(existingOffer || identityOffer, job);
+          if (existingOffer || identityOffer) mergeDuplicateEvidence(existingOffer || identityOffer, job);
           totalDupes++;
           continue;
         }

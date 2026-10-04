@@ -115,6 +115,103 @@ test('HTML preferred-qualifications heading makes an outside threshold non-block
   assert.equal(result.numeric_hard_blocker, false);
 });
 
+test('non-experience durations are ignored while concise candidate requirements remain valid', () => {
+  for (const text of [
+    'We have operated for 10 years.',
+    'The company is 10 years old.',
+    'Founded 10 years ago.',
+    '10 years in business.',
+    '10 years of company history.',
+    '10 years of service.',
+    '5 years of vacation leave.',
+    '2 years of employment tenure.',
+  ]) {
+    assert.equal(classifyExperienceRequirements(text, policy), null, text);
+  }
+  for (const text of [
+    '5+ years building backend services',
+    '4 years working with distributed systems',
+    '3+ years developing production Python services',
+    '5 years of customer service experience',
+  ]) {
+    assert.ok(classifyExperienceRequirements(text, policy), text);
+  }
+});
+
+test('section context is recognized but local evidence still controls interpretation', () => {
+  const required = classifyExperienceRequirements('<h3>Requirements</h3><li>5+ years</li>', policy);
+  const preferred = classifyExperienceRequirements('<h3>Preferred qualifications</h3><li>5+ years</li>', policy);
+  const nonRequirement = classifyExperienceRequirements('<h3>Benefits</h3><li>5+ years</li>', policy);
+  const unknown = classifyExperienceRequirements('<h3>Your profile</h3><li>5+ years</li>', policy);
+  const explicitUnderMessyHeading = classifyExperienceRequirements(
+    '<h3>Benefits</h3><li>Applicants must have 5+ years of professional backend experience.</li>',
+    policy,
+  );
+
+  assert.equal(required.requirements[0].strength, 'required');
+  assert.equal(preferred.requirements[0].strength, 'preferred');
+  assert.equal(nonRequirement, null);
+  assert.equal(unknown.requirements[0].strength, 'required');
+  assert.equal(explicitUnderMessyHeading.numeric_hard_blocker, true);
+});
+
+test('all supported numeric range separators preserve the lower and upper bounds', () => {
+  for (const separator of ['-', '\u2010', '\u2011', '\u2012', '\u2013', '\u2014', '\u2212', 'to']) {
+    const text = separator === 'to' ? '2 to 5 years' : `2${separator}5 years`;
+    const requirement = classifyExperienceRequirements(text, policy)?.requirements[0];
+    assert.deepEqual([
+      requirement?.minimum_years,
+      requirement?.maximum_years,
+      requirement?.bound,
+      requirement?.interpretation,
+    ], [2, 5, 'range', 'stretch'], text);
+  }
+});
+
+test('unsupported numeric ranges do not degrade to an upper-bound requirement', () => {
+  assert.equal(classifyExperienceRequirements('2\u20155 years', policy), null);
+  const standalone = classifyExperienceRequirements('Backend expertise \u2014 5 years of professional experience', policy);
+  assert.equal(standalone.requirements[0].minimum_years, 5);
+  assert.equal(standalone.numeric_hard_blocker, true);
+});
+
+test('malformed numeric HTML entities remain safe and do not alter experience parsing', () => {
+  for (const entity of ['&#x110000;', '&#xD800;', '&#55296;', '&#999999999999999999999999;']) {
+    assert.doesNotThrow(() => classifyExperienceRequirements(`${entity} 5 years of professional experience`, policy), entity);
+    assert.equal(
+      classifyExperienceRequirements(`${entity} 5 years of professional experience`, policy).requirements[0].minimum_years,
+      5,
+      entity,
+    );
+  }
+});
+
+test('immediate preferred variants remain nonblocking without broad clause contamination', () => {
+  for (const text of [
+    'Ideally, 5 years of experience',
+    'Preferably, 4+ years',
+    'Preferred: 5+ years',
+    '5+ years, preferred',
+    '5+ years (preferred)',
+    'Bonus points for: 5+ years',
+    '<h3>Bonus points for:</h3><li>5+ years</li>',
+    "<h3>Nice to Have's:</h3><li>5+ years</li>",
+  ]) {
+    const result = classifyExperienceRequirements(text, policy);
+    assert.equal(result.interpretation, 'preferred_only', text);
+    assert.equal(result.numeric_hard_blocker, false, text);
+  }
+  for (const text of [
+    '2+ years of backend experience, ideally in fintech',
+    '2+ years of experience, preferably with SaaS',
+    'Minimum 2 years experience. GCP preferred.',
+    '2+ years experience; Kubernetes is a plus',
+  ]) {
+    const result = classifyExperienceRequirements(text, policy);
+    assert.equal(result.requirements[0].strength, 'required', text);
+  }
+});
+
 test('real-world condensed shapes retain normal/stretch roles and block required four-plus', () => {
   const productAnalyst = classifyExperienceRequirements('2+ years of hands-on working experience as a Product Data Analyst.', policy);
   const mlEngineer = classifyExperienceRequirements('2-5 years of industry experience with production ML deployment and MLOps.', policy);

@@ -277,6 +277,9 @@ export function mergeCanonicalCandidates(inputs, {
       existing.notes = mergeText(existing.notes, row.notes);
       existing.resolved_url ||= row.resolved_url;
       existing.apply_url ||= row.apply_url;
+      if (existing.experience_metadata == null && row.experience_metadata != null) {
+        existing.experience_metadata = row.experience_metadata;
+      }
       existing.description ||= row.description;
       const livenessRank = { active: 0, uncertain: 1, unverified: 2 };
       if ((livenessRank[row.liveness_status] ?? 9) < (livenessRank[existing.liveness_status] ?? 9)) {

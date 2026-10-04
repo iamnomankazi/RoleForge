@@ -70,6 +70,14 @@ function standardScanFixture(entries, runId, { experiencePolicy = false } = {}) 
       if (entry.mode === 'experience-stretch') return [{ company: entry.name, title: 'ML Engineer II', url: 'https://jobs.example.test/' + entry.name + '/stretch', location: 'Helsinki, Finland', description: '2-5 years of industry experience with production ML and MLOps ownership' }];
       if (entry.mode === 'experience-outside') return [{ company: entry.name, title: 'Software Engineer', url: 'https://jobs.example.test/' + entry.name + '/outside', location: 'Helsinki, Finland', description: '5+ years of commercial software engineering experience' }];
       if (entry.mode === 'experience-preferred') return [{ company: entry.name, title: 'Software Engineer', url: 'https://jobs.example.test/' + entry.name + '/preferred', location: 'Helsinki, Finland', description: '<h3>Preferred qualifications</h3><ul><li>5+ years of relevant experience</li></ul>' }];
+      if (entry.mode === 'duplicate-evidence-sparse-first') return [
+        { company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/duplicate', location: 'Helsinki, Finland', description: '' },
+        { company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/duplicate', location: 'Helsinki, Finland', description: '5+ years of professional backend experience' },
+      ];
+      if (entry.mode === 'duplicate-evidence-rich-first') return [
+        { company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/duplicate', location: 'Helsinki, Finland', description: '5+ years of professional backend experience' },
+        { company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/duplicate', location: 'Helsinki, Finland', description: '' },
+      ];
       if (entry.mode === 'degraded') {
         const jobs = [{ company: entry.name, title: 'Backend Engineer', url: 'https://jobs.example.test/' + entry.name + '/partial', location: 'Helsinki, Finland' }];
         Object.defineProperty(jobs, 'providerDegraded', { value: true });
@@ -197,6 +205,22 @@ test('standard scan retains configured numeric experience evidence for contextua
     assert.match(fixture.result.stdout, /Filtered by content:\s+0/);
   } finally {
     rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test('standard duplicate order preserves experience blockers, metadata, and missing descriptions', () => {
+  for (const mode of ['duplicate-evidence-sparse-first', 'duplicate-evidence-rich-first']) {
+    const fixture = standardScanFixture([{ name: mode, mode }], `duplicate-${mode}`, { experiencePolicy: true });
+    try {
+      assert.equal(fixture.result.status, 0, fixture.result.stderr);
+      const candidates = JSON.parse(readFileSync(join(fixture.runDir, 'candidates.json'), 'utf8'));
+      assert.equal(candidates.length, 1, mode);
+      assert.equal(candidates[0].experience_metadata.numeric_hard_blocker, true, mode);
+      assert.match(candidates[0].hard_blockers[0], /required experience starts at 5 years/, mode);
+      assert.match(candidates[0].description, /professional backend experience/, mode);
+    } finally {
+      rmSync(fixture.dir, { recursive: true, force: true });
+    }
   }
 });
 
