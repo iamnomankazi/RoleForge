@@ -4,7 +4,7 @@
  *
  * Usage:
  *   node generate-cover-letter.mjs --payload payload.json
- *   node generate-cover-letter.mjs --payload payload.json --out output/slug-cover.pdf
+ *   node generate-cover-letter.mjs --payload payload.json --out output/company_cover_letter.pdf
  *
  * Fills templates/cover-letter-template.html with the payload, then renders
  * it to PDF via the same Playwright pipeline used for CVs (generate-pdf.mjs).
@@ -20,15 +20,27 @@ import { parseArgs } from "util";
 
 const OUTPUT_ROOT = resolve("output");
 
-function safeOutputPath(raw) {
+export function safeOutputPath(raw) {
   const absolute = resolve(raw);
   const rel = relative(OUTPUT_ROOT, absolute);
   if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw new Error('Cover-letter output must stay inside output/');
   const filename = basename(absolute);
-  if (filename.includes('_') || /%20/i.test(filename) || !/\.pdf$/i.test(filename)) {
-    throw new Error('Cover-letter filename must be a readable PDF filename using normal spaces');
+  if (/%20/i.test(filename) || !/\.pdf$/i.test(filename)) {
+    throw new Error('Cover-letter filename must be a PDF filename and must not contain %20');
   }
   return absolute;
+}
+
+export function coverLetterFilename(company) {
+  const slug = String(company || 'company')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 100)
+    .replace(/_+$/g, '') || 'company';
+  return `${slug}_cover_letter.pdf`;
 }
 
 function _require(obj, keys, context) {
@@ -181,17 +193,10 @@ Usage:
 
   const payload = JSON.parse(readFileSync(payloadPath, "utf-8"));
 
-  if (args.out) {
-    payload.output_path = args.out;
-  }
-
-  if (!payload.output_path) {
-    const company = (payload.letter?.company || "Company").replace(/[^a-zA-Z0-9]+/g, " ").trim();
-    const role    = (payload.letter?.role_title || "Role").replace(/[^a-zA-Z0-9]+/g, " ").trim().slice(0, 60);
-    payload.output_path = join(OUTPUT_ROOT, `${company} ${role} Cover Letter.pdf`);
-  } else {
-    payload.output_path = safeOutputPath(payload.output_path);
-  }
+  const requestedOutput = args.out
+    || payload.output_path
+    || join(OUTPUT_ROOT, coverLetterFilename(payload.letter?.company));
+  payload.output_path = safeOutputPath(requestedOutput);
 
   if (!existsSync(OUTPUT_ROOT)) mkdirSync(OUTPUT_ROOT, { recursive: true });
   mkdirSync(dirname(resolve(payload.output_path)), { recursive: true });

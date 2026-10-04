@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildHtml } from './generate-cover-letter.mjs';
+import { buildHtml, coverLetterFilename } from './generate-cover-letter.mjs';
 import { hashFile, sha256Canonical } from './application-integrity.mjs';
 import {
   bindCandidateArtifacts,
@@ -151,7 +151,8 @@ export function createDocumentPlan({ manifestPath, candidateId, jdFile = null, r
   const jd = resolveJdEvidence(root, contract.sourceCandidate, jdFile);
   const cvSelection = selectApprovedCv(profile, contract.candidate, jd.text);
   const cover = buildGroundedCoverLetter(profile, contract.candidate, jd.text, cvSelection, now);
-  const stem = safeReadableStem(contract.candidate.company, contract.candidate.title);
+  const coverPdfFilename = coverLetterFilename(contract.candidate.company);
+  const coverTextFilename = coverPdfFilename.replace(/\.pdf$/i, '.txt');
   const documentsDir = join(dirname(contract.manifestPath), 'documents', contract.candidate.candidate_id);
   const plan = {
     schemaVersion: APPLICATION_DOCUMENT_PLAN_SCHEMA_VERSION,
@@ -173,8 +174,8 @@ export function createDocumentPlan({ manifestPath, candidateId, jdFile = null, r
     },
     coverLetter: {
       required: true,
-      pdfPath: join(documentsDir, `${stem} Cover Letter.pdf`),
-      textPath: join(documentsDir, `${stem} Cover Letter.txt`),
+      pdfPath: join(documentsDir, coverPdfFilename),
+      textPath: join(documentsDir, coverTextFilename),
       payload: cover.payload,
       text: cover.text,
     },
@@ -211,9 +212,12 @@ function validatePlanFresh(plan, manifestPath, root) {
   for (const path of [plan.coverLetter.pdfPath, plan.coverLetter.textPath]) {
     if (!inside(expectedDocumentsDir, resolve(path))) throw new Error('Planned application document path escapes the exact batch candidate directory');
   }
-  if (basename(plan.coverLetter.pdfPath).includes('_') || basename(plan.coverLetter.textPath).includes('_')
+  const expectedCoverPdf = coverLetterFilename(contract.candidate.company);
+  const expectedCoverText = expectedCoverPdf.replace(/\.pdf$/i, '.txt');
+  if (basename(plan.coverLetter.pdfPath) !== expectedCoverPdf
+      || basename(plan.coverLetter.textPath) !== expectedCoverText
       || /%20/i.test(`${plan.coverLetter.pdfPath}${plan.coverLetter.textPath}`)) {
-    throw new Error('Planned application documents must use readable filenames with normal spaces');
+    throw new Error(`Planned cover letter must use ${expectedCoverPdf} and its matching text filename`);
   }
   return contract;
 }

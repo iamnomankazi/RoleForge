@@ -58,7 +58,15 @@ test('Phase 4 validates exact cover-text and combined-document artifact records'
   assert.equal(validateArtifactRecord(combinedRecord, { root, expectedType: 'combined_document' }), combinedRecord);
 }));
 
-test('missing, traversal, underscore, and URL-encoded artifact paths are rejected', () => withRoot((root) => {
+test('lowercase underscore artifact filenames remain hash-bound and valid', () => withRoot((root) => {
+  const path = join(root, 'output', 'tesla_cover_letter.pdf');
+  writeFileSync(path, 'grounded cover letter');
+  const record = createArtifactRecord({ root, artifactType: 'cover_letter', filePath: path });
+  assert.equal(record.intendedFilename, 'tesla_cover_letter.pdf');
+  assert.equal(validateArtifactRecord(record, { root, expectedType: 'cover_letter' }), record);
+}));
+
+test('missing, traversal, and URL-encoded artifact paths are rejected', () => withRoot((root) => {
   assert.throws(
     () => createArtifactRecord({ root, artifactType: 'cv', filePath: 'output/Missing CV.pdf' }),
     /missing/,
@@ -68,12 +76,6 @@ test('missing, traversal, underscore, and URL-encoded artifact paths are rejecte
   assert.throws(
     () => createArtifactRecord({ root, artifactType: 'cv', filePath: '../Secret CV.pdf' }),
     /approved output directory/,
-  );
-  const underscored = join(root, 'output', 'Backend_CV.pdf');
-  writeFileSync(underscored, 'cv');
-  assert.throws(
-    () => createArtifactRecord({ root, artifactType: 'cv', filePath: underscored }),
-    /never underscores or %20/,
   );
   const encoded = join(root, 'output', 'Backend%20CV.pdf');
   writeFileSync(encoded, 'cv');

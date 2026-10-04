@@ -87,8 +87,8 @@ function isWithin(parent, child) {
 }
 
 function validateReadableFilename(filename) {
-  if (!filename || filename.includes('_') || /%20/i.test(filename)) {
-    throw new Error('Artifact filenames must be readable and use spaces, never underscores or %20');
+  if (!filename || /%20/i.test(filename)) {
+    throw new Error('Artifact filenames must be readable filesystem names and must not contain %20');
   }
   if (filename !== basename(filename)) throw new Error('Artifact intended filename must be a basename');
   return filename;

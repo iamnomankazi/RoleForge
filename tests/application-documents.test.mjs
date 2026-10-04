@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { writeImmutableScanRun } from '../scan-candidate-contract.mjs';
 import { createApplicationBatch, loadBatchState } from '../application-batch.mjs';
 import { createDocumentPlan, prepareAndBindDocuments } from '../application-documents.mjs';
-import { buildHtml } from '../generate-cover-letter.mjs';
+import { buildHtml, coverLetterFilename } from '../generate-cover-letter.mjs';
 import { sha256Canonical } from '../application-integrity.mjs';
 import { loadApplicationProfile, selectApprovedCv } from '../application-profile.mjs';
 
@@ -40,9 +40,11 @@ test('document plan binds exact JD, approved CV, grounded cover content, and rea
   try {
     const plan = createDocumentPlan({ manifestPath: f.batch.manifestPath, candidateId: f.candidateId, root: f.root });
     assert.equal(plan.cv.variant, 'data_engineering');
-    assert.match(plan.coverLetter.pdfPath, /Acme Data Engineer Cover Letter\.pdf$/);
+    assert.match(plan.coverLetter.pdfPath, /acme_cover_letter\.pdf$/);
+    assert.match(plan.coverLetter.textPath, /acme_cover_letter\.txt$/);
     assert.ok(!plan.coverLetter.pdfPath.includes('%20'));
-    assert.ok(!plan.coverLetter.pdfPath.endsWith('_Cover_Letter.pdf'));
+    assert.equal(coverLetterFilename('Tesla'), 'tesla_cover_letter.pdf');
+    assert.equal(coverLetterFilename('ACME & Sons'), 'acme_sons_cover_letter.pdf');
     assert.match(plan.coverLetter.text, /250K\+/);
     const html = buildHtml(plan.coverLetter.payload);
     assert.match(html, /font-family: "Times New Roman"/);
@@ -92,6 +94,24 @@ test('confirmed document plans still reject paths outside the exact batch candid
       confirmPlanHash: plan.planHash,
       root: f.root,
     }), /escapes the exact batch candidate directory/);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('confirmed document plans reject nonconforming cover-letter filenames inside the candidate directory', async () => {
+  const f = fixture();
+  try {
+    const plan = createDocumentPlan({ manifestPath: f.batch.manifestPath, candidateId: f.candidateId, root: f.root });
+    plan.coverLetter.pdfPath = join(dirname(plan.coverLetter.pdfPath), 'Acme Cover Letter.pdf');
+    plan.planHash = sha256Canonical(Object.fromEntries(Object.entries(plan).filter(([key]) => key !== 'planHash')));
+    await assert.rejects(() => prepareAndBindDocuments({
+      manifestPath: f.batch.manifestPath,
+      candidateId: f.candidateId,
+      plan,
+      confirmPlanHash: plan.planHash,
+      root: f.root,
+    }), /must use acme_cover_letter\.pdf/);
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }
