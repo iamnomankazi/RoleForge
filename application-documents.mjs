@@ -167,8 +167,8 @@ function reviewRequiredFor(error) {
   };
 }
 
-export function createDocumentPlan({ manifestPath, candidateId, jdFile = null, root = ROOT, now = new Date() }) {
-  const contract = loadPreparationContract(manifestPath, candidateId, { root });
+export function createDocumentPlan({ manifestPath, candidateId, jdFile = null, root = ROOT, now = new Date(), replace = false }) {
+  const contract = loadPreparationContract(manifestPath, candidateId, { root, allowPausedReplacement: replace });
   const profile = loadApplicationProfile(root);
   const jd = resolveJdEvidence(root, contract.sourceCandidate, jdFile);
   const cvSelection = selectApprovedCv(profile, contract.candidate, jd.text);
@@ -229,12 +229,12 @@ export function createDocumentPlan({ manifestPath, candidateId, jdFile = null, r
   return plan;
 }
 
-export function validateDocumentPlan(plan, manifestPath, root = ROOT) {
+export function validateDocumentPlan(plan, manifestPath, root = ROOT, { allowPausedReplacement = false } = {}) {
   if (plan.schemaVersion !== APPLICATION_DOCUMENT_PLAN_SCHEMA_VERSION) throw new Error('Unsupported application document plan schema');
   if (plan.planHash !== sha256Canonical(Object.fromEntries(Object.entries(plan).filter(([key]) => key !== 'planHash')))) {
     throw new Error('Application document plan integrity mismatch');
   }
-  const contract = loadPreparationContract(manifestPath, plan.candidateId, { root });
+  const contract = loadPreparationContract(manifestPath, plan.candidateId, { root, allowPausedReplacement });
   if (contract.manifest.batchId !== plan.batchId || contract.manifest.sourceRunId !== plan.sourceRunId
       || contract.candidate.sourceCandidateSha256 !== plan.sourceCandidateSha256) {
     throw new Error('Application document plan no longer matches the exact batch candidate');
@@ -314,7 +314,7 @@ export async function prepareAndBindDocuments({
 }) {
   if (candidateId !== plan.candidateId) throw new Error('Document plan candidate does not match the exact requested candidate ID');
   if (confirmPlanHash !== plan.planHash) throw new Error(`Explicit document-plan confirmation must equal ${plan.planHash}`);
-  let validation = validateDocumentPlan(plan, manifestPath, root);
+  let validation = validateDocumentPlan(plan, manifestPath, root, { allowPausedReplacement: replace });
   if (plan.documentState !== 'ready') {
     throw new Error(`${plan.reviewRequired.code}: ${plan.reviewRequired.reason}`);
   }
@@ -327,14 +327,14 @@ export async function prepareAndBindDocuments({
     throw new Error('Planned application documents already exist; use --replace explicitly');
   }
   const { renderHtmlToPdf } = await import('./generate-pdf.mjs');
-  validation = validateDocumentPlan(plan, manifestPath, root);
+  validation = validateDocumentPlan(plan, manifestPath, root, { allowPausedReplacement: replace });
   const html = buildHtml(validation.expectedCover.payload);
   writeFileSync(plan.coverLetter.textPath, `${validation.expectedCover.text}\n`, { flag: replace ? 'w' : 'wx' });
   const rendered = await renderHtmlToPdf(html, plan.coverLetter.pdfPath, {
     format: 'a4', baseDir: root, recordManifest: false,
   });
   if (rendered.pageCount !== 1) throw new Error(`Cover letter must render to exactly one page; rendered ${rendered.pageCount}`);
-  validation = validateDocumentPlan(plan, manifestPath, root);
+  validation = validateDocumentPlan(plan, manifestPath, root, { allowPausedReplacement: replace });
   const records = bindCandidateArtifacts(manifestPath, candidateId, [
     { artifactType: 'cv', filePath: plan.cv.path, sourceCvVariant: plan.cv.variant },
     { artifactType: 'cover_letter', filePath: plan.coverLetter.pdfPath, narrativeProvenance: validation.expectedCover.provenance },
@@ -404,7 +404,7 @@ function parseArgs(argv) {
 function usage() {
   return [
     'Usage:',
-    '  node application-documents.mjs plan --manifest <manifest.json> --candidate-id <id> [--jd-file <exact-local-file>]',
+    '  node application-documents.mjs plan --manifest <manifest.json> --candidate-id <id> [--jd-file <exact-local-file>] [--replace]',
     '  node application-documents.mjs prepare --manifest <manifest.json> --candidate-id <id> --plan <plan.json> --confirm-plan <sha256> [--replace]',
     '  node application-documents.mjs combine --manifest <manifest.json> --candidate-id <id> --confirm-form-evidence <sha256> [--replace]',
   ].join('\n');
@@ -419,10 +419,11 @@ async function main() {
       manifestPath: options.manifest,
       candidateId: options['candidate-id'],
       jdFile: options['jd-file'] || null,
+      replace: options.replace,
     });
     const planPath = join(dirname(resolve(options.manifest)), 'documents', plan.candidateId, 'plan.json');
     mkdirSync(dirname(planPath), { recursive: true });
-    writeFileSync(planPath, `${JSON.stringify(plan, null, 2)}\n`, { flag: 'wx' });
+    writeFileSync(planPath, `${JSON.stringify(plan, null, 2)}\n`, { flag: options.replace ? 'w' : 'wx' });
     console.log(JSON.stringify({
       plan: planPath,
       planHash: plan.planHash,

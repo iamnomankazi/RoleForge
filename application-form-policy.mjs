@@ -12,6 +12,42 @@ export function cleanFormText(value) {
   return String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
 }
 
+export function normalizeNarrativeText(value) {
+  return String(value ?? '')
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/[\t ]+/g, ' ').trim())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+export function narrativeReadyEvidenceText(value) {
+  const lines = normalizeNarrativeText(value).replace(/\s+-\s+/g, '\n- ').split('\n');
+  const prose = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const sourceLine = lines[index];
+    if (!sourceLine) continue;
+    if (/^#{1,6}\s+/.test(sourceLine)) continue;
+    const bullet = /^[-*+]\s+(.+)$/.exec(sourceLine);
+    let line = cleanFormText(bullet ? bullet[1] : sourceLine);
+    if (!line) continue;
+    if (!bullet && lines.slice(index + 1).some((item) => /^[-*+]\s+/.test(item)) && !/[.!?]$/.test(line)) continue;
+    if (/\*\*|__|`|\[[^\]]+\]\([^)]+\)/.test(line)) {
+      throw new Error('Factual evidence contains Markdown structure that is not narrative-ready');
+    }
+    if (/^(?:languages?|data and databases?|backend and apis?|machine learning|visualization and bi|tools and platforms?|frontend)\s*:/i.test(line)) {
+      throw new Error('Factual evidence is a skills-section dump, not atomic narrative evidence');
+    }
+    if (bullet && /^(?:built|cleaned|validated|designed|added|created|implemented|developed|used|analy[sz]ed|deployed|tested|integrated|automated)\b/i.test(line)) {
+      line = `I ${line[0].toLowerCase()}${line.slice(1)}`;
+    }
+    prose.push(line);
+  }
+  if (!prose.length) throw new Error('Factual evidence has no narrative-ready prose');
+  return prose.join(' ');
+}
+
 export function normalizeFormQuestion(value) {
   return cleanFormText(value)
     .normalize('NFKD')
@@ -47,6 +83,12 @@ function isNarrativeControl(field) {
 
 export function classifyFieldSemantics(field = {}) {
   const text = fieldText(field);
+  const type = cleanFormText(field.type).toLowerCase();
+  const selectorShape = field.tag === 'select'
+    || field.role === 'combobox'
+    || field.autocomplete === 'list'
+    || (field.options || []).length > 0;
+  const optionText = (field.options || []).flatMap((option) => [option?.label, option?.value]).join(' ');
   if (field.type === 'file') {
     if (/cover|motivation|application letter|supporting statement/.test(text)) {
       return { category: 'file_upload', semantic: 'cover_letter_upload' };
@@ -99,7 +141,15 @@ export function classifyFieldSemantics(field = {}) {
   if (/last ?name|family ?name|surname/.test(text)) return { category: 'identity_contact', semantic: 'last_name' };
   if (/full ?name|your name|candidate name/.test(text)) return { category: 'identity_contact', semantic: 'full_name' };
   if (/e ?mail/.test(text)) return { category: 'identity_contact', semantic: 'email' };
-  if (/phone country|country code/.test(text)) return { category: 'identity_contact', semantic: 'phone_country' };
+  if (type === 'tel') return { category: 'identity_contact', semantic: 'phone' };
+  if (selectorShape && /dial(?:ing)? code|calling code|phone prefix|country prefix/.test(text)) {
+    return { category: 'identity_contact', semantic: 'phone_dial_code' };
+  }
+  if (selectorShape && /phone country|country code/.test(text)) {
+    return /\+\s*\d{1,4}/.test(optionText)
+      ? { category: 'identity_contact', semantic: 'phone_dial_code' }
+      : { category: 'identity_contact', semantic: 'phone_country' };
+  }
   if (/phone|mobile|telephone/.test(text)) return { category: 'identity_contact', semantic: 'phone' };
   if (/linkedin/.test(text)) return { category: 'identity_contact', semantic: 'linkedin' };
   if (/github/.test(text)) return { category: 'identity_contact', semantic: 'github' };
@@ -204,7 +254,7 @@ function roleFitOpening(candidate = {}) {
 
 function composeRoleFitNarrative(candidate, factualSentences, templateId = 'role-fit-v1') {
   const opening = templateId === 'role-fit-evidence-only-v1' ? null : roleFitOpening(candidate);
-  return [opening, ...factualSentences.map(cleanFormText)].filter(Boolean).join(' ');
+  return [opening, ...factualSentences.map(narrativeReadyEvidenceText)].filter(Boolean).join(' ');
 }
 
 export function validateGroundedNarrative(answer, profile, factualEvidence = [], { candidate = {}, templateId = 'role-fit-v1' } = {}) {
@@ -245,23 +295,31 @@ export function generateCustomNarrativeAnswer(profile, {
     };
   }
   const requested = requestedNarrativeTopics(question, `${candidate.title || ''}\n${jdText}`);
-  const selected = resolveConfiguredNarrativeEvidence(profile, requested);
-  const sentences = [roleFitOpening(candidate), ...selected.map((entry) => entry.text)].filter(Boolean);
+  const selected = resolveConfiguredNarrativeEvidence(profile, requested).flatMap((entry) => {
+    try {
+      return [{ ...entry, narrativeText: narrativeReadyEvidenceText(entry.text) }];
+    } catch {
+      return [];
+    }
+  });
+  if (!selected.length) throw new Error('Configured factual evidence is not narrative-ready');
+  const sentences = [roleFitOpening(candidate), ...selected.map((entry) => entry.narrativeText)].filter(Boolean);
   let templateId = 'role-fit-v1';
   let answer = fitSentences(sentences, Number(maxLength) || null);
-  let included = selected.filter((entry) => answer.includes(cleanFormText(entry.text)));
+  let included = selected.filter((entry) => answer.includes(entry.narrativeText));
   if (!included.length && Number(maxLength) > 0) {
     templateId = 'role-fit-evidence-only-v1';
-    answer = fitSentences(selected.map((entry) => entry.text), Number(maxLength));
-    included = selected.filter((entry) => answer.includes(cleanFormText(entry.text)));
+    answer = fitSentences(selected.map((entry) => entry.narrativeText), Number(maxLength));
+    included = selected.filter((entry) => answer.includes(entry.narrativeText));
   }
   if (!included.length) throw new Error('Generated narrative could not include a complete factual evidence sentence');
-  const validated = validateGroundedNarrative(answer, profile, included, { candidate, templateId });
+  const includedEvidence = included.map(({ narrativeText: _narrativeText, ...entry }) => entry);
+  const validated = validateGroundedNarrative(answer, profile, includedEvidence, { candidate, templateId });
   if (Number(maxLength) > 0 && validated.length > Number(maxLength)) {
     throw new Error(`Generated narrative exceeds field limit ${maxLength}`);
   }
   const record = createNarrativeProvenanceRecord({
-    candidateId, normalizedQuestion, answer: validated, wording: 'generated', templateId, factualEvidence: included,
+    candidateId, normalizedQuestion, answer: validated, wording: 'generated', templateId, factualEvidence: includedEvidence,
   });
   return { ...record, answer: validated, reused: false };
 }
@@ -279,7 +337,44 @@ function formRules(profile) {
     currentLocation: { city: city || null, country: country || null, combined: combined || null },
     source: rules.source?.value || 'LinkedIn',
     homeCountry: cleanFormText(rules.work_authorization?.home_country || country) || null,
+    phoneDialCode: cleanFormText(rules.phone?.dial_code) || null,
   };
+}
+
+function selectorShape(field = {}) {
+  return field.tag === 'select'
+    || field.role === 'combobox'
+    || field.autocomplete === 'list'
+    || (field.options || []).length > 0;
+}
+
+function pairedPhoneSelector(field, fields = []) {
+  const group = normalizeFormQuestion(field.groupLabel);
+  return fields.find((candidate) => {
+    const semantics = classifyFieldSemantics(candidate);
+    if (!['phone_country', 'phone_dial_code'].includes(semantics.semantic) || !selectorShape(candidate)) return false;
+    const candidateGroup = normalizeFormQuestion(candidate.groupLabel);
+    return Boolean(group && candidateGroup && group === candidateGroup)
+      || (fields.filter((item) => classifyFieldSemantics(item).semantic === 'phone').length === 1
+        && fields.filter((item) => ['phone_country', 'phone_dial_code'].includes(classifyFieldSemantics(item).semantic)).length === 1);
+  }) || null;
+}
+
+export function validatePlannedValueForControl(field, semantics, value) {
+  const normalized = semantics.category === 'custom_motivation_experience_narrative'
+    ? normalizeNarrativeText(value)
+    : cleanFormText(value);
+  if (semantics.semantic === 'phone' && cleanFormText(field.type).toLowerCase() === 'tel'
+      && /[A-Za-z]/.test(normalized)) {
+    throw new Error('Telephone-number inputs cannot receive alphabetic country names');
+  }
+  if (['phone_country', 'phone_dial_code'].includes(semantics.semantic) && !selectorShape(field)) {
+    throw new Error('Phone country/dial-code values require an explicit selector control');
+  }
+  if (semantics.semantic === 'phone_dial_code' && !/^\+?\d{1,4}$/.test(normalized.replace(/\s+/g, ''))) {
+    throw new Error('Phone dial-code controls require an explicit numeric dial code');
+  }
+  return normalized;
 }
 
 function hasConfiguredCountryCapability(context, homeCountry) {
@@ -341,6 +436,7 @@ export function canonicalFieldValue(profile, semantics, {
     email: candidate.email || null,
     phone: candidate.phone || null,
     phone_country: rules.homeCountry,
+    phone_dial_code: rules.phoneDialCode || cleanFormText(candidate.phone).match(/^\+\d{1,4}/)?.[0] || null,
     linkedin: candidate.linkedin || null,
     github: candidate.github || null,
   };
@@ -350,7 +446,12 @@ export function canonicalFieldValue(profile, semantics, {
       const distinctGithub = (snapshot.fields || []).some((item) => classifyFieldSemantics(item).semantic === 'github');
       return field.required && !candidate.portfolio_url && !distinctGithub ? candidate.github || null : null;
     }
-    return identity[semantic] ?? null;
+    let value = identity[semantic] ?? null;
+    if (semantic === 'phone' && pairedPhoneSelector(field, snapshot.fields)) {
+      const dialCode = identity.phone_dial_code;
+      if (dialCode) value = cleanFormText(value).replace(new RegExp(`^${dialCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s-]*`), '');
+    }
+    return value;
   }
   if (category === 'current_location') {
     if (semantic === 'city') return rules.currentLocation.city;

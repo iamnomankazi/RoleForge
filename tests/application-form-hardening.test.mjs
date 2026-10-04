@@ -13,10 +13,11 @@ import {
   classifyFieldSemantics,
   containsUnresolvedPlaceholder,
   generateCustomNarrativeAnswer,
+  narrativeReadyEvidenceText,
   resolveAuthorizationAnswer,
   validateGroundedNarrative,
 } from '../application-form-policy.mjs';
-import { resolveFactualEvidence } from '../application-evidence.mjs';
+import { createNarrativeProvenanceRecord, resolveFactualEvidence } from '../application-evidence.mjs';
 import { attachFactualSources } from './fixtures/application-evidence-profile.mjs';
 const syntheticEvidence = [
   {
@@ -231,6 +232,104 @@ test('Career-Ops field identity outranks a later duplicate site name', async () 
   assert.equal(await page.locator('#email').inputValue(), profile.candidate.email);
   assert.equal(await page.locator('#decoy').inputValue(), '');
   assert.equal(result.evidence.finalAction.activated, false);
+  await page.close();
+});
+
+test('multiline cover-letter text preserves paragraph breaks in the textarea', async () => {
+  const page = await browser.newPage();
+  const answer = 'Paragraph one.\n\nParagraph two.';
+  const provenance = createNarrativeProvenanceRecord({
+    candidateId: candidate.candidate_id,
+    normalizedQuestion: 'cover letter document',
+    answer,
+    wording: 'generated',
+    templateId: 'cover-letter-v1',
+    factualEvidence: [resolveFactualEvidence(profile, { sourceType: 'cv', locator: 'lines:1' })],
+  });
+  await page.setContent(`
+    <form><label for="cover">Cover letter</label><textarea id="cover"></textarea>
+      <button type="button" onclick="window.finalClicked=true">Apply</button></form>
+  `);
+  const result = await prepareOperationalApplicationForm(page, profile, {
+    coverLetterTextContent: answer,
+    coverLetterTextProvenance: provenance,
+  }, { context: formContext });
+  assert.equal(await page.locator('#cover').inputValue(), answer);
+  assert.equal(result.evidence.finalAction.activated, false);
+  assert.equal(await page.evaluate(() => Boolean(window.finalClicked)), false);
+  await page.close();
+});
+
+test('Markdown CV structure is rejected instead of emerging as literal cover-letter prose', () => {
+  const markdownProfile = attachFactualSources({
+    ...profile,
+    formRules: {
+      ...profile.formRules,
+      narrative_evidence: [{
+        id: 'mixed-markdown',
+        topics: ['software_backend', 'motivation_fit'],
+        provenance: [{ sourceType: 'cv', locator: 'lines:1-3' }],
+      }],
+    },
+    cvText: '### Project\n- Built a verified backend API.\n- **Languages:** Python, SQL',
+  });
+  assert.throws(() => generateCustomNarrativeAnswer(markdownProfile, {
+    question: 'Why are you a good fit for this software backend role?',
+    candidate,
+    jdText: 'Python backend APIs',
+  }), /not narrative-ready/);
+  assert.equal(narrativeReadyEvidenceText('### Project\n- Built a verified backend API.'), 'I built a verified backend API.');
+});
+
+test('composite phone widget keeps dial selector and telephone value type-safe', async () => {
+  const page = await browser.newPage();
+  const phoneProfile = { ...profile, candidate: { ...profile.candidate, phone: '+358 40 123 4567' } };
+  await page.setContent(`
+    <form><fieldset><legend>Phone country code</legend>
+      <label for="dial">Country / dial code</label>
+      <select id="dial"><option value="">Select</option><option value="+358">+358</option></select>
+      <label for="number">Phone country code Phone number</label>
+      <input id="number" name="phone" type="tel">
+    </fieldset><button type="button">Apply</button></form>
+  `);
+  const result = await prepareOperationalApplicationForm(page, phoneProfile, {}, { context: formContext });
+  assert.equal(await page.locator('#dial').inputValue(), '+358');
+  assert.equal(await page.locator('#number').inputValue(), '40 123 4567');
+  const controls = result.evidence.operationalArtifacts.phoneControls;
+  assert.equal(controls.find((row) => row.id === 'dial').semantic, 'phone_dial_code');
+  assert.equal(controls.find((row) => row.id === 'number').semantic, 'phone');
+  assert.equal(controls.find((row) => row.id === 'number').value, '40 123 4567');
+  assert.notEqual(await page.locator('#number').inputValue(), 'Finland');
+  await page.close();
+});
+
+test('telephone verification accepts site-normalized spacing without changing the phone digits', async () => {
+  const page = await browser.newPage();
+  const phoneProfile = { ...profile, candidate: { ...profile.candidate, phone: '+358 40 123 4567' } };
+  await page.setContent(`<form><label for="phone">Phone</label><input id="phone" type="tel"><button type="button">Apply</button></form>`);
+  await page.locator('#phone').evaluate((input) => input.addEventListener('blur', () => { input.value = input.value.replace(/\s+/g, ''); }));
+  const result = await prepareOperationalApplicationForm(page, phoneProfile, {}, { context: formContext });
+  assert.equal(await page.locator('#phone').inputValue(), '+358401234567');
+  assert.equal(result.evidence.unresolvedFields.some((row) => row.semantic === 'phone'), false);
+  assert.equal(result.evidence.operationalArtifacts.phoneControls[0].value, '+358401234567');
+  await page.close();
+});
+
+test('terminal type=button Apply is untouched during automation and normal user submission works after handoff', async () => {
+  const page = await browser.newPage();
+  await page.setContent(`
+    <form id="application"><label for="email">Email</label><input id="email" name="email">
+      <button id="final" type="button" onclick="window.finalClicked=true">Apply</button></form>
+    <script>application.addEventListener('submit', event => { event.preventDefault(); window.userSubmits=(window.userSubmits||0)+1; });</script>
+  `);
+  const result = await prepareOperationalApplicationForm(page, profile, {}, { context: formContext });
+  assert.equal(result.evidence.finalAction.detected, true);
+  assert.equal(result.evidence.finalAction.activated, false);
+  assert.equal(await page.evaluate(() => Boolean(window.finalClicked)), false);
+  assert.equal(await page.evaluate(() => Boolean(window.__careerOpsOperationalGuard)), false);
+  assert.equal(result.evidence.operationalArtifacts.submissionGuardActiveAtHandoff, false);
+  await page.locator('#application').evaluate((form) => form.requestSubmit());
+  assert.equal(await page.evaluate(() => window.userSubmits || 0), 1);
   await page.close();
 });
 
@@ -506,6 +605,29 @@ test('a second controlled recovery supports an existing reviewed batch and then 
   });
   assert.match(exhausted.gate.reason, /budget is exhausted/);
   assert.equal(exhausted.evidence.finalAction.activated, false);
+  await page.close();
+});
+
+test('a newly bound document revision gets one fresh controlled preparation pass', async () => {
+  const page = await browser.newPage();
+  await page.setContent(`
+    <form><label for="email">Email</label><input id="email" required><button type="submit">Submit application</button></form>
+  `);
+  const prior = {
+    attemptLedger: [],
+    answerRecords: [],
+    unresolvedFields: [],
+    uploadedArtifacts: [{ semantic: 'cover_letter_upload', sha256: 'sha256:old-cover' }],
+    passBudget: { controlledResumeUsed: 2 },
+  };
+  const result = await prepareOperationalApplicationForm(page, profile, {
+    coverLetter: { sha256: 'sha256:new-cover' },
+  }, {
+    context: formContext, previousEvidence: prior, resumeMode: 'process_recovery',
+  });
+  assert.equal(await page.locator('#email').inputValue(), profile.candidate.email);
+  assert.equal(result.evidence.passBudget.controlledResumeUsed, 1);
+  assert.equal(result.evidence.passBudget.artifactRevisionReset, true);
   await page.close();
 });
 

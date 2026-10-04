@@ -126,6 +126,111 @@ test('bounded observation detects a delayed same-page application form', async (
   });
 });
 
+test('privacy-preserving cookie clearance resnapshots before Apply opens the application', async () => {
+  const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
+  await withFixture({
+    [listingUrl]: `<style>
+        #cmp { position: fixed; inset: 0; z-index: 100; background: white; }
+      </style>
+      <h1>Acme Data Engineer</h1>
+      <button id="apply" type="button" onclick="document.body.insertAdjacentHTML('beforeend', '<form><label>First name <input name=first_name></label><label>Email <input type=email name=email></label><label>Resume <input type=file name=resume></label><button type=submit>Submit application</button></form>')">Apply</button>
+      <div id="cmp" class="cookie-consent-banner"><p>Cookie preferences</p><button type="button" onclick="cmp.remove()">Only the necessary cookies</button></div>`,
+  }, async ({ context, page }) => {
+    await page.goto(listingUrl);
+    const result = await followSafeApplicationEntryFlow(
+      context, page, await collectPageSnapshot(page), CANDIDATE, { listingUrl },
+    );
+    assert.equal(result.form.actualForm, true);
+    assert.equal(result.hops.length, 1);
+    assert.deepEqual(result.siteChromeActions.map((row) => row.label), ['only the necessary cookies']);
+    assert.equal(await page.locator('#cmp').count(), 0);
+  });
+});
+
+test('asynchronously rendered privacy-minimal preferences are saved before Apply', async () => {
+  const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
+  await withFixture({
+    [listingUrl]: `<style>#cmp { position:fixed; inset:0; z-index:100; background:white; }</style>
+      <h1>Acme Data Engineer</h1>
+      <button id="delayedApply" type="button" onclick="document.body.insertAdjacentHTML('beforeend', '<form><label>First name <input name=first_name></label><label>Email <input name=email></label><label>Resume <input type=file name=resume></label><button type=submit>Submit</button></form>')">Apply</button>
+      <div id="cmp" class="privacy-prompt">
+        <button id="preferencesOpener" type="button" onclick="setTimeout(() => { preferencesOpener.hidden=true; preferences.hidden=false; }, 800)">Einstellungen oder ablehnen</button>
+        <section id="preferences" class="consent-preferences" hidden><input type="checkbox" name="analytics">
+          <button type="button" onclick="delayedApply.hidden=true; cmp.remove(); setTimeout(() => delayedApply.hidden=false, 800)">Speichern und Beenden</button>
+        </section>
+      </div>`,
+  }, async ({ context, page }) => {
+    await page.goto(listingUrl);
+    const result = await followSafeApplicationEntryFlow(
+      context, page, await collectPageSnapshot(page), CANDIDATE, { listingUrl },
+    );
+    assert.equal(result.form.actualForm, true);
+    assert.deepEqual(result.siteChromeActions.map((row) => row.label), [
+      'einstellungen oder ablehnen', 'speichern und beenden',
+    ]);
+  });
+});
+
+test('duplicate responsive Apply selection prefers the independently actionable equivalent control', async () => {
+  const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
+  await withFixture({
+    [listingUrl]: `<style>
+        #cover { position:absolute; left:0; top:50px; width:220px; height:80px; z-index:5; background:#fff; }
+        #first { position:absolute; left:20px; top:70px; }
+        #second { position:absolute; left:300px; top:70px; }
+      </style>
+      <h1>Acme Data Engineer</h1>
+      <button id="first" type="button" onclick="document.body.dataset.clicked='first'">Apply</button>
+      <div id="cover">Unrelated overlay</div>
+      <button id="second" type="button" onclick="document.body.dataset.clicked='second'; document.body.insertAdjacentHTML('beforeend', '<form><label>First name <input name=first_name></label><label>Email <input type=email name=email></label><label>Resume <input type=file name=resume></label><button type=submit>Submit application</button></form>')">Apply</button>`,
+  }, async ({ context, page }) => {
+    await page.goto(listingUrl);
+    const result = await followSafeApplicationEntryFlow(
+      context, page, await collectPageSnapshot(page), CANDIDATE, { listingUrl },
+    );
+    assert.equal(result.form.actualForm, true);
+    assert.equal(await page.evaluate(() => document.body.dataset.clicked), 'second');
+    assert.equal(result.hops[0].duplicateCandidateCount, 2);
+  });
+});
+
+test('same-page application dialog is a meaningful bounded application-surface transition', async () => {
+  const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
+  await withFixture({
+    [listingUrl]: `<h1>Acme Data Engineer</h1>
+      <button type="button" onclick="document.body.insertAdjacentHTML('beforeend', '<div role=dialog aria-modal=true><label>Your name <input name=full_name></label><label>Email <input name=email></label><label>Send me email updates <input type=checkbox></label><button type=button>Apply</button></div>')">Apply now</button>`,
+  }, async ({ context, page }) => {
+    await page.goto(listingUrl);
+    const result = await followSafeApplicationEntryFlow(
+      context, page, await collectPageSnapshot(page), CANDIDATE, { listingUrl },
+    );
+    assert.equal(result.page.url(), listingUrl);
+    assert.equal(result.form.actualForm, true);
+    assert.equal(result.snapshot.applicationSurface.visibleDialogCount, 1);
+  });
+});
+
+test('delayed StepStone authentication page is observed as a genuine post-entry login boundary', async () => {
+  const listingUrl = 'https://www.stepstone.de/stellenangebote--data-engineer--123-inline.html';
+  const authUrl = 'https://www.stepstone.de/job/123/application/authentication?locale=de_DE';
+  const candidate = { company: 'Acme', title: 'Data Engineer' };
+  await withFixture({
+    [listingUrl]: `<h1>Acme Data Engineer</h1><button id="apply" type="button" onclick="window.open('${authUrl}')">Ich bin interessiert</button>`,
+    [authUrl]: `<script>document.documentElement.innerHTML='<head><title></title></head><body></body>'; setTimeout(() => { document.title='Einloggen'; document.body.innerHTML='<h1>Acme Data Engineer</h1><p>Weiter mit E-Mail-Adresse oder Weiter als Gast</p><input type=email aria-label="E-Mail-Adresse eingeben"><button type=submit>Weiter mit E-Mail-Adresse</button><button type=button>Weiter als Gast</button>'; }, 900)</script>`,
+  }, async ({ context, page }) => {
+    await page.goto(listingUrl);
+    const result = await followSafeApplicationEntryFlow(
+      context, page, await collectPageSnapshot(page), candidate,
+      { listingUrl, observationWindowMs: 3_000 },
+    );
+    assert.equal(result.form.loginRequired, true);
+    assert.equal(result.compatible, true);
+    assert.equal(result.hops.length, 1);
+    assert.equal(result.page.url(), authUrl);
+    assert.match(result.reason, /Login gate reached/);
+  });
+});
+
 test('StepStone harmonised entry label is accepted only as a non-submit listing control', () => {
   const listingUrl = 'https://www.stepstone.de/stellenangebote--role--14207605-inline.html';
   const control = { tag: 'button', type: 'button', text: 'Ich bin interessiert', visible: true };
@@ -247,8 +352,8 @@ test('verified safe entry interaction failure is bounded to two attempts and req
   );
   assert.equal(fixture.getClicks(), 2);
   assert.equal(result.manualReviewRequired, true);
-  assert.match(result.reason, /bounded safe activation ladder/);
-  assert.deepEqual(result.diagnostics.attempts.map((row) => row.method), ['playwright_click', 'exact_dom_click']);
+  assert.match(result.reason, /equivalent application-entry controls/);
+  assert.deepEqual(result.diagnostics.candidates[0].attempts.map((row) => row.method), ['playwright_click', 'exact_dom_click']);
   assert.equal(result.form.actualForm, false);
 });
 
@@ -310,6 +415,26 @@ test('final form Apply and every submit-type button remain unreachable as entry 
       actualFormReached: false,
       candidateFieldSignals: 0,
     }).safe, false);
+  });
+});
+
+test('JavaScript-driven type=button Apply inside an actual application form is terminal and untouched', async () => {
+  const formUrl = 'https://careers.acme.test/jobs/data-engineer/application';
+  await withFixture({
+    [formUrl]: `<h1>Acme Data Engineer</h1><form>
+      <label>First name <input name="first_name"></label>
+      <label>Email <input type="email" name="email"></label>
+      <label>Resume <input type="file" name="resume"></label>
+      <button id="terminal" type="button" onclick="window.terminalActivated=true">Apply</button>
+    </form>`,
+  }, async ({ context, page }) => {
+    await page.goto(formUrl);
+    const result = await followSafeApplicationEntryFlow(
+      context, page, await collectPageSnapshot(page), CANDIDATE, { listingUrl: formUrl },
+    );
+    assert.equal(result.form.actualForm, true);
+    assert.equal(result.hops.length, 0);
+    assert.equal(await page.evaluate(() => Boolean(window.terminalActivated)), false);
   });
 });
 

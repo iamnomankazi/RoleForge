@@ -63,7 +63,7 @@ const TRANSITIONS = Object.freeze({
   review_required: new Set(['review_required', 'actual_form_reached', 'form_inspected', 'blocked', 'closed', 'abandoned']),
   login_required: new Set(['listing_verified', 'actual_form_reached', 'review_required', 'blocked', 'closed', 'abandoned']),
   form_prepared: new Set(['closed', 'abandoned']),
-  blocked: new Set(['actual_form_reached', 'review_required', 'closed', 'abandoned']),
+  blocked: new Set(['actual_form_reached', 'review_required', 'login_required', 'closed', 'abandoned']),
   closed: new Set(),
   abandoned: new Set(),
 });
@@ -1252,13 +1252,18 @@ export function loadExecutionContract(manifestPath, selector, { root = ROOT, req
   };
 }
 
-export function loadPreparationContract(manifestPath, candidateId, { root = ROOT } = {}) {
+export function loadPreparationContract(manifestPath, candidateId, {
+  root = ROOT,
+  allowPausedReplacement = false,
+} = {}) {
   const exactId = requireCandidateId(candidateId);
   const loaded = loadBatchState(manifestPath, { root });
   const source = sourceMembership(loaded.manifest, root);
   const candidate = findManifestCandidate(loaded.manifest, exactId);
   const candidateState = loaded.state.candidates.find((row) => row.candidate_id === exactId);
-  if (!candidateState || candidateState.state !== 'not_opened') {
+  const replacementStateAllowed = allowPausedReplacement
+    && ['actual_form_reached', 'review_required', 'blocked'].includes(candidateState?.state);
+  if (!candidateState || (candidateState.state !== 'not_opened' && !replacementStateAllowed)) {
     throw new Error(`Document preparation requires not_opened state for ${exactId}`);
   }
   const activeOther = loaded.state.candidates.find((row) => row.candidate_id !== exactId && !['not_opened', 'closed', 'abandoned'].includes(row.state));
@@ -1294,7 +1299,7 @@ export function bindCandidateArtifacts(manifestPath, candidateId, bindings, {
     root, now, candidateId: exactId, operation: 'bind_artifacts',
   });
   try {
-    const loaded = loadPreparationContract(manifestPath, exactId, { root });
+    const loaded = loadPreparationContract(manifestPath, exactId, { root, allowPausedReplacement: replace });
     const records = bindings.map((binding) => ({
       key: artifactStateKey(binding.artifactType),
       artifactType: binding.artifactType,

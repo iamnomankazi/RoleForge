@@ -11,9 +11,11 @@ import {
   containsUnresolvedPlaceholder,
   generateCustomNarrativeAnswer,
   hashFormValue,
+  normalizeNarrativeText,
   normalizeFormQuestion,
   preferredDeclineOption,
   stableFieldIdentity,
+  validatePlannedValueForControl,
 } from './application-form-policy.mjs';
 import { validateNarrativeProvenanceRecord } from './application-evidence.mjs';
 
@@ -139,11 +141,14 @@ function isCommitted(field, action) {
       || normalizeFormQuestion(field.selectedLabel) === normalizeFormQuestion(option.label)
     ));
   }
-  const current = cleanFormText(field.value);
+  const normalizeValue = action.category === 'custom_motivation_experience_narrative'
+    ? normalizeNarrativeText
+    : cleanFormText;
+  const current = normalizeValue(field.value);
   if (action.action === 'autocomplete' && action.category === 'current_location') {
     return groundedLocationMatches(current, action);
   }
-  return current === cleanFormText(action.value);
+  return current === normalizeValue(action.value);
 }
 
 function selectArtifact(artifacts, semantic) {
@@ -382,7 +387,10 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       ));
       continue;
     }
-    let value = cleanFormText(resolved.value);
+    const normalizeValue = semantics.category === 'custom_motivation_experience_narrative'
+      ? normalizeNarrativeText
+      : cleanFormText;
+    let value = normalizeValue(resolved.value);
     if (!value) {
       if (field.required || ['work_authorization', 'sponsorship_employer_support'].includes(semantics.category)) {
         unresolvedFields.push(manualField(
@@ -396,8 +404,11 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       }
       continue;
     }
-    if (semantics.semantic === 'phone' && visibleFields.some((item) => classifyFieldSemantics(item).semantic === 'phone_country')) {
-      value = value.replace(/^\+?358[\s-]*/, '');
+    try {
+      value = validatePlannedValueForControl(field, semantics, value);
+    } catch (error) {
+      unresolvedFields.push(manualField(field, semantics, cleanFormText(error.message)));
+      continue;
     }
     if (['work_authorization', 'sponsorship'].includes(semantics.semantic) && !['Yes', 'No'].includes(value)) {
       unresolvedFields.push(manualField(field, semantics, 'Authorization and sponsorship controls require an exact Yes or No answer.'));
@@ -447,8 +458,7 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
 
 async function installSubmissionGuard(page) {
   await page.evaluate(() => {
-    if (globalThis.__careerOpsOperationalGuardInstalled) return;
-    globalThis.__careerOpsOperationalGuardInstalled = true;
+    if (globalThis.__careerOpsOperationalGuard) return;
     globalThis.__careerOpsSubmitAttempts = Number(globalThis.__careerOpsSubmitAttempts || 0);
     const block = (event) => {
       globalThis.__careerOpsSubmitAttempts += 1;
@@ -456,9 +466,23 @@ async function installSubmissionGuard(page) {
       event?.stopImmediatePropagation?.();
       throw new Error('Career-Ops blocked a final form submission attempt');
     };
+    const nativeSubmit = HTMLFormElement.prototype.submit;
+    const nativeRequestSubmit = HTMLFormElement.prototype.requestSubmit;
+    globalThis.__careerOpsOperationalGuard = { block, nativeSubmit, nativeRequestSubmit };
     document.addEventListener('submit', block, true);
     HTMLFormElement.prototype.submit = function guardedSubmit() { block(); };
     HTMLFormElement.prototype.requestSubmit = function guardedRequestSubmit() { block(); };
+  });
+}
+
+export async function removeOperationalSubmissionGuard(page) {
+  await page.evaluate(() => {
+    const guard = globalThis.__careerOpsOperationalGuard;
+    if (!guard) return;
+    document.removeEventListener('submit', guard.block, true);
+    HTMLFormElement.prototype.submit = guard.nativeSubmit;
+    HTMLFormElement.prototype.requestSubmit = guard.nativeRequestSubmit;
+    delete globalThis.__careerOpsOperationalGuard;
   });
 }
 
@@ -613,7 +637,12 @@ async function performAction(page, action, visibleOptions, { deadlineMs, clock }
   await locator.blur({ timeout: remainingTimeout(deadlineMs, clock) });
   locator = await exactLocator(page, action);
   const state = await validationState(locator);
-  if (state.invalid || cleanFormText(state.value) !== action.value) {
+  const normalizeValue = action.category === 'custom_motivation_experience_narrative'
+    ? normalizeNarrativeText
+    : action.semantic === 'phone'
+      ? (value) => cleanFormText(value).replace(/[\s().-]+/g, '')
+    : cleanFormText;
+  if (state.invalid || normalizeValue(state.value) !== normalizeValue(action.value)) {
     throw new Error(`Field value did not remain committed: ${action.semantic}`);
   }
   return state.value;
@@ -642,7 +671,7 @@ async function withinAttemptDeadline(operation, {
   }
 }
 
-export async function executeOperationalFormPlan(page, plan, {
+async function executeOperationalFormPlanGuarded(page, plan, {
   previousEvidence = null,
   now = () => new Date(),
   clock = () => Date.now(),
@@ -650,7 +679,6 @@ export async function executeOperationalFormPlan(page, plan, {
   sessionDeadlineMs = null,
   performActionImpl = performAction,
 } = {}) {
-  await installSubmissionGuard(page);
   const effectiveLimits = resolveOperationalFormLimits({}, limits);
   const hardDeadlineMs = sessionDeadlineMs ?? (clock() + effectiveLimits.sessionMs);
   const completed = [...(plan.preservedFields || [])];
@@ -815,6 +843,15 @@ export async function executeOperationalFormPlan(page, plan, {
   };
 }
 
+export async function executeOperationalFormPlan(page, plan, options = {}) {
+  await installSubmissionGuard(page);
+  try {
+    return await executeOperationalFormPlanGuarded(page, plan, options);
+  } finally {
+    await removeOperationalSubmissionGuard(page);
+  }
+}
+
 function requiredEmpty(field) {
   return field.visible !== false && field.required && !field.disabled
     && !cleanFormText(field.value) && !field.checked && !(field.files || []).length;
@@ -827,6 +864,9 @@ export async function reviewOperationalApplicationForm(page, profile, artifacts,
   resumeMode = 'initial',
 } = {}) {
   const snapshot = await inspectOperationalApplicationForm(page);
+  const submissionGuardActiveAtHandoff = await page.evaluate(
+    () => Boolean(globalThis.__careerOpsOperationalGuard),
+  ).catch(() => null);
   const plan = buildOperationalFormPlan(snapshot, profile, artifacts, { context, previousEvidence });
   const requiredMissing = snapshot.fields.filter(requiredEmpty).map((field) => {
     const semantics = classifyFieldSemantics(field);
@@ -877,6 +917,7 @@ export async function reviewOperationalApplicationForm(page, profile, artifacts,
     passBudget: {
       fullPassesUsed: 1,
       fullPassesAllowed: 1,
+      artifactRevisionReset: Boolean(previousEvidence?.passBudget?.artifactRevisionReset),
       controlledResumeUsed: resumeMode === 'initial'
         ? 0
         : Number(previousEvidence?.passBudget?.controlledResumeUsed || 0) + 1,
@@ -898,6 +939,24 @@ export async function reviewOperationalApplicationForm(page, profile, artifacts,
       trace: null,
       uploadTopologyBefore: null,
       uploadTopologyAfter: plan.uploadTopology,
+      submissionGuardActiveAtHandoff,
+      phoneControls: snapshot.fields
+        .map((field) => ({ field, semantics: classifyFieldSemantics(field) }))
+        .filter(({ field, semantics }) => field.type === 'tel' || ['phone', 'phone_country', 'phone_dial_code'].includes(semantics.semantic))
+        .map(({ field, semantics }) => ({
+          fieldId: field.fieldId,
+          id: field.id,
+          name: field.name,
+          tag: field.tag,
+          type: field.type,
+          role: field.role,
+          label: field.label,
+          groupLabel: field.groupLabel,
+          questionText: field.questionText,
+          semantic: semantics.semantic,
+          value: field.value,
+          selectedLabel: field.selectedLabel,
+        })),
     },
     reviewComplete: !userActionRequired && !snapshot.validationErrors.length && finalAction.detected && !finalAction.activated,
   };
@@ -928,18 +987,36 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
 } = {}) {
   const effectiveLimits = resolveOperationalFormLimits(profile, limits || {});
   const sessionDeadlineMs = clock() + effectiveLimits.sessionMs;
+  const currentArtifactHashes = new Set([
+    artifacts?.cv?.sha256,
+    artifacts?.coverLetter?.sha256,
+    artifacts?.combinedDocument?.sha256,
+  ].filter(Boolean));
+  const priorUploads = Array.isArray(previousEvidence?.uploadedArtifacts) ? previousEvidence.uploadedArtifacts : [];
+  const artifactSetChanged = priorUploads.some((upload) => upload?.sha256 && !currentArtifactHashes.has(upload.sha256));
+  const effectivePreviousEvidence = artifactSetChanged
+    ? {
+      ...previousEvidence,
+      uploadedArtifacts: priorUploads.filter((upload) => currentArtifactHashes.has(upload?.sha256)),
+      passBudget: {
+        ...(previousEvidence?.passBudget || {}),
+        controlledResumeUsed: 0,
+        artifactRevisionReset: true,
+      },
+    }
+    : previousEvidence;
   if (resumeMode !== 'initial'
-      && Number(previousEvidence?.passBudget?.controlledResumeUsed || 0) >= MAX_CONTROLLED_RESUMES) {
+      && Number(effectivePreviousEvidence?.passBudget?.controlledResumeUsed || 0) >= MAX_CONTROLLED_RESUMES) {
     const snapshot = await inspectOperationalApplicationForm(page);
     const evidence = {
-      ...previousEvidence,
+      ...effectivePreviousEvidence,
       schemaVersion: 2,
       passId,
       resumeMode,
       reviewedAt: new Date().toISOString(),
       currentUrl: snapshot.url,
       unresolvedFields: dedupeRows([
-        ...(previousEvidence.unresolvedFields || []),
+        ...(effectivePreviousEvidence.unresolvedFields || []),
         {
           fieldId: 'form',
           stableFieldId: 'form',
@@ -956,7 +1033,7 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
     evidence.evidenceHash = digest({ ...evidence, evidenceHash: undefined });
     return {
       snapshot,
-      plan: { actions: [], unresolvedFields: evidence.unresolvedFields, finalActions: [], uploadTopology: previousEvidence.uploadTopology },
+      plan: { actions: [], unresolvedFields: evidence.unresolvedFields, finalActions: [], uploadTopology: effectivePreviousEvidence.uploadTopology },
       evidence,
       gate: { state: 'review_required', reason: 'Controlled resume budget is exhausted; finish unresolved fields manually.' },
     };
@@ -969,19 +1046,19 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
     uploadedArtifacts: [],
     committedSelections: [],
     unresolvedFields: [],
-    attemptLedger: previousEvidence?.attemptLedger || [],
+    attemptLedger: effectivePreviousEvidence?.attemptLedger || [],
     timeLimits: effectiveLimits,
     sessionLimitReached: false,
     precomputedNarrativeCount: 0,
   };
   if (gate) {
     const reviewed = await reviewOperationalApplicationForm(page, profile, artifacts, emptyExecution, {
-      context, previousEvidence, passId, resumeMode,
+      context, previousEvidence: effectivePreviousEvidence, passId, resumeMode,
     });
     return { gate, ...reviewed };
   }
 
-  const plan = buildOperationalFormPlan(snapshot, profile, artifacts, { context, previousEvidence });
+  const plan = buildOperationalFormPlan(snapshot, profile, artifacts, { context, previousEvidence: effectivePreviousEvidence });
   plan.formFingerprint = digest(snapshot.fields.map((field) => stableFieldIdentity(field, classifyFieldSemantics(field))));
   plan.actions = plan.actions.map((action) => ({
     ...action,
@@ -989,7 +1066,7 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
     candidateId: context.candidate?.candidate_id || null,
   }));
   const execution = await executeOperationalFormPlan(page, plan, {
-    previousEvidence,
+    previousEvidence: effectivePreviousEvidence,
     clock,
     limits: effectiveLimits,
     sessionDeadlineMs,
@@ -999,7 +1076,7 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
   execution.completed.unshift(...plan.preservedFields.filter((row) => !execution.completed.some((item) => item.stableFieldId === row.stableFieldId)));
   execution.uploadedArtifacts.unshift(...plan.preservedUploads.filter((row) => !execution.uploadedArtifacts.some((item) => item.sha256 === row.sha256)));
   const reviewed = await reviewOperationalApplicationForm(page, profile, artifacts, execution, {
-    context, previousEvidence, passId, resumeMode,
+    context, previousEvidence: effectivePreviousEvidence, passId, resumeMode,
   });
   if (reviewed.evidence.captcha.manualActionRequired) {
     return {

@@ -268,12 +268,15 @@ export function classifyFormSnapshot(snapshot) {
   const fields = Array.isArray(snapshot?.fields) ? snapshot.fields.filter((field) => field.visible !== false) : [];
   const descriptors = fields.map((field) => normalized(`${field.type || ''} ${field.text || ''}`));
   const hasPassword = fields.some((field) => normalized(field.type) === 'password');
-  const loginText = /(sign in to apply|log in to apply|login to apply|create an account to apply|sign in or create|login or register)/.test(body);
-  const loginRequired = hasPassword || loginText;
+  const hasEmail = descriptors.some((descriptor) => /email|e-mail/.test(descriptor));
+  const loginText = /(sign in to apply|log in to apply|login to apply|create an account to apply|sign in or create|login or register|weiter mit e-mail-adresse|weiter als gast|einloggen)/.test(body);
+  const authenticationPath = /\/(?:application|apply)\/authentication(?:[/?#]|$)/i.test(snapshot?.currentUrl || '');
+  const loginRequired = hasPassword || loginText || (authenticationPath && hasEmail);
 
   const candidatePatterns = [
     /first name|given name/,
     /last name|family name|surname/,
+    /full name|your name|candidate name/,
     /email/,
     /phone|telephone|mobile/,
     /resume|curriculum vitae|\bcv\b/,
@@ -283,7 +286,6 @@ export function classifyFormSnapshot(snapshot) {
   for (let patternIndex = 0; patternIndex < candidatePatterns.length; patternIndex += 1) {
     if (descriptors.some((descriptor) => candidatePatterns[patternIndex].test(descriptor))) signalIndexes.add(patternIndex);
   }
-  const hasEmail = descriptors.some((descriptor) => /email/.test(descriptor));
   const hasResume = descriptors.some((descriptor) => /resume|curriculum vitae|\bcv\b/.test(descriptor));
   const formCount = Number(snapshot?.formCount || 0);
   const pathLooksLikeApplication = /\/(application|apply)(?:[/?#]|$)/i.test(snapshot?.currentUrl || '');
@@ -381,7 +383,16 @@ export function classifyApplicationEntryAction(control, {
 
 export function selectSafeApplyContinuation(controls, scope = {}) {
   if (!Array.isArray(controls)) return null;
-  return controls.find((control) => classifyApplicationEntryAction(control, scope).safe) || null;
+  return controls
+    .filter((control) => classifyApplicationEntryAction(control, scope).safe)
+    .sort((left, right) => {
+      const score = (control) => (control.attached !== false ? 8 : 0)
+        + (control.enabled !== false ? 8 : 0)
+        + (control.visible ? 4 : 0)
+        + (control.topmostMatches ? 4 : 0)
+        + (control.boundingBox?.width > 0 && control.boundingBox?.height > 0 ? 1 : 0);
+      return score(right) - score(left) || Number(left.index || 0) - Number(right.index || 0);
+    })[0] || null;
 }
 
 export function listingSnapshotConfirmsSafeEntry(snapshot, candidate, {
@@ -497,7 +508,7 @@ export async function collectPageSnapshot(page) {
         ? Array.from(associatedForm.querySelectorAll('input, textarea, select'))
         : [];
       const formHasCandidateFields = formFields.some((field) => (
-        /first.?name|last.?name|surname|e-?mail|phone|mobile|resume|curriculum|\bcv\b|linkedin/i.test(textFor(field))
+        /first.?name|given.?name|last.?name|family.?name|surname|full.?name|your name|candidate name|e-?mail|phone|mobile|resume|curriculum|\bcv\b|linkedin/i.test(textFor(field))
       ));
       const rect = element.getBoundingClientRect();
       const centerInViewport = rect.width > 0 && rect.height > 0
@@ -533,10 +544,30 @@ export async function collectPageSnapshot(page) {
       };
     });
     const fields = Array.from(document.querySelectorAll('input, textarea, select')).map((element) => ({
+      id: element.id || '',
+      name: element.getAttribute('name') || '',
+      tag: element.tagName.toLowerCase(),
       type: element.getAttribute('type') || element.tagName.toLowerCase(),
+      role: element.getAttribute('role') || '',
       text: textFor(element),
       visible: visible(element),
     }));
+    const candidatePattern = /first.?name|given.?name|last.?name|family.?name|surname|full.?name|your name|candidate name|e-?mail|phone|mobile|resume|curriculum|\bcv\b|linkedin/i;
+    const visibleApplicationDialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], dialog[open]'))
+      .filter(visible)
+      .map((dialog) => ({
+        text: String(dialog.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 300),
+        candidateFieldCount: Array.from(dialog.querySelectorAll('input, textarea, select'))
+          .filter(visible)
+          .filter((field) => candidatePattern.test(textFor(field))).length,
+      }))
+      .filter((dialog) => dialog.candidateFieldCount > 0);
+    const candidateFieldFingerprint = fields
+      .filter((field) => field.visible && candidatePattern.test(`${field.type} ${field.text}`))
+      .map((field) => `${field.type}:${field.text}`)
+      .sort()
+      .join('|')
+      .slice(0, 2_000);
     return {
       documentTitle: document.title || '',
       headings: Array.from(document.querySelectorAll('h1, h2, [role="heading"]'))
@@ -545,6 +576,11 @@ export async function collectPageSnapshot(page) {
       formCount: Array.from(document.querySelectorAll('form')).filter(visible).length,
       fields,
       controls,
+      applicationSurface: {
+        visibleDialogCount: visibleApplicationDialogs.length,
+        dialogs: visibleApplicationDialogs,
+        candidateFieldFingerprint,
+      },
     };
   });
   return { ...snapshot, currentUrl: page.url() };
@@ -573,7 +609,7 @@ async function inspectEntryControl(locator) {
       const formHasCandidateFields = Boolean(associatedForm) && Array.from(
         associatedForm.querySelectorAll('input, textarea, select'),
       ).some((field) => (
-        /first.?name|last.?name|surname|e-?mail|phone|mobile|resume|curriculum|\bcv\b|linkedin/i.test(textFor(field))
+        /first.?name|given.?name|last.?name|family.?name|surname|full.?name|your name|candidate name|e-?mail|phone|mobile|resume|curriculum|\bcv\b|linkedin/i.test(textFor(field))
       ));
       const rect = element.getBoundingClientRect();
       const centerInViewport = rect.width > 0 && rect.height > 0
@@ -639,7 +675,148 @@ async function reacquireSafeContinuation(page, expected, scope) {
   return { locator, control: current };
 }
 
-async function inspectContinuationAttempt(context, page, before, beforeUrl, expectedDestination, observationWindowMs) {
+function equivalentEntryAction(left, right) {
+  return normalized(left?.tag) === normalized(right?.tag)
+    && inline(left?.text) === inline(right?.text)
+    && predictedEntryDestination(left) === predictedEntryDestination(right);
+}
+
+export async function rankSafeApplyContinuations(page, controls, scope = {}) {
+  const safe = (Array.isArray(controls) ? controls : [])
+    .filter((control) => classifyApplicationEntryAction(control, scope).safe);
+  const ranked = [];
+  for (const expected of safe) {
+    try {
+      let acquired = await reacquireSafeContinuation(page, expected, scope);
+      await acquired.locator.scrollIntoViewIfNeeded({ timeout: 1_500 }).catch(() => {});
+      acquired = await reacquireSafeContinuation(page, expected, scope);
+      const trialActionable = acquired.control.attached && acquired.control.enabled && acquired.control.visible
+        ? await acquired.locator.click({ trial: true, timeout: 750 }).then(() => true).catch(() => false)
+        : false;
+      ranked.push({ ...acquired.control, index: expected.index, trialActionable });
+    } catch (error) {
+      ranked.push({ ...expected, trialActionable: false, rankingError: inline(error.message).slice(0, 300) });
+    }
+  }
+  return ranked.sort((left, right) => {
+    const score = (control) => (control.trialActionable ? 32 : 0)
+      + (control.attached !== false ? 8 : 0)
+      + (control.enabled !== false ? 8 : 0)
+      + (control.visible ? 4 : 0)
+      + (control.topmostMatches ? 4 : 0);
+    return score(right) - score(left) || Number(left.index || 0) - Number(right.index || 0);
+  });
+}
+
+async function inspectBenignSiteChromeActions(page) {
+  return page.evaluate(() => {
+    const visible = (element) => {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    };
+    const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const rootSelector = [
+      '[id*="cookie" i]', '[class*="cookie" i]', '[id*="consent" i]', '[class*="consent" i]',
+      '[id*="cmp" i]', '[class*="cmp" i]', '[id*="privacy-prompt" i]', '[class*="privacy-prompt" i]',
+      '#GDPRConsentManagerContainer', '#fixedfooter',
+    ].join(',');
+    globalThis.__careerOpsSiteChromeCounter = Number(globalThis.__careerOpsSiteChromeCounter || 0);
+    return Array.from(document.querySelectorAll('button, a, [role="button"]'))
+      .filter(visible)
+      .flatMap((element) => {
+        const root = element.closest(rootSelector);
+        if (!root || !visible(root)) return [];
+        const scopeRoot = root.closest('#GDPRConsentManagerContainer') || root;
+        const rootEvidence = normalize(`${scopeRoot.id || ''} ${scopeRoot.className || ''} ${scopeRoot.innerText || ''}`);
+        if (!/(?:cookie|consent|cmp|gdpr|privacy prompt|datenschutz)/.test(rootEvidence)) return [];
+        const label = normalize(element.getAttribute('aria-label') || element.innerText || element.getAttribute('value'));
+        let kind = null;
+        if (/^(?:only the necessary cookies|reject all|reject non[- ]essential(?: cookies)?|decline all non[- ]necessary cookies|necessary only|continue without accepting|alle ablehnen|nur notwendige(?: cookies)?|nur erforderliche(?: cookies)?)$/.test(label)) {
+          kind = 'privacy_preserving_dismissal';
+        } else if (/^(?:einstellungen oder ablehnen|cookie preferences|manage preferences|show details)$/.test(label)) {
+          kind = 'open_privacy_preferences';
+        } else if (/^(?:save and exit|save settings|speichern und beenden)$/.test(label)) {
+          kind = 'save_privacy_minimum';
+        }
+        if (!kind) return [];
+        let actionId = element.getAttribute('data-career-ops-site-chrome-id');
+        if (!actionId) {
+          actionId = `site-chrome-${++globalThis.__careerOpsSiteChromeCounter}`;
+          element.setAttribute('data-career-ops-site-chrome-id', actionId);
+        }
+        const checkedOptionalControls = Array.from(scopeRoot.querySelectorAll('input[type="checkbox"], [role="switch"]'))
+          .filter((control) => !control.disabled && control.getAttribute('aria-disabled') !== 'true')
+          .filter((control) => {
+            const identity = normalize(`${control.id || ''} ${control.getAttribute('name') || ''}`);
+            if (/accordion|legal-description/.test(identity)) return false;
+            return control.checked === true || control.getAttribute('aria-checked') === 'true';
+          }).length;
+        return [{
+          actionId,
+          kind,
+          label,
+          root: {
+            id: scopeRoot.id || '',
+            className: String(scopeRoot.className || '').slice(0, 180),
+            text: normalize(scopeRoot.innerText).slice(0, 300),
+          },
+          privacyMinimal: checkedOptionalControls === 0,
+        }];
+      });
+  });
+}
+
+async function activateSiteChromeAction(page, expected) {
+  const escaped = String(expected.actionId).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const locator = page.locator(`[data-career-ops-site-chrome-id="${escaped}"]`);
+  if (await locator.count() !== 1) throw new Error('Site-chrome action identity changed before activation');
+  const current = (await inspectBenignSiteChromeActions(page)).find((action) => action.actionId === expected.actionId);
+  if (!current || current.kind !== expected.kind || current.label !== expected.label) {
+    throw new Error('Site-chrome action no longer matches the verified privacy-preserving control');
+  }
+  await locator.click({ trial: true, timeout: 2_000 });
+  await locator.click({ timeout: 4_000 });
+  return current;
+}
+
+export async function clearBenignListingSiteChrome(page) {
+  const before = await collectPageSnapshot(page);
+  const form = classifyFormSnapshot(before);
+  if (form.actualForm || form.candidateFieldSignals > 0) {
+    return { cleared: false, detected: false, actions: [], reason: 'Application form is already present.' };
+  }
+  let actions = await inspectBenignSiteChromeActions(page);
+  const direct = actions.find((action) => action.kind === 'privacy_preserving_dismissal');
+  if (direct) {
+    const activated = await activateSiteChromeAction(page, direct);
+    await page.waitForTimeout(350);
+    return { cleared: true, detected: true, actions: [activated], reason: 'Privacy-preserving site-chrome dismissal activated.' };
+  }
+  const opener = actions.find((action) => action.kind === 'open_privacy_preferences');
+  if (!opener) return { cleared: false, detected: actions.length > 0, actions: [], reason: 'No privacy-preserving CMP action is available.' };
+  const opened = await activateSiteChromeAction(page, opener);
+  const preferenceDeadline = Date.now() + 3_000;
+  let save = null;
+  do {
+    await page.waitForTimeout(200);
+    actions = await inspectBenignSiteChromeActions(page);
+    save = actions.find((action) => action.kind === 'save_privacy_minimum' && action.privacyMinimal) || null;
+  } while (!save && Date.now() < preferenceDeadline);
+  if (!save) {
+    return {
+      cleared: false,
+      detected: true,
+      actions: [opened],
+      reason: 'Privacy preferences opened, but a verified all-optional-off save action was unavailable.',
+    };
+  }
+  const saved = await activateSiteChromeAction(page, save);
+  await page.waitForTimeout(350);
+  return { cleared: true, detected: true, actions: [opened, saved], reason: 'Privacy-minimal CMP preferences saved.' };
+}
+
+async function inspectContinuationAttempt(context, page, before, beforeUrl, expectedDestination, observationWindowMs, baselineSnapshot = null) {
   const deadline = Date.now() + observationWindowMs;
   const observedUrls = new Set([beforeUrl]);
   let created = [];
@@ -657,16 +834,31 @@ async function inspectContinuationAttempt(context, page, before, beforeUrl, expe
         return { page: candidatePage, snapshot: null };
       }
     }));
+    const meaningfulSnapshot = (snapshot) => Boolean(
+      snapshot
+      && (
+        inline(snapshot.documentTitle)
+        || inline(snapshot.bodyText).length >= 40
+        || (Array.isArray(snapshot.fields) && snapshot.fields.some((field) => field.visible !== false))
+        || Number(snapshot.formCount || 0) > 0
+      )
+    );
     const exactDestination = expectedDestination
-      ? snapshots.find(({ snapshot }) => snapshot && sameUrlIgnoringHash(snapshot.currentUrl, expectedDestination))
+      ? snapshots.find(({ snapshot }) => meaningfulSnapshot(snapshot) && sameUrlIgnoringHash(snapshot.currentUrl, expectedDestination))
       : null;
     const consequential = snapshots.find(({ snapshot, page: candidatePage }) => {
       if (!snapshot) return false;
       const form = classifyFormSnapshot(snapshot);
+      const baselineSurface = baselineSnapshot?.applicationSurface || {};
+      const currentSurface = snapshot.applicationSurface || {};
+      const applicationSurfaceChanged = Number(currentSurface.visibleDialogCount || 0) > Number(baselineSurface.visibleDialogCount || 0)
+        && currentSurface.candidateFieldFingerprint
+        && currentSurface.candidateFieldFingerprint !== baselineSurface.candidateFieldFingerprint;
       return form.actualForm
         || form.loginRequired
-        || (candidatePage !== page && snapshot.currentUrl !== 'about:blank')
-        || !sameUrlIgnoringHash(snapshot.currentUrl, beforeUrl);
+        || applicationSurfaceChanged
+        || (meaningfulSnapshot(snapshot) && candidatePage !== page && snapshot.currentUrl !== 'about:blank')
+        || (meaningfulSnapshot(snapshot) && !sameUrlIgnoringHash(snapshot.currentUrl, beforeUrl));
     });
     const outcome = exactDestination || consequential;
     if (outcome) {
@@ -679,6 +871,7 @@ async function inspectContinuationAttempt(context, page, before, beforeUrl, expe
           pageCountBefore: before.size,
           pageCountAfter: context.pages().length,
           form: classifyFormSnapshot(outcome.snapshot),
+          applicationSurface: outcome.snapshot.applicationSurface || null,
         },
       };
     }
@@ -693,6 +886,7 @@ async function inspectContinuationAttempt(context, page, before, beforeUrl, expe
       pageCountBefore: before.size,
       pageCountAfter: context.pages().length,
       form: snapshots[0]?.snapshot ? classifyFormSnapshot(snapshots[0].snapshot) : null,
+      applicationSurface: snapshots[0]?.snapshot?.applicationSurface || null,
     },
   };
 }
@@ -701,6 +895,7 @@ export async function followSafeContinuation(context, page, control, scope, {
   observationWindowMs = 4_500,
 } = {}) {
   const beforeUrl = page.url();
+  const baselineSnapshot = await collectPageSnapshot(page);
   const expectedDestination = predictedEntryDestination(control);
   const attempts = [];
   const methods = ['playwright_click', 'exact_dom_click'];
@@ -729,7 +924,7 @@ export async function followSafeContinuation(context, page, control, scope, {
       methodError = error;
     }
     const outcome = await inspectContinuationAttempt(
-      context, page, before, beforeUrl, expectedDestination, observationWindowMs,
+      context, page, before, beforeUrl, expectedDestination, observationWindowMs, baselineSnapshot,
     );
     attempts.push({
       method,
@@ -749,6 +944,7 @@ export async function followSafeContinuation(context, page, control, scope, {
       return outcome.destination;
     }
     for (const extra of outcome.created) await extra.close().catch(() => {});
+    if (method === 'playwright_click' && acquired?.control?.interceptor) break;
   }
   const error = new Error('Verified safe application-entry control could not be operated by the bounded safe activation ladder');
   error.code = 'application_entry_interaction_failed';
@@ -793,6 +989,8 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
   const visitedUrls = new Set([canonicalVisitedUrl(snapshot.currentUrl)]);
   const usedActions = new Set();
   const hops = [];
+  const siteChromeActions = [];
+  let siteChromeRecoveries = 0;
   let hopLimit = 1;
 
   while (!form.actualForm && !form.loginRequired && hops.length < hopLimit) {
@@ -803,18 +1001,78 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
       actualFormReached: false,
       candidateFieldSignals: form.candidateFieldSignals,
     };
-    const selectedContinuation = selectSafeApplyContinuation(snapshot.controls, scope);
-    const continuation = selectedContinuation
-      ? {
-        ...selectedContinuation,
-        duplicateCandidateCount: snapshot.controls.filter((candidateControl) => (
-          classifyApplicationEntryAction(candidateControl, scope).safe
-          && normalized(candidateControl.tag) === normalized(selectedContinuation.tag)
-          && inline(candidateControl.text) === inline(selectedContinuation.text)
-          && predictedEntryDestination(candidateControl) === predictedEntryDestination(selectedContinuation)
-        )).length,
+    const rankedContinuations = await rankSafeApplyContinuations(page, snapshot.controls, scope);
+    if (!rankedContinuations.length) {
+      return {
+        page,
+        snapshot,
+        form,
+        identity,
+        compatible,
+        hops,
+        siteChromeActions,
+        reason: 'No safe listing-page application-entry action was found.',
+      };
+    }
+    const preferred = rankedContinuations[0];
+    const equivalentContinuations = rankedContinuations.filter((candidateControl) => equivalentEntryAction(candidateControl, preferred));
+    const sourceUrl = snapshot.currentUrl;
+    let continuation = null;
+    let recoveredSiteChrome = false;
+    const failedCandidates = [];
+    for (const candidateControl of equivalentContinuations.slice(0, 3)) {
+      const actionKey = [
+        canonicalVisitedUrl(snapshot.currentUrl),
+        candidateControl.controlId,
+        normalized(candidateControl.tag),
+        normalized(candidateControl.text),
+        predictedEntryDestination(candidateControl),
+      ].join('|');
+      if (usedActions.has(actionKey)) continue;
+      usedActions.add(actionKey);
+      const attempted = { ...candidateControl, duplicateCandidateCount: equivalentContinuations.length };
+      try {
+        page = await followSafeContinuation(context, page, attempted, scope, { observationWindowMs });
+        continuation = attempted;
+        break;
+      } catch (error) {
+        if (error?.code !== 'application_entry_interaction_failed') throw error;
+        failedCandidates.push(error.entryDiagnostics || { controlId: attempted.controlId, error: inline(error.message) });
+        const intercepted = error.entryDiagnostics?.attempts?.some((attempt) => attempt.control?.interceptor);
+        if (intercepted && siteChromeRecoveries < 2) {
+          const clearance = await clearBenignListingSiteChrome(page);
+          siteChromeActions.push(...clearance.actions.map((action) => ({ ...action, result: clearance.reason })));
+          if (clearance.cleared) {
+            siteChromeRecoveries += 1;
+            const entryResnapshotDeadline = Date.now() + 3_000;
+            do {
+              snapshot = await collectPageSnapshot(page);
+              form = classifyFormSnapshot(snapshot);
+              const refreshedScope = {
+                listingUrl: snapshot.currentUrl || listingUrl,
+                applyUrl,
+                currentState: 'listing_verified',
+                actualFormReached: form.actualForm,
+                candidateFieldSignals: form.candidateFieldSignals,
+              };
+              if (form.actualForm || form.loginRequired || selectSafeApplyContinuation(snapshot.controls, refreshedScope)) break;
+              await page.waitForTimeout(200);
+            } while (Date.now() < entryResnapshotDeadline);
+            identity = verifyVisibleIdentity(snapshot, candidate);
+            compatible = isCompatibleApplicationEntryDestination({
+              listingUrl,
+              applyUrl,
+              currentUrl: snapshot.currentUrl,
+              identity,
+            });
+            usedActions.clear();
+            recoveredSiteChrome = true;
+            break;
+          }
+        }
       }
-      : null;
+    }
+    if (recoveredSiteChrome) continue;
     if (!continuation) {
       return {
         page,
@@ -823,46 +1081,11 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
         identity,
         compatible,
         hops,
-        reason: 'No safe listing-page application-entry action was found.',
+        siteChromeActions,
+        manualReviewRequired: true,
+        reason: 'Verified equivalent application-entry controls could not reach the application surface.',
+        diagnostics: { candidates: failedCandidates, siteChromeActions },
       };
-    }
-    const actionKey = [
-      canonicalVisitedUrl(snapshot.currentUrl),
-      normalized(continuation.tag),
-      normalized(continuation.text),
-      predictedEntryDestination(continuation),
-    ].join('|');
-    if (usedActions.has(actionKey)) {
-      return {
-        page,
-        snapshot,
-        form,
-        identity,
-        compatible,
-        hops,
-        reason: 'Repeated application-entry action loop was prevented.',
-      };
-    }
-    usedActions.add(actionKey);
-
-    const sourceUrl = snapshot.currentUrl;
-    try {
-      page = await followSafeContinuation(context, page, continuation, scope, { observationWindowMs });
-    } catch (error) {
-      if (error?.code === 'application_entry_interaction_failed') {
-        return {
-          page,
-          snapshot,
-          form,
-          identity,
-          compatible,
-          hops,
-          manualReviewRequired: true,
-          reason: inline(error.message),
-          diagnostics: error.entryDiagnostics || null,
-        };
-      }
-      throw error;
     }
     snapshot = await collectPageSnapshot(page);
     form = classifyFormSnapshot(snapshot);
@@ -881,6 +1104,7 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
       controlId: continuation.controlId,
       duplicateCandidateCount: continuation.duplicateCandidateCount,
       activationMethod: page.__careerOpsEntryInteractionEvidence?.successfulMethod || null,
+      siteChromeActions: [...siteChromeActions],
     });
     if (!compatible) {
       return {
@@ -890,6 +1114,7 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
         identity,
         compatible,
         hops,
+        siteChromeActions,
         reason: `Application-entry destination is incompatible: ${identity.reason}`,
       };
     }
@@ -904,6 +1129,7 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
         identity,
         compatible,
         hops,
+        siteChromeActions,
         reason: 'Repeated application-entry URL loop was prevented.',
       };
     }
@@ -922,6 +1148,7 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
     identity,
     compatible,
     hops,
+    siteChromeActions,
     reason: form.actualForm
       ? `Actual application form reached after ${hops.length} verified entry action(s).`
       : form.loginRequired
@@ -1483,6 +1710,27 @@ async function executePreparationResume(options, contract, { root, executionLock
       { listingUrl, applyUrl: contract.candidate.applyUrl },
     );
     const page = entryFlow.page;
+    if (entryFlow.form.loginRequired && entryFlow.compatible) {
+      const state = transition(
+        contract.manifestPath, contract.candidate.candidate_id, 'login_required', page.url(),
+        `${entryFlow.form.reason}; ${entryFlow.reason}`,
+        fromState, executionLock.token, { entryActions: entryFlow.hops }, null, root,
+      );
+      if (dependencies.onCandidatePage) await dependencies.onCandidatePage(page, contract);
+      if (page !== listingPage) await listingPage.close().catch(() => {});
+      if (ownsBrowser && options.keepOpen) {
+        console.log('login_required after verified application entry. Complete the external authentication choice manually; Career-Ops will not continue automatically.');
+        await new Promise((resolveDisconnected) => browser.once('disconnected', resolveDisconnected));
+      }
+      return {
+        batchId: contract.manifest.batchId,
+        candidate: listingUrl,
+        state: state.state,
+        currentUrl: state.currentUrl,
+        submissionAvailable: false,
+        trackerUpdated: false,
+      };
+    }
     if (!entryFlow.form.actualForm || !entryFlow.compatible) {
       if (entryFlow.manualReviewRequired && entryFlow.compatible) {
         const state = transition(

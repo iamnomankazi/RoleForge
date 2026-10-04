@@ -89,10 +89,11 @@ function createFixtureArtifacts() {
 test('field and final-action semantics cover common ATS patterns', () => {
   assert.equal(classifyField({ label: 'Resume / CV', type: 'file' }), 'cv_upload');
   assert.equal(classifyField({ label: 'Motivation letter', type: 'file' }), 'cover_letter_upload');
-  assert.equal(classifyField({ label: 'Phone country', type: 'select' }), 'phone_country');
+  assert.equal(classifyField({ label: 'Phone country', tag: 'select', type: 'select-one' }), 'phone_country');
   assert.equal(classifyField({ label: 'I certify this is accurate', type: 'checkbox' }), 'legal_consent');
   assert.equal(isSemanticFinalAction({ type: 'submit', label: 'Continue' }), true);
   assert.equal(isSemanticFinalAction({ type: 'button', label: 'Apply Now', insideApplicationForm: false }), false);
+  assert.equal(isSemanticFinalAction({ type: 'button', label: 'Apply Now', insideApplicationForm: true }), true);
 });
 
 test('text-only cover fields receive the complete bound letter and one-document fields require an explicit combined artifact', () => {

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { groundedFieldValue } from './application-profile.mjs';
 import { validateNarrativeProvenanceRecord } from './application-evidence.mjs';
 
-const FINAL_WORDS = /\b(submit|send|complete application|finish|confirm application|finali[sz]e)\b/i;
+const FINAL_WORDS = /\b(apply(?: now)?|submit|send(?: application)?|complete application|finish|confirm application|finali[sz]e)\b/i;
 const LOGIN_WORDS = /\b(sign in to apply|log in to apply|login to apply|create an account to apply|sign in or create|login or register|verify (?:your )?email|one[- ]time code|mfa|two[- ]factor)\b/i;
 const LEGAL_WORDS = /\b(certify|declare|privacy|terms|accurate|truthful|consent|signature|background check|data processing)\b/i;
 const CAPTCHA_SIGNAL_WORDS = /\b(captcha|recaptcha|hcaptcha|turnstile|are you human|human verification)\b/i;
@@ -106,7 +106,9 @@ export function classifyField(field) {
   if (/last.?name|family.?name|surname/.test(label)) return 'last_name';
   if (/full.?name|your name|candidate name/.test(label)) return 'full_name';
   if (/e-?mail/.test(label)) return 'email';
-  if (/phone country|country code/.test(label)) return 'phone_country';
+  if (String(field.type || '').toLowerCase() === 'tel') return 'phone';
+  if ((field.tag === 'select' || field.role === 'combobox' || field.autocomplete === 'list' || (field.options || []).length)
+      && /phone country|country code|dial(?:ing)? code|calling code|phone prefix/.test(label)) return 'phone_country';
   if (/phone|mobile|telephone/.test(label)) return 'phone';
   if (/linkedin/.test(label)) return 'linkedin';
   if (/github/.test(label)) return 'github';
@@ -403,8 +405,7 @@ export async function inspectApplicationForm(page) {
 
 async function installSubmissionGuard(page) {
   await page.evaluate(() => {
-    if (globalThis.__careerOpsSubmissionGuardInstalled) return;
-    globalThis.__careerOpsSubmissionGuardInstalled = true;
+    if (globalThis.__careerOpsSubmissionGuard) return;
     globalThis.__careerOpsSubmitAttempts = 0;
     const block = (event) => {
       globalThis.__careerOpsSubmitAttempts += 1;
@@ -412,9 +413,23 @@ async function installSubmissionGuard(page) {
       event?.stopImmediatePropagation?.();
       throw new Error('Career-Ops blocked a final form submission attempt');
     };
+    const nativeSubmit = HTMLFormElement.prototype.submit;
+    const nativeRequestSubmit = HTMLFormElement.prototype.requestSubmit;
+    globalThis.__careerOpsSubmissionGuard = { block, nativeSubmit, nativeRequestSubmit };
     document.addEventListener('submit', block, true);
     HTMLFormElement.prototype.submit = function guardedSubmit() { block(); };
     HTMLFormElement.prototype.requestSubmit = function guardedRequestSubmit() { block(); };
+  });
+}
+
+export async function removeSubmissionGuard(page) {
+  await page.evaluate(() => {
+    const guard = globalThis.__careerOpsSubmissionGuard;
+    if (!guard) return;
+    document.removeEventListener('submit', guard.block, true);
+    HTMLFormElement.prototype.submit = guard.nativeSubmit;
+    HTMLFormElement.prototype.requestSubmit = guard.nativeRequestSubmit;
+    delete globalThis.__careerOpsSubmissionGuard;
   });
 }
 
@@ -554,7 +569,7 @@ export async function reviewApplicationForm(page, profile, artifacts, execution,
   return { snapshot, plan, evidence };
 }
 
-export async function prepareApplicationForm(page, profile, artifacts, { maxPasses = 4, candidateId = null } = {}) {
+async function prepareApplicationFormGuarded(page, profile, artifacts, { maxPasses = 4, candidateId = null } = {}) {
   const aggregate = { completed: [], uploadedArtifacts: [], committedSelections: [], unresolvedFields: [] };
   const completedIds = new Set();
   for (let pass = 0; pass < maxPasses; pass += 1) {
@@ -585,6 +600,14 @@ export async function prepareApplicationForm(page, profile, artifacts, { maxPass
     };
   }
   return reviewed;
+}
+
+export async function prepareApplicationForm(page, profile, artifacts, options = {}) {
+  try {
+    return await prepareApplicationFormGuarded(page, profile, artifacts, options);
+  } finally {
+    await removeSubmissionGuard(page);
+  }
 }
 
 export function classifyUserGate(snapshot) {
