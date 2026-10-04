@@ -83,6 +83,49 @@ test('listing-page non-submitting button labelled Apply for this job opens the f
   });
 });
 
+test('exact inspected entry identity survives duplicate Apply controls and DOM reordering', async () => {
+  const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
+  const formUrl = `${listingUrl}/application`;
+  await withFixture({
+    [listingUrl]: `<h1>Acme Data Engineer</h1>
+      <button id="approved" type="button" onclick="location.href='${formUrl}'">Apply</button>
+      <button id="duplicate" type="button" onclick="document.body.dataset.wrong='clicked'">Apply</button>`,
+    [formUrl]: FORM_HTML,
+  }, async ({ context, page }) => {
+    await page.goto(listingUrl);
+    const snapshot = await collectPageSnapshot(page);
+    const selected = selectSafeApplyContinuation(snapshot.controls, {
+      listingUrl, currentState: 'listing_verified', actualFormReached: false, candidateFieldSignals: 0,
+    });
+    assert.ok(selected.controlId);
+    await page.evaluate(() => document.body.append(document.querySelector('#approved')));
+    const result = await followSafeApplicationEntryFlow(context, page, snapshot, CANDIDATE, {
+      listingUrl, applyUrl: formUrl,
+    });
+    assert.equal(result.form.actualForm, true);
+    assert.equal(result.hops[0].controlId, selected.controlId);
+    assert.equal(result.hops[0].duplicateCandidateCount, 2);
+    assert.equal(result.hops[0].activationMethod, 'playwright_click');
+  });
+});
+
+test('bounded observation detects a delayed same-page application form', async () => {
+  const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
+  await withFixture({
+    [listingUrl]: `<h1>Acme Data Engineer</h1>
+      <button type="button" onclick="setTimeout(() => document.body.insertAdjacentHTML('beforeend', \`<form><label>First name <input name='first_name'></label><label>Email <input type='email' name='email'></label><label>Resume <input type='file' name='resume'></label><button type='submit'>Submit application</button></form>\`), 1200)">Apply now</button>`,
+  }, async ({ context, page }) => {
+    await page.goto(listingUrl);
+    const result = await followSafeApplicationEntryFlow(
+      context, page, await collectPageSnapshot(page), CANDIDATE, { listingUrl, observationWindowMs: 3_000 },
+    );
+    assert.equal(result.form.actualForm, true);
+    assert.equal(result.hops.length, 1);
+    assert.equal(result.hops[0].activationMethod, 'playwright_click');
+    assert.equal(result.snapshot.controls.some((row) => row.text === 'Submit application'), true);
+  });
+});
+
 test('StepStone harmonised entry label is accepted only as a non-submit listing control', () => {
   const listingUrl = 'https://www.stepstone.de/stellenangebote--role--14207605-inline.html';
   const control = { tag: 'button', type: 'button', text: 'Ich bin interessiert', visible: true };
@@ -101,15 +144,18 @@ test('entry allowlist remains exact while semantic final actions stay forbidden'
   }, {
     listingUrl, currentState: 'listing_verified', actualFormReached: false, candidateFieldSignals: 0,
   }).safe;
-  for (const safe of ['Apply', 'Apply now', 'Apply for this job', 'Jetzt bewerben']) assert.equal(classify(safe), true, safe);
-  for (const unsafe of ['Submit application', 'Apply and submit', 'Review and apply']) assert.equal(classify(unsafe), false, unsafe);
+  for (const safe of ['Apply', 'Apply now', 'Apply here!', 'Apply for this job', 'Jetzt bewerben']) assert.equal(classify(safe), true, safe);
+  for (const unsafe of ['Submit application', 'Apply and submit', 'Apply here and submit', 'Review and apply']) assert.equal(classify(unsafe), false, unsafe);
   assert.equal(classify('Apply', 'submit'), false);
 });
 
 function clickFailureFixture({ consequentialOnClick = null } = {}) {
   const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
   const formUrl = `${listingUrl}/application`;
-  const control = { tag: 'button', type: 'button', text: 'Apply', visible: true };
+  const control = {
+    controlId: 'entry-fixture', tag: 'button', type: 'button', text: 'Apply', visible: true,
+    enabled: true, attached: true, topmostMatches: true,
+  };
   let clicks = 0;
   let currentUrl = listingUrl;
   let evaluatedSnapshot = {
@@ -117,10 +163,29 @@ function clickFailureFixture({ consequentialOnClick = null } = {}) {
     formCount: 0, fields: [], controls: [control],
   };
   const locator = {
-    evaluate: async () => control,
+    count: async () => 1,
+    evaluate: async (_callback, operation) => {
+      if (operation !== 'career-ops-exact-entry-click') return control;
+      clicks += 1;
+      if (clicks === consequentialOnClick) {
+        currentUrl = formUrl;
+        evaluatedSnapshot = {
+          documentTitle: 'Acme Data Engineer application', headings: ['Acme Data Engineer'], bodyText: 'Application',
+          formCount: 1,
+          fields: [
+            { type: 'text', text: 'First name', visible: true },
+            { type: 'email', text: 'Email', visible: true },
+            { type: 'file', text: 'Resume', visible: true },
+          ],
+          controls: [{ controlId: 'entry-final', tag: 'button', type: 'submit', text: 'Submit application', visible: true }],
+        };
+      }
+      return null;
+    },
     scrollIntoViewIfNeeded: async () => {},
     waitFor: async () => {},
-    click: async () => {
+    click: async (options = {}) => {
+      if (options.trial) return;
       clicks += 1;
       if (clicks === consequentialOnClick) {
         currentUrl = formUrl;
@@ -140,7 +205,7 @@ function clickFailureFixture({ consequentialOnClick = null } = {}) {
   };
   const page = {
     url: () => currentUrl,
-    locator: () => ({ count: async () => 1, nth: () => locator }),
+    locator: () => locator,
     evaluate: async () => evaluatedSnapshot,
     waitForLoadState: async () => {},
     waitForTimeout: async () => {},
@@ -155,7 +220,8 @@ function clickFailureFixture({ consequentialOnClick = null } = {}) {
 test('entry click timeout is inspected before retry and preserves a form reached despite the error', async () => {
   const fixture = clickFailureFixture({ consequentialOnClick: 1 });
   const result = await followSafeApplicationEntryFlow(
-    fixture.context, fixture.page, fixture.getSnapshot(), CANDIDATE, { listingUrl: fixture.listingUrl },
+    fixture.context, fixture.page, fixture.getSnapshot(), CANDIDATE,
+    { listingUrl: fixture.listingUrl, observationWindowMs: 5 },
   );
   assert.equal(result.form.actualForm, true);
   assert.equal(fixture.getClicks(), 1);
@@ -165,20 +231,24 @@ test('entry click timeout is inspected before retry and preserves a form reached
 test('a second freshly revalidated attempt may succeed after the first has no effect', async () => {
   const fixture = clickFailureFixture({ consequentialOnClick: 2 });
   const result = await followSafeApplicationEntryFlow(
-    fixture.context, fixture.page, fixture.getSnapshot(), CANDIDATE, { listingUrl: fixture.listingUrl },
+    fixture.context, fixture.page, fixture.getSnapshot(), CANDIDATE,
+    { listingUrl: fixture.listingUrl, observationWindowMs: 5 },
   );
   assert.equal(result.form.actualForm, true);
   assert.equal(fixture.getClicks(), 2);
+  assert.equal(result.hops[0].activationMethod, 'exact_dom_click');
 });
 
 test('verified safe entry interaction failure is bounded to two attempts and requests manual review', async () => {
   const fixture = clickFailureFixture();
   const result = await followSafeApplicationEntryFlow(
-    fixture.context, fixture.page, fixture.getSnapshot(), CANDIDATE, { listingUrl: fixture.listingUrl },
+    fixture.context, fixture.page, fixture.getSnapshot(), CANDIDATE,
+    { listingUrl: fixture.listingUrl, observationWindowMs: 5 },
   );
   assert.equal(fixture.getClicks(), 2);
   assert.equal(result.manualReviewRequired, true);
-  assert.match(result.reason, /2 bounded attempts/);
+  assert.match(result.reason, /bounded safe activation ladder/);
+  assert.deepEqual(result.diagnostics.attempts.map((row) => row.method), ['playwright_click', 'exact_dom_click']);
   assert.equal(result.form.actualForm, false);
 });
 
@@ -187,7 +257,8 @@ test('unsafe final action never enters interaction retry handling', async () => 
   const snapshot = fixture.getSnapshot();
   snapshot.controls = [{ tag: 'button', type: 'button', text: 'Submit application', visible: true }];
   const result = await followSafeApplicationEntryFlow(
-    fixture.context, fixture.page, snapshot, CANDIDATE, { listingUrl: fixture.listingUrl },
+    fixture.context, fixture.page, snapshot, CANDIDATE,
+    { listingUrl: fixture.listingUrl, observationWindowMs: 5 },
   );
   assert.equal(fixture.getClicks(), 0);
   assert.equal(result.manualReviewRequired, undefined);

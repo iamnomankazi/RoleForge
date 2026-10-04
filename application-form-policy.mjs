@@ -104,6 +104,9 @@ export function classifyFieldSemantics(field = {}) {
   if (/linkedin/.test(text)) return { category: 'identity_contact', semantic: 'linkedin' };
   if (/github/.test(text)) return { category: 'identity_contact', semantic: 'github' };
   if (/portfolio|website|personal site/.test(text)) return { category: 'identity_contact', semantic: 'website' };
+  if (/(?:enrolled|degree program).*(?:german university)|(?:german university).*(?:enrolled|degree program)/.test(text)) {
+    return { category: 'education', semantic: 'german_university_enrollment' };
+  }
   if (/university|school|institution/.test(text)) return { category: 'education', semantic: 'university' };
   if (/degree|qualification/.test(text)) return { category: 'education', semantic: 'degree' };
   if (/graduat/.test(text)) return { category: 'education', semantic: 'graduation' };

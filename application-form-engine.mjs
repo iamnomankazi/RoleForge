@@ -18,6 +18,7 @@ import {
 import { validateNarrativeProvenanceRecord } from './application-evidence.mjs';
 
 const MAX_FIELD_ATTEMPTS = 2;
+const MAX_CONTROLLED_RESUMES = 2;
 
 export const DEFAULT_LIVE_FORM_LIMITS = Object.freeze({
   sessionMs: 5 * 60 * 1000,
@@ -184,7 +185,7 @@ export async function inspectOperationalApplicationForm(page) {
 
 export function inspectOperationalUploadTopology(snapshot) {
   const fields = (snapshot.fields || [])
-    .filter((field) => field.visible !== false && !field.disabled && field.type === 'file')
+    .filter((field) => !field.disabled && field.type === 'file')
     .map((field) => {
       const semantics = classifyFieldSemantics(field);
       return {
@@ -270,7 +271,9 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
   const visibleFields = (snapshot.fields || []).filter((field) => {
     if (field.disabled) return false;
     const semantics = classifyFieldSemantics(field);
-    return field.visible !== false || (field.required && semantics.category === 'current_location');
+    return field.visible !== false
+      || semantics.category === 'file_upload'
+      || (field.required && semantics.category === 'current_location');
   });
 
   for (const field of visibleFields) {
@@ -352,6 +355,14 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       } else {
         actions.push(planned);
       }
+      continue;
+    }
+    if (semantics.semantic === 'german_university_enrollment') {
+      unresolvedFields.push(manualField(
+        field,
+        semantics,
+        'German-university enrollment requires an explicit grounded Yes or No answer; an institution name is not a valid substitute.',
+      ));
       continue;
     }
     if (semantics.category === 'unknown') {
@@ -452,17 +463,22 @@ async function installSubmissionGuard(page) {
 }
 
 async function exactLocator(page, action) {
-  const selectors = [];
+  const selectors = [
+    `[data-career-ops-field-id="${String(action.fieldId).replace(/"/g, '\\"')}"]`,
+  ];
   if (action.id) selectors.push(`[id="${String(action.id).replace(/"/g, '\\"')}"]`);
   if (action.name) selectors.push(`[name="${String(action.name).replace(/"/g, '\\"')}"]`);
-  selectors.push(`[data-career-ops-field-id="${String(action.fieldId).replace(/"/g, '\\"')}"]`);
   for (const selector of selectors) {
-    const locator = page.locator(selector).first();
-    if (await locator.count()) return locator;
+    const locator = page.locator(selector);
+    const count = await locator.count();
+    if (count === 1) return locator;
+    if (count > 1 && selector.startsWith('[data-career-ops-field-id=')) {
+      throw new Error(`Career-Ops exact field identity is ambiguous for ${action.semantic}`);
+    }
   }
-  if (action.label) {
-    const locator = page.getByLabel(action.label, { exact: true }).first();
-    if (await locator.count()) return locator;
+  if (action.label && action.action !== 'upload') {
+    const locator = page.getByLabel(action.label, { exact: true });
+    if (await locator.count() === 1) return locator;
   }
   throw new Error(`Form control changed and could not be reacquired: ${action.semantic}`);
 }
@@ -540,12 +556,29 @@ async function performAction(page, action, visibleOptions, { deadlineMs, clock }
   let locator = await exactLocator(page, action);
   await assertNotFinal(locator);
   if (action.action === 'upload') {
-    await locator.setInputFiles(action.artifact.resolvedPath, { timeout: remainingTimeout(deadlineMs, clock) });
-    locator = await exactLocator(page, action);
-    const state = await validationState(locator);
-    const body = await page.locator('body').innerText();
-    if (!state.files.includes(action.artifact.intendedFilename) && !body.includes(action.artifact.intendedFilename)) {
-      throw new Error(`Uploaded filename is not visibly confirmed by the form: ${action.artifact.intendedFilename}`);
+    const target = await locator.elementHandle();
+    if (!target) throw new Error(`Exact upload input is unavailable: ${action.semantic}`);
+    try {
+      const before = await target.evaluate((element) => ({
+        fieldId: element.getAttribute('data-career-ops-field-id') || '',
+        type: (element.type || '').toLowerCase(),
+      }));
+      if (before.type !== 'file') throw new Error(`Exact upload target is not a file input: ${action.semantic}`);
+      if (before.fieldId && before.fieldId !== action.fieldId) {
+        throw new Error(`Exact upload target identity changed before upload: ${action.semantic}`);
+      }
+      await locator.setInputFiles(action.artifact.resolvedPath, { timeout: remainingTimeout(deadlineMs, clock) });
+      const state = await target.evaluate((element) => ({
+        attached: element.isConnected,
+        files: element.files ? [...element.files].map((file) => file.name) : [],
+      }));
+      if (state.files.length !== 1 || state.files[0] !== action.artifact.intendedFilename) {
+        throw new Error(
+          `Exact upload input did not accept the intended artifact for ${action.semantic}: expected ${action.artifact.intendedFilename}; observed ${state.files.join(', ') || '(none)'}`,
+        );
+      }
+    } finally {
+      await target.dispose();
     }
     return action.artifact.intendedFilename;
   }
@@ -844,8 +877,10 @@ export async function reviewOperationalApplicationForm(page, profile, artifacts,
     passBudget: {
       fullPassesUsed: 1,
       fullPassesAllowed: 1,
-      controlledResumeUsed: resumeMode === 'initial' ? 0 : 1,
-      controlledResumeAllowed: 1,
+      controlledResumeUsed: resumeMode === 'initial'
+        ? 0
+        : Number(previousEvidence?.passBudget?.controlledResumeUsed || 0) + 1,
+      controlledResumeAllowed: MAX_CONTROLLED_RESUMES,
       perFieldAttemptsAllowed: MAX_FIELD_ATTEMPTS,
       timeLimits: execution.timeLimits || DEFAULT_LIVE_FORM_LIMITS,
       sessionLimitReached: Boolean(execution.sessionLimitReached),
@@ -893,7 +928,8 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
 } = {}) {
   const effectiveLimits = resolveOperationalFormLimits(profile, limits || {});
   const sessionDeadlineMs = clock() + effectiveLimits.sessionMs;
-  if (resumeMode !== 'initial' && previousEvidence?.passBudget?.controlledResumeUsed >= 1) {
+  if (resumeMode !== 'initial'
+      && Number(previousEvidence?.passBudget?.controlledResumeUsed || 0) >= MAX_CONTROLLED_RESUMES) {
     const snapshot = await inspectOperationalApplicationForm(page);
     const evidence = {
       ...previousEvidence,

@@ -60,7 +60,7 @@ const TRANSITIONS = Object.freeze({
   form_inspected: new Set(['fields_filled', 'review_required', 'login_required', 'blocked', 'closed', 'abandoned']),
   fields_filled: new Set(['files_uploaded', 'form_prepared', 'review_required', 'login_required', 'blocked', 'closed', 'abandoned']),
   files_uploaded: new Set(['form_prepared', 'review_required', 'login_required', 'blocked', 'closed', 'abandoned']),
-  review_required: new Set(['actual_form_reached', 'form_inspected', 'blocked', 'closed', 'abandoned']),
+  review_required: new Set(['review_required', 'actual_form_reached', 'form_inspected', 'blocked', 'closed', 'abandoned']),
   login_required: new Set(['listing_verified', 'actual_form_reached', 'review_required', 'blocked', 'closed', 'abandoned']),
   form_prepared: new Set(['closed', 'abandoned']),
   blocked: new Set(['actual_form_reached', 'review_required', 'closed', 'abandoned']),

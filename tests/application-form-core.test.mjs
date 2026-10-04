@@ -12,7 +12,7 @@ import {
   isSemanticFinalAction,
   prepareApplicationForm,
 } from '../application-form-core.mjs';
-import { followSafeContinuation } from '../application-browser-executor.mjs';
+import { collectPageSnapshot, followSafeContinuation } from '../application-browser-executor.mjs';
 import { createNarrativeProvenanceRecord, resolveFactualEvidence } from '../application-evidence.mjs';
 import { attachFactualSources } from './fixtures/application-evidence-profile.mjs';
 import {
@@ -176,6 +176,34 @@ test('representative Lever and Workday forms are recognized without final-action
   }
 });
 
+test('footer login text does not mask an accessible application form as an account gate', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const application = await browser.newPage();
+    await application.setContent(`
+      <form>
+        <label>First name* <input name="first_name" required></label>
+        <label>Last name* <input name="last_name" required></label>
+        <label>Email* <input name="email" type="email" required></label>
+        <label>Upload CV <input name="resume" type="file"></label>
+        <button type="submit">Submit application</button>
+      </form>
+      <footer>Already working here? Log in</footer>
+    `);
+    const applicationSnapshot = await inspectApplicationForm(application);
+    assert.equal(applicationSnapshot.loginGate, false);
+    assert.equal(classifyUserGate(applicationSnapshot), null);
+
+    const accountGate = await browser.newPage();
+    await accountGate.setContent('<h1>Log in to apply</h1><label>Password <input type="password"></label>');
+    const accountSnapshot = await inspectApplicationForm(accountGate);
+    assert.equal(accountSnapshot.loginGate, true);
+    assert.equal(classifyUserGate(accountSnapshot)?.state, 'login_required');
+  } finally {
+    await browser.close();
+  }
+});
+
 test('visible non-blocking CAPTCHA is classified without preventing safe preparation, while consent remains unresolved', async () => {
   const browser = await chromium.launch({ headless: true });
   try {
@@ -325,14 +353,8 @@ test('duplicate or irrelevant task-created popups are closed without touching an
     await sentinel.setContent('<h1 id="sentinel">Unrelated tab</h1>');
     const listing = await context.newPage();
     await listing.goto('https://fixture.career-ops.invalid/jobs/123');
-    const destination = await followSafeContinuation(context, listing, {
-      visible: true,
-      inForm: false,
-      tag: 'a',
-      type: '',
-      text: 'Apply Now',
-      href: 'https://fixture.career-ops.invalid/apply/123',
-    }, {
+    const snapshot = await collectPageSnapshot(listing);
+    const destination = await followSafeContinuation(context, listing, snapshot.controls.find((row) => row.text === 'Apply Now'), {
       listingUrl: 'https://fixture.career-ops.invalid/jobs/123',
       applyUrl: 'https://fixture.career-ops.invalid/apply/123',
       currentState: 'listing_verified',

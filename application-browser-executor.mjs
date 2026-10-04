@@ -305,7 +305,7 @@ export function classifyFormSnapshot(snapshot) {
   };
 }
 
-const ENTRY_ACTION_LABEL = /^(?:apply|apply now|apply for (?:this|the) (?:job|role|position)|start (?:an? |your )?application|begin (?:an? |your )?application|continue to (?:the )?application|go to (?:the )?application|bewerben|jetzt bewerben|ich bin interessiert|postuler)$/i;
+const ENTRY_ACTION_LABEL = /^(?:apply|apply now|apply here!?|apply for (?:this|the) (?:job|role|position)|start (?:an? |your )?application|begin (?:an? |your )?application|continue to (?:the )?application|go to (?:the )?application|bewerben|jetzt bewerben|ich bin interessiert|postuler)$/i;
 const FINAL_ACTION_LABEL = /\b(?:submit|send|complete|finish|confirm|finali[sz]e|review and apply|apply and submit)\b/i;
 const DANGEROUS_ACTION_PATH = /\b(?:submit|send|complete|finish|confirm|finali[sz]e)[-_ ]?(?:application)?\b/i;
 
@@ -483,7 +483,13 @@ export async function collectPageSnapshot(page) {
         element.getAttribute('id'),
       ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
     };
+    globalThis.__careerOpsEntryControlCounter = Number(globalThis.__careerOpsEntryControlCounter || 0);
     const controls = Array.from(document.querySelectorAll('a, button, input[type="submit"], input[type="image"]')).map((element, index) => {
+      let controlId = element.getAttribute('data-career-ops-entry-id');
+      if (!controlId) {
+        controlId = `entry-${++globalThis.__careerOpsEntryControlCounter}`;
+        element.setAttribute('data-career-ops-entry-id', controlId);
+      }
       const associatedForm = element instanceof HTMLButtonElement || element instanceof HTMLInputElement
         ? element.form
         : element.closest('form');
@@ -493,8 +499,16 @@ export async function collectPageSnapshot(page) {
       const formHasCandidateFields = formFields.some((field) => (
         /first.?name|last.?name|surname|e-?mail|phone|mobile|resume|curriculum|\bcv\b|linkedin/i.test(textFor(field))
       ));
+      const rect = element.getBoundingClientRect();
+      const centerInViewport = rect.width > 0 && rect.height > 0
+        && rect.left + rect.width / 2 >= 0 && rect.left + rect.width / 2 < innerWidth
+        && rect.top + rect.height / 2 >= 0 && rect.top + rect.height / 2 < innerHeight;
+      const topmost = centerInViewport
+        ? document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+        : null;
       return {
         index,
+        controlId,
         tag: element.tagName.toLowerCase(),
         type: element.getAttribute('type') || '',
         text: [element.innerText, element.getAttribute('value'), element.getAttribute('aria-label'), element.getAttribute('title')]
@@ -511,6 +525,11 @@ export async function collectPageSnapshot(page) {
         formAction: associatedForm?.action || '',
         formHasCandidateFields,
         visible: visible(element),
+        enabled: !element.disabled && element.getAttribute('aria-disabled') !== 'true',
+        attached: element.isConnected,
+        topmostMatches: Boolean(topmost && (topmost === element || element.contains(topmost))),
+        boundingBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+        outerHtml: element.outerHTML.slice(0, 500),
       };
     });
     const fields = Array.from(document.querySelectorAll('input, textarea, select')).map((element) => ({
@@ -531,12 +550,8 @@ export async function collectPageSnapshot(page) {
   return { ...snapshot, currentUrl: page.url() };
 }
 
-async function reacquireSafeContinuation(page, expected, scope) {
-  const controls = page.locator('a, button, input[type="submit"], input[type="image"]');
-  const count = await controls.count();
-  for (let index = 0; index < count; index += 1) {
-    const locator = controls.nth(index);
-    const current = await locator.evaluate((element) => {
+async function inspectEntryControl(locator) {
+  return locator.evaluate((element) => {
       const style = window.getComputedStyle(element);
       const visible = style.display !== 'none'
         && style.visibility !== 'hidden'
@@ -560,7 +575,15 @@ async function reacquireSafeContinuation(page, expected, scope) {
       ).some((field) => (
         /first.?name|last.?name|surname|e-?mail|phone|mobile|resume|curriculum|\bcv\b|linkedin/i.test(textFor(field))
       ));
+      const rect = element.getBoundingClientRect();
+      const centerInViewport = rect.width > 0 && rect.height > 0
+        && rect.left + rect.width / 2 >= 0 && rect.left + rect.width / 2 < innerWidth
+        && rect.top + rect.height / 2 >= 0 && rect.top + rect.height / 2 < innerHeight;
+      const topmost = centerInViewport
+        ? document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+        : null;
       return {
+        controlId: element.getAttribute('data-career-ops-entry-id') || '',
         tag: element.tagName.toLowerCase(),
         type: element.getAttribute('type') || '',
         text: [element.innerText, element.getAttribute('value'), element.getAttribute('aria-label'), element.getAttribute('title')]
@@ -577,78 +600,168 @@ async function reacquireSafeContinuation(page, expected, scope) {
         formAction: associatedForm?.action || '',
         formHasCandidateFields,
         visible,
+        enabled: !element.disabled && element.getAttribute('aria-disabled') !== 'true',
+        attached: element.isConnected,
+        topmostMatches: Boolean(topmost && (topmost === element || element.contains(topmost))),
+        boundingBox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+        interceptor: topmost && topmost !== element && !element.contains(topmost)
+          ? {
+            tag: topmost.tagName.toLowerCase(),
+            id: topmost.id || '',
+            className: String(topmost.className || '').slice(0, 180),
+            text: String(topmost.innerText || topmost.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim().slice(0, 180),
+          }
+          : null,
+        outerHtml: element.outerHTML.slice(0, 500),
       };
     });
-    const safe = selectSafeApplyContinuation([current], scope);
-    if (safe
-        && normalized(safe.tag) === normalized(expected.tag)
-        && inline(safe.text) === inline(expected.text)
-        && predictedEntryDestination(safe) === predictedEntryDestination(expected)) return locator;
+}
+
+async function reacquireSafeContinuation(page, expected, scope) {
+  if (!inline(expected?.controlId)) {
+    throw new Error('Verified application continuation has no Career-Ops exact control identity');
   }
-  throw new Error('Safe application continuation changed before click; refusing to navigate');
+  const escaped = String(expected.controlId).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const locator = page.locator(`[data-career-ops-entry-id="${escaped}"]`);
+  const count = await locator.count();
+  if (count !== 1) {
+    throw new Error(`Verified application continuation exact identity resolved ${count} controls; refusing to navigate`);
+  }
+  const current = await inspectEntryControl(locator);
+  const safe = selectSafeApplyContinuation([current], scope);
+  if (!safe
+      || current.controlId !== expected.controlId
+      || normalized(safe.tag) !== normalized(expected.tag)
+      || inline(safe.text) !== inline(expected.text)
+      || predictedEntryDestination(safe) !== predictedEntryDestination(expected)) {
+    throw new Error('Verified application continuation changed before activation; refusing to navigate');
+  }
+  return { locator, control: current };
 }
 
-async function inspectContinuationAttempt(context, page, before, beforeUrl, expectedDestination, popupPromise) {
-  const popup = await popupPromise;
-  const created = context.pages().filter((candidatePage) => !before.has(candidatePage));
-  await Promise.all([page, ...created].map((candidatePage) => (
-    candidatePage.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => {})
-  )));
-  await page.waitForTimeout(750).catch(() => {});
-  const pages = [page, ...created];
-  const snapshots = await Promise.all(pages.map(async (candidatePage) => {
-    try {
-      return { page: candidatePage, snapshot: await collectPageSnapshot(candidatePage) };
-    } catch {
-      return { page: candidatePage, snapshot: null };
+async function inspectContinuationAttempt(context, page, before, beforeUrl, expectedDestination, observationWindowMs) {
+  const deadline = Date.now() + observationWindowMs;
+  const observedUrls = new Set([beforeUrl]);
+  let created = [];
+  let snapshots = [];
+  do {
+    created = context.pages().filter((candidatePage) => !before.has(candidatePage));
+    const pages = [page, ...created];
+    snapshots = await Promise.all(pages.map(async (candidatePage) => {
+      await candidatePage.waitForLoadState('domcontentloaded', { timeout: 500 }).catch(() => {});
+      try {
+        const snapshot = await collectPageSnapshot(candidatePage);
+        observedUrls.add(snapshot.currentUrl);
+        return { page: candidatePage, snapshot };
+      } catch {
+        return { page: candidatePage, snapshot: null };
+      }
+    }));
+    const exactDestination = expectedDestination
+      ? snapshots.find(({ snapshot }) => snapshot && sameUrlIgnoringHash(snapshot.currentUrl, expectedDestination))
+      : null;
+    const consequential = snapshots.find(({ snapshot, page: candidatePage }) => {
+      if (!snapshot) return false;
+      const form = classifyFormSnapshot(snapshot);
+      return form.actualForm
+        || form.loginRequired
+        || (candidatePage !== page && snapshot.currentUrl !== 'about:blank')
+        || !sameUrlIgnoringHash(snapshot.currentUrl, beforeUrl);
+    });
+    const outcome = exactDestination || consequential;
+    if (outcome) {
+      return {
+        succeeded: true,
+        destination: outcome.page,
+        created,
+        observation: {
+          observedUrls: [...observedUrls],
+          pageCountBefore: before.size,
+          pageCountAfter: context.pages().length,
+          form: classifyFormSnapshot(outcome.snapshot),
+        },
+      };
     }
-  }));
-  const exactDestination = expectedDestination
-    ? snapshots.find(({ snapshot }) => snapshot && sameUrlIgnoringHash(snapshot.currentUrl, expectedDestination))
-    : null;
-  const consequential = snapshots.find(({ snapshot, page: candidatePage }) => {
-    if (!snapshot) return false;
-    const form = classifyFormSnapshot(snapshot);
-    return form.actualForm
-      || form.loginRequired
-      || candidatePage !== page
-      || !sameUrlIgnoringHash(snapshot.currentUrl, beforeUrl);
-  });
-  const outcome = exactDestination || consequential || (popup ? snapshots.find((row) => row.page === popup) : null);
-  return { succeeded: Boolean(outcome), destination: outcome?.page || page, created };
+    if (Date.now() < deadline) await page.waitForTimeout(200).catch(() => {});
+  } while (Date.now() < deadline);
+  return {
+    succeeded: false,
+    destination: page,
+    created,
+    observation: {
+      observedUrls: [...observedUrls],
+      pageCountBefore: before.size,
+      pageCountAfter: context.pages().length,
+      form: snapshots[0]?.snapshot ? classifyFormSnapshot(snapshots[0].snapshot) : null,
+    },
+  };
 }
 
-export async function followSafeContinuation(context, page, control, scope) {
+export async function followSafeContinuation(context, page, control, scope, {
+  observationWindowMs = 4_500,
+} = {}) {
   const beforeUrl = page.url();
   const expectedDestination = predictedEntryDestination(control);
-  let lastError = null;
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
-    const locator = await reacquireSafeContinuation(page, control, scope);
-    await locator.scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => {});
-    await locator.waitFor({ state: 'visible', timeout: 5_000 }).catch(() => {});
+  const attempts = [];
+  const methods = ['playwright_click', 'exact_dom_click'];
+  for (const method of methods) {
+    let acquired = null;
+    let methodError = null;
     const before = new Set(context.pages());
-    const popupPromise = context.waitForEvent('page', { timeout: 1_500 }).catch(() => null);
     try {
-      await locator.click({ timeout: 10_000 });
+      acquired = await reacquireSafeContinuation(page, control, scope);
+      await acquired.locator.scrollIntoViewIfNeeded({ timeout: 3_000 }).catch(() => {});
+      await acquired.locator.waitFor({ state: 'visible', timeout: 3_000 });
+      acquired = await reacquireSafeContinuation(page, control, scope);
+      if (method === 'playwright_click') {
+        await acquired.locator.click({ trial: true, timeout: 3_000 });
+        await acquired.locator.click({ timeout: 7_000 });
+      } else {
+        if (!acquired.control.attached || !acquired.control.enabled || !acquired.control.topmostMatches) {
+          throw new Error('Exact DOM activation safety gate failed: control is detached, disabled, or intercepted');
+        }
+        await acquired.locator.evaluate((element, operation) => {
+          if (operation !== 'career-ops-exact-entry-click') throw new Error('Invalid activation operation');
+          element.click();
+        }, 'career-ops-exact-entry-click');
+      }
     } catch (error) {
-      lastError = error;
+      methodError = error;
     }
     const outcome = await inspectContinuationAttempt(
-      context, page, before, beforeUrl, expectedDestination, popupPromise,
+      context, page, before, beforeUrl, expectedDestination, observationWindowMs,
     );
+    attempts.push({
+      method,
+      control: acquired?.control || control,
+      error: methodError ? inline(methodError.message).slice(0, 1_000) : null,
+      observation: outcome.observation,
+    });
     if (outcome.succeeded) {
       for (const extra of outcome.created) {
         if (extra !== outcome.destination) await extra.close().catch(() => {});
       }
       await outcome.destination.waitForTimeout(750).catch(() => {});
+      Object.defineProperty(outcome.destination, '__careerOpsEntryInteractionEvidence', {
+        configurable: true,
+        value: { successfulMethod: method, attempts: [...attempts] },
+      });
       return outcome.destination;
     }
     for (const extra of outcome.created) await extra.close().catch(() => {});
   }
-  const error = new Error(
-    `Verified safe application-entry control could not be operated after 2 bounded attempts${lastError ? `: ${inline(lastError.message).slice(0, 220)}` : ''}`,
-  );
+  const error = new Error('Verified safe application-entry control could not be operated by the bounded safe activation ladder');
   error.code = 'application_entry_interaction_failed';
+  error.entryDiagnostics = {
+    controlId: control.controlId,
+    tag: control.tag,
+    text: inline(control.text).slice(0, 180),
+    destination: expectedDestination || null,
+    duplicateCandidateCount: Number(control.duplicateCandidateCount || 1),
+    urlBefore: beforeUrl,
+    urlAfter: page.url(),
+    attempts,
+  };
   throw error;
 }
 
@@ -665,6 +778,7 @@ function canonicalVisitedUrl(value) {
 export async function followSafeApplicationEntryFlow(context, initialPage, initialSnapshot, candidate, {
   listingUrl,
   applyUrl = null,
+  observationWindowMs = 4_500,
 } = {}) {
   let page = initialPage;
   let snapshot = initialSnapshot;
@@ -689,7 +803,18 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
       actualFormReached: false,
       candidateFieldSignals: form.candidateFieldSignals,
     };
-    const continuation = selectSafeApplyContinuation(snapshot.controls, scope);
+    const selectedContinuation = selectSafeApplyContinuation(snapshot.controls, scope);
+    const continuation = selectedContinuation
+      ? {
+        ...selectedContinuation,
+        duplicateCandidateCount: snapshot.controls.filter((candidateControl) => (
+          classifyApplicationEntryAction(candidateControl, scope).safe
+          && normalized(candidateControl.tag) === normalized(selectedContinuation.tag)
+          && inline(candidateControl.text) === inline(selectedContinuation.text)
+          && predictedEntryDestination(candidateControl) === predictedEntryDestination(selectedContinuation)
+        )).length,
+      }
+      : null;
     if (!continuation) {
       return {
         page,
@@ -722,7 +847,7 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
 
     const sourceUrl = snapshot.currentUrl;
     try {
-      page = await followSafeContinuation(context, page, continuation, scope);
+      page = await followSafeContinuation(context, page, continuation, scope, { observationWindowMs });
     } catch (error) {
       if (error?.code === 'application_entry_interaction_failed') {
         return {
@@ -734,6 +859,7 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
           hops,
           manualReviewRequired: true,
           reason: inline(error.message),
+          diagnostics: error.entryDiagnostics || null,
         };
       }
       throw error;
@@ -752,6 +878,9 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
       destinationUrl: snapshot.currentUrl,
       tag: continuation.tag,
       text: continuation.text,
+      controlId: continuation.controlId,
+      duplicateCandidateCount: continuation.duplicateCandidateCount,
+      activationMethod: page.__careerOpsEntryInteractionEvidence?.successfulMethod || null,
     });
     if (!compatible) {
       return {
@@ -1069,24 +1198,32 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
         return { batchId: contract.manifest.batchId, candidate: listingUrl, state: finalState.state };
       }
       if (!entryFlow.form.actualForm) {
-        finalState = recordTransition(
+        finalState = transition(
           contract.manifestPath,
-          listingUrl,
+          contract.candidate.candidate_id,
           entryFlow.manualReviewRequired ? 'review_required' : 'blocked',
           formCurrentUrl,
           entryFlow.reason,
           'listing_verified',
+          executionLock.token,
+          entryFlow.diagnostics ? { entryInteraction: entryFlow.diagnostics } : null,
+          null,
+          root,
         );
         return { batchId: contract.manifest.batchId, candidate: listingUrl, state: finalState.state };
       }
 
-      finalState = recordTransition(
+      finalState = transition(
         contract.manifestPath,
-        listingUrl,
+        contract.candidate.candidate_id,
         'actual_form_reached',
         formCurrentUrl,
         `${entryFlow.form.reason}; ${entryFlow.reason}`,
         'listing_verified',
+        executionLock.token,
+        { entryActions: entryFlow.hops },
+        null,
+        root,
       );
       applicationPage = formPage;
       if (dependencies.onCandidatePage) await dependencies.onCandidatePage(applicationPage, contract);
@@ -1348,12 +1485,11 @@ async function executePreparationResume(options, contract, { root, executionLock
     const page = entryFlow.page;
     if (!entryFlow.form.actualForm || !entryFlow.compatible) {
       if (entryFlow.manualReviewRequired && entryFlow.compatible) {
-        if (fromState === 'review_required') {
-          return { batchId: contract.manifest.batchId, candidate: listingUrl, state: fromState };
-        }
         const state = transition(
           contract.manifestPath, contract.candidate.candidate_id, 'review_required', page.url(),
-          entryFlow.reason, fromState, executionLock.token, null, null, root,
+          entryFlow.reason, fromState, executionLock.token,
+          entryFlow.diagnostics ? { entryInteraction: entryFlow.diagnostics } : null,
+          null, root,
         );
         return { batchId: contract.manifest.batchId, candidate: listingUrl, state: state.state };
       }
@@ -1365,7 +1501,7 @@ async function executePreparationResume(options, contract, { root, executionLock
       transition(
         contract.manifestPath, contract.candidate.candidate_id, 'actual_form_reached', page.url(),
         'Fresh same-candidate resume revalidated the source, artifacts, listing identity, and actual form.',
-        fromState, executionLock.token, null, null, root,
+        fromState, executionLock.token, { entryActions: entryFlow.hops }, null, root,
       );
     }
     const state = await prepareResumedForm(page, contract, root, executionLock);

@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { chromium } from 'playwright';
 import { appendFormPreparationEvidence } from '../application-batch.mjs';
 import {
@@ -130,6 +133,105 @@ test('1–2. current location is canonical Example City while preferred location
 test('education institution is derived from the synthetic profile rather than source literals', () => {
   const result = plan([field({ id: 'university', label: 'University' })]);
   assert.equal(result.actions.find((row) => row.semantic === 'university').value, 'Example University');
+});
+
+test('German-university enrollment never receives an institution name as a Yes/No answer', () => {
+  const result = plan([field({
+    id: 'german-university',
+    tag: 'select',
+    type: 'select-one',
+    label: 'Are you enrolled in a full-time degree program at a German university?* (required)',
+    options: [{ label: 'Please select', value: '' }, { label: 'Yes', value: 'yes' }, { label: 'No', value: 'no' }],
+  })]);
+  assert.equal(result.actions.some((row) => row.value === 'Example University'), false);
+  assert.equal(result.actions.some((row) => row.semantic === 'german_university_enrollment'), false);
+  assert.match(result.unresolvedFields.find((row) => row.semantic === 'german_university_enrollment').reason, /explicit grounded Yes or No/);
+});
+
+test('visible starred fields are treated as required when the site omits native required attributes', async () => {
+  const page = await browser.newPage();
+  await page.setContent(`
+    <form>
+      <label for="choice">Relocation choice* (required)</label>
+      <select id="choice"><option value="">Please select</option><option>No</option></select>
+      <button type="submit">Submit application</button>
+    </form>
+  `);
+  const result = await prepareOperationalApplicationForm(page, profile, {}, { context: formContext });
+  assert.equal(result.evidence.requiredFieldCount, 1);
+  assert.ok(result.evidence.unresolvedFields.some((row) => row.label.includes('Relocation choice')));
+  assert.equal(result.evidence.finalAction.activated, false);
+  await page.close();
+});
+
+test('hidden exact CV and cover inputs receive distinct bound artifacts and verify their own files', async () => {
+  const artifactDir = mkdtempSync(join(tmpdir(), 'career-ops-hidden-uploads-'));
+  const cvName = 'Approved Data CV.pdf';
+  const coverName = 'Approved Cover Letter.pdf';
+  const cvPath = join(artifactDir, cvName);
+  const coverPath = join(artifactDir, coverName);
+  writeFileSync(cvPath, 'cv bytes');
+  writeFileSync(coverPath, 'cover bytes');
+  const page = await browser.newPage();
+  try {
+    await page.setContent(`
+      <form>
+        <label for="resume">Attach</label><input id="resume" name="resume" type="file" style="display:none">
+        <label for="cover_letter">Attach</label><input id="cover_letter" name="cover_letter" type="file" style="display:none">
+        <button type="submit">Submit application</button>
+      </form>
+      <script>
+        resume.addEventListener('change', function () {
+          window.resumeUpload = [...this.files].map(file => file.name);
+          this.remove();
+        });
+        cover_letter.addEventListener('change', function () {
+          window.coverUpload = [...this.files].map(file => file.name);
+          this.remove();
+        });
+      </script>
+    `);
+    const result = await prepareOperationalApplicationForm(page, profile, {
+      cv: { intendedFilename: cvName, sha256: 'sha256:cv', resolvedPath: cvPath },
+      coverLetter: { intendedFilename: coverName, sha256: 'sha256:cover', resolvedPath: coverPath },
+    }, { context: formContext });
+    assert.deepEqual(await page.evaluate(() => window.resumeUpload), [cvName]);
+    assert.deepEqual(await page.evaluate(() => window.coverUpload), [coverName]);
+    assert.deepEqual(
+      result.evidence.uploadedArtifacts.map((row) => [row.semantic, row.filename]),
+      [['cv_upload', cvName], ['cover_letter_upload', coverName]],
+    );
+    assert.equal(result.evidence.attemptLedger.some((row) => row.semantic === 'cv_upload' && row.committedValue === coverName), false);
+    assert.equal(result.evidence.attemptLedger.some((row) => row.semantic === 'cover_letter_upload' && row.committedValue === cvName), false);
+    assert.equal(result.evidence.finalAction.activated, false);
+  } finally {
+    await page.close();
+    rmSync(artifactDir, { recursive: true, force: true });
+  }
+});
+
+test('Career-Ops field identity outranks a later duplicate site name', async () => {
+  const page = await browser.newPage();
+  await page.setContent(`
+    <form>
+      <label for="first">First name</label><input id="first" name="first_name">
+      <label for="email">Email</label><input id="email" name="email" type="email">
+      <button type="submit">Submit application</button>
+    </form>
+    <script>
+      first.addEventListener('input', () => {
+        if (document.querySelector('#decoy')) return;
+        const decoy = document.createElement('input');
+        decoy.id = 'decoy'; decoy.name = 'email'; decoy.type = 'email';
+        email.before(decoy);
+      });
+    </script>
+  `);
+  const result = await prepareOperationalApplicationForm(page, profile, {}, { context: formContext });
+  assert.equal(await page.locator('#email').inputValue(), profile.candidate.email);
+  assert.equal(await page.locator('#decoy').inputValue(), '');
+  assert.equal(result.evidence.finalAction.activated, false);
+  await page.close();
 });
 
 test('3–6. authorization and sponsorship are exact Yes/No decisions by verified jurisdiction', () => {
@@ -379,6 +481,32 @@ test('26. process recovery carries the persisted ledger and restores only live-e
   assert.equal(await recovered.locator('#email').inputValue(), profile.candidate.email);
   assert.equal(result.evidence.browserSession.processRecovery, true);
   await recovered.close();
+});
+
+test('a second controlled recovery supports an existing reviewed batch and then exhausts the bound', async () => {
+  const page = await browser.newPage();
+  await page.setContent(`
+    <form><label for="email">Email</label><input id="email" required><button type="submit">Submit application</button></form>
+  `);
+  const prior = {
+    attemptLedger: [],
+    answerRecords: [],
+    unresolvedFields: [],
+    passBudget: { controlledResumeUsed: 1 },
+  };
+  const second = await prepareOperationalApplicationForm(page, profile, {}, {
+    context: formContext, previousEvidence: prior, resumeMode: 'process_recovery',
+  });
+  assert.equal(second.evidence.passBudget.controlledResumeUsed, 2);
+  assert.equal(second.evidence.passBudget.controlledResumeAllowed, 2);
+  assert.equal(await page.locator('#email').inputValue(), profile.candidate.email);
+  await page.locator('#email').fill('');
+  const exhausted = await prepareOperationalApplicationForm(page, profile, {}, {
+    context: formContext, previousEvidence: second.evidence, resumeMode: 'process_recovery',
+  });
+  assert.match(exhausted.gate.reason, /budget is exhausted/);
+  assert.equal(exhausted.evidence.finalAction.activated, false);
+  await page.close();
 });
 
 test('27. append-only form evidence preserves earlier unique passes', () => {

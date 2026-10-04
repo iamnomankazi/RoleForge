@@ -3,7 +3,7 @@ import { groundedFieldValue } from './application-profile.mjs';
 import { validateNarrativeProvenanceRecord } from './application-evidence.mjs';
 
 const FINAL_WORDS = /\b(submit|send|complete application|finish|confirm application|finali[sz]e)\b/i;
-const LOGIN_WORDS = /\b(sign in|log in|create account|verify email|one[- ]time code|mfa|two[- ]factor)\b/i;
+const LOGIN_WORDS = /\b(sign in to apply|log in to apply|login to apply|create an account to apply|sign in or create|login or register|verify (?:your )?email|one[- ]time code|mfa|two[- ]factor)\b/i;
 const LEGAL_WORDS = /\b(certify|declare|privacy|terms|accurate|truthful|consent|signature|background check|data processing)\b/i;
 const CAPTCHA_SIGNAL_WORDS = /\b(captcha|recaptcha|hcaptcha|turnstile|are you human|human verification)\b/i;
 
@@ -272,6 +272,7 @@ export async function inspectApplicationForm(page) {
       .map((element) => {
         const fieldId = element.getAttribute('data-career-ops-field-id') || `field-${++counter}`;
         element.setAttribute('data-career-ops-field-id', fieldId);
+        const fieldText = textFor(element);
         return {
           fieldId,
           id: element.id || '',
@@ -279,9 +280,11 @@ export async function inspectApplicationForm(page) {
           type: (element.type || element.tagName).toLowerCase(),
           role: element.getAttribute('role') || '',
           name: element.getAttribute('name') || '',
-          label: textFor(element),
+          label: fieldText,
           placeholder: element.getAttribute('placeholder') || '',
-          required: element.required || element.getAttribute('aria-required') === 'true',
+          required: element.required
+            || element.getAttribute('aria-required') === 'true'
+            || /(?:\*\s*(?:\(required\))?|\(required\))/i.test(fieldText),
           disabled: element.disabled || element.getAttribute('aria-disabled') === 'true',
           visible: visible(element),
           autocomplete: element.getAttribute('aria-autocomplete') || element.getAttribute('autocomplete') || '',
@@ -379,8 +382,8 @@ export async function inspectApplicationForm(page) {
       fields,
       controls,
       validationErrors,
-      loginGate: /sign in|log in|create account|verify email|one-time code|two-factor|mfa/i.test(bodyText)
-        || Boolean(document.querySelector('input[type="password"]')),
+      loginGate: /sign in to apply|log in to apply|login to apply|create an account to apply|sign in or create|login or register|verify (?:your )?email|one[- ]time code|two[- ]factor|mfa/i.test(bodyText)
+        || fields.some((field) => field.visible && field.type === 'password'),
       captchaSignals: {
         present: Boolean(captchaScripts.length || captchaElementsEvidence.length || textSignal),
         completed: captchaResponse,

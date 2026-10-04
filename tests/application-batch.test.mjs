@@ -474,7 +474,15 @@ test('positively identified entry interaction failures may route to review_requi
   executorTransition(fixture, fromListing, listingCandidate, 'review_required', {
     currentUrl: SELECTED_SIX[0], reason: 'bounded safe entry interaction needs manual review',
   });
-  assert.equal(loadBatchState(fromListing.manifestPath, { root: fixture.root }).state.candidates[0].state, 'review_required');
+  executorTransition(fixture, fromListing, listingCandidate, 'review_required', {
+    currentUrl: SELECTED_SIX[0],
+    reason: 'fresh retry preserved review state with better diagnostics',
+    details: { entryInteraction: { controlId: 'entry-1', attempts: [] } },
+  });
+  const reviewed = loadBatchState(fromListing.manifestPath, { root: fixture.root }).state.candidates[0];
+  assert.equal(reviewed.state, 'review_required');
+  assert.equal(reviewed.history.at(-1).from, 'review_required');
+  assert.equal(reviewed.history.at(-1).details.entryInteraction.controlId, 'entry-1');
 
   const fromBlocked = createApplicationBatch({
     root: fixture.root,
