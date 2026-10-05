@@ -27,6 +27,56 @@ test('low and bounded low experience requirements remain normal-range evidence',
   }
 });
 
+test('decimal comma experience values preserve bounds, qualifiers, and dot-decimal semantics', () => {
+  const cases = [
+    ['Minimum 1,5 year of experience', 1.5, null, 'minimum', 'normal', false],
+    ['1,5+ years of experience', 1.5, null, 'minimum', 'normal', false],
+    ['At least 2,5 years of professional experience', 2.5, null, 'minimum', 'stretch', false],
+    ['Minimum of 4,5 years of experience', 4.5, null, 'minimum', 'outside', true],
+    ['4,5+ years of experience', 4.5, null, 'minimum', 'outside', true],
+    ['1,5 to 2,5 years of experience', 1.5, 2.5, 'range', 'stretch', false],
+    ['4,5–5,5 years of professional experience', 4.5, 5.5, 'range', 'outside', true],
+    ['Minimum 1.5 year of experience', 1.5, null, 'minimum', 'normal', false],
+  ];
+
+  for (const [text, minimum, maximum, bound, expectedInterpretation, hardBlocker] of cases) {
+    const result = classifyExperienceRequirements(text, policy);
+    assert.equal(result.requirements.length, 1, text);
+    const [requirement] = result.requirements;
+    assert.equal(requirement.minimum_years, minimum, text);
+    assert.equal(requirement.maximum_years, maximum, text);
+    assert.equal(requirement.bound, bound, text);
+    assert.equal(result.interpretation, expectedInterpretation, text);
+    assert.equal(result.numeric_hard_blocker, hardBlocker, text);
+  }
+});
+
+test('preferred decimal comma thresholds stay nonblocking', () => {
+  for (const text of [
+    '4,5 years of experience preferred',
+    '4,5+ years of experience preferred',
+    'Ideally 4,5 years of experience',
+    '<h3>Preferred qualifications</h3><li>4,5 years of relevant experience</li>',
+  ]) {
+    const result = classifyExperienceRequirements(text, policy);
+    assert.equal(result.interpretation, 'preferred_only', text);
+    assert.equal(result.requirements[0].minimum_years, 4.5, text);
+    assert.equal(result.requirements[0].strength, 'preferred', text);
+    assert.equal(result.numeric_hard_blocker, false, text);
+  }
+});
+
+test('malformed numeric punctuation cannot leave a false suffix-year requirement', () => {
+  for (const text of [
+    'Minimum 1,5.5 years of experience',
+    'Minimum 1..5 years of experience',
+    'Minimum 1, 5 years of experience',
+    'Minimum 1,,5 years of experience',
+  ]) {
+    assert.equal(classifyExperienceRequirements(text, policy), null, text);
+  }
+});
+
 test('bounded ranges extending above two and three-year thresholds remain stretch evidence', () => {
   for (const text of [
     '2-3 years', '2 to 3 years', 'approximately 2–3 years',
@@ -118,13 +168,21 @@ test('HTML preferred-qualifications heading makes an outside threshold non-block
 test('non-experience durations are ignored while concise candidate requirements remain valid', () => {
   for (const text of [
     'We have operated for 10 years.',
+    'We have operated for 10,5 years.',
     'The company is 10 years old.',
+    'The company is 10,5 years old.',
     'Founded 10 years ago.',
+    'Founded 10,5 years ago.',
     '10 years in business.',
+    '10,5 years in business.',
     '10 years of company history.',
+    '10,5 years of company history.',
     '10 years of service.',
+    '10,5 years of service.',
     '5 years of vacation leave.',
+    '5,5 years of vacation leave.',
     '2 years of employment tenure.',
+    '2,5 years of employment tenure.',
   ]) {
     assert.equal(classifyExperienceRequirements(text, policy), null, text);
   }
@@ -155,6 +213,7 @@ test('candidate activity context is preserved while organization and benefit dur
     'The company has been building software for 10+ years.',
     'We have been operating for 20+ years.',
     'This role lasts 5 years.',
+    'This role lasts 5,5 years.',
     '<h3>Benefits</h3><li>Minimum 5 years for pension vesting.</li>',
   ]) {
     const result = classifyExperienceRequirements(text, policy);

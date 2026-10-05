@@ -4,7 +4,7 @@ const DEFAULTS = Object.freeze({
 });
 
 const SEVERITY = Object.freeze({ normal: 0, stretch: 1, outside: 2 });
-const EXPERIENCE_PATTERN = /\b(?:(?:approximately|approx\.?|about|around)\s+)?(?:(at\s+least|minimum(?:\s+of)?)\s+)?(\d+(?:\.\d+)?)\s*(?:(?:[-\u2010-\u2014\u2212]|\bto\b)\s*(\d+(?:\.\d+)?)|(\+))?\s*(?:years?|yrs?)\b/giu;
+const EXPERIENCE_PATTERN = /\b(?:(?:approximately|approx\.?|about|around)\s+)?(?:(at\s+least|minimum(?:\s+of)?)\s+)?(\d+(?:[.,]\d+)?)\s*(?:(?:[-\u2010-\u2014\u2212]|\bto\b)\s*(\d+(?:[.,]\d+)?)|(\+))?\s*(?:years?|yrs?)\b/giu;
 const HEADING_MARKER = '__CAREER_OPS_EXPERIENCE_HEADING__';
 const PREFERRED_SECTION = /^(?:preferred\s+qualifications?|preferred\s+experience|nice\s+to\s+have(?:s|'s)?|bonus(?:\s+points(?:\s+for)?)?)\s*:?\s*$/i;
 const REQUIRED_SECTION = /^(?:requirements?|qualifications?|required\s+qualifications?|minimum\s+qualifications?|must\s+have(?:s)?|what\s+you(?:'|\u2019)?ll\s+need|candidate\s+profile|what\s+we(?:'|\u2019)?re\s+looking\s+for|what\s+we\s+expect)\s*:?\s*$/i;
@@ -12,7 +12,7 @@ const NON_REQUIREMENT_SECTION = /^(?:about\s+(?:us|the\s+company|company)|benefi
 const DIRECT_PREFERRED_PREFIX = /(?:^|[:(]\s*)(?:ideally|preferably|nice\s+to\s+have(?:s|'s)?|bonus(?:\s+points\s+for)?|preferred(?:\s+qualifications?)?)\s*[,;:]?\s*$/i;
 const DIRECT_PREFERRED_SUFFIX = /^[\s,;:]*(?:\(\s*)?(?:(?:of\s+(?:[\p{L}\p{N}/+_-]+\s+){0,4})?experience\s*[,;:]?\s*)?(?:preferred\b|(?:is\s+)?a\s+plus\b)(?:\s*\))?/iu;
 const UNKNOWN_NUMERIC_RANGE_SEPARATOR = /[\p{Dash_Punctuation}\u2212]/u;
-const EXPERIENCE_DURATION = String.raw`\d+(?:\.\d+)?\s*(?:(?:\+)|(?:[-\u2010-\u2014\u2212]\s*\d+(?:\.\d+)?)|(?:\bto\b\s*\d+(?:\.\d+)?))?\s*(?:years?|yrs?)\b`;
+const EXPERIENCE_DURATION = String.raw`\d+(?:[.,]\d+)?\s*(?:(?:\+)|(?:[-\u2010-\u2014\u2212]\s*\d+(?:[.,]\d+)?)|(?:\bto\b\s*\d+(?:[.,]\d+)?))?\s*(?:years?|yrs?)\b`;
 const ORGANIZATION_HISTORY = new RegExp(
   String.raw`\b(?:we|company|business|organization|product|our\s+(?:company|business|organization|product)|the\s+(?:company|business|organization|product))\b[\s\S]{0,60}\b(?:operated|operating|served|serving|existed|exists|existing|built|building|founded|established|run|running|maintained|maintaining)\b[\s\S]{0,80}${EXPERIENCE_DURATION}`,
   'i',
@@ -28,7 +28,7 @@ const BENEFIT_DURATION = new RegExp(
 const NEGATIVE_EXPERIENCE_CONTEXT = [
   /\b(?:years?|yrs?)\s+(?:old|ago|of\s+age|in\s+business|of\s+(?:service|employment|tenure|vacation|leave|benefits?|history|company(?:\s+history)?|business(?:\s+history)?|product(?:\s+history)?))\b/i,
   ORGANIZATION_HISTORY,
-  /\b(?:company|business|organization|product)\s+(?:age|history)\b[\s\S]{0,40}\b\d+(?:\.\d+)?\s*(?:years?|yrs?)\b/i,
+  /\b(?:company|business|organization|product)\s+(?:age|history)\b[\s\S]{0,40}\b\d+(?:[.,]\d+)?\s*(?:years?|yrs?)\b/i,
   ROLE_DURATION,
   BENEFIT_DURATION,
 ];
@@ -120,7 +120,8 @@ function strengthFor(text, start, end, sectionState) {
 
 function isOrphanUpperBound(text, start) {
   const before = text.slice(0, start);
-  return new RegExp(`\\b\\d+(?:\\.\\d+)?\\s*${UNKNOWN_NUMERIC_RANGE_SEPARATOR.source}\\s*$`, 'u').test(before);
+  if (/(?:^|[^\d])\d[\d.,]*[,.]\s*$/u.test(before)) return true;
+  return new RegExp(`\\b\\d+(?:[.,]\\d+)?\\s*${UNKNOWN_NUMERIC_RANGE_SEPARATOR.source}\\s*$`, 'u').test(before);
 }
 
 function hasNegativeExperienceContext(text, start, end) {
@@ -189,8 +190,8 @@ export function extractExperienceRequirements(text, policyValue = DEFAULTS) {
     for (const match of line.text.matchAll(EXPERIENCE_PATTERN)) {
       if (isOrphanUpperBound(line.text, match.index)) continue;
       if (!isCandidateExperienceEvidence(line.text, match.index, match.index + match[0].length, sectionState)) continue;
-      const minimumYears = Number(match[2]);
-      const maximumYears = match[3] === undefined ? null : Number(match[3]);
+      const minimumYears = Number(match[2].replace(',', '.'));
+      const maximumYears = match[3] === undefined ? null : Number(match[3].replace(',', '.'));
       const bound = maximumYears !== null ? 'range' : (match[1] || match[4] ? 'minimum' : 'exact');
       const strength = strengthFor(line.text, match.index, match.index + match[0].length, sectionState);
       const interpretation = interpretationFor({ minimumYears, maximumYears, bound }, policy);
