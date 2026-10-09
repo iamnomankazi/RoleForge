@@ -21,6 +21,7 @@ import { constants } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { assertWritableOutput } from './output-safety.mjs';
+import { claimRenderOptions, enforceRenderedCvClaims, extractDocumentSegments } from './validate-cv-claims.mjs';
 
 const PROJECT_ROOT = dirname(fileURLToPath(import.meta.url));
 const COPYFILE_EXCL = constants.COPYFILE_EXCL;
@@ -45,10 +46,10 @@ const REQUIRED_COMMANDS = [
 const CJK_RE = /[぀-ヿ㐀-鿿豈-﫿ｦ-ﾟ가-힯ᄀ-ᇿ]/;
 
 async function main() {
-  const inputPath = process.argv[2];
-  const outputPath = process.argv[3]; // optional
+  const { args, options: claimOptions } = claimRenderOptions(process.argv.slice(2));
+  const [inputPath, outputPath] = args;
   if (!inputPath) {
-    console.error('Usage: node generate-latex.mjs <input.tex> [output.pdf]');
+    console.error('Usage: node generate-latex.mjs <input.tex> [output.pdf] [--cv-source cv.md] [--anchors manifest.json] [--allow-unverified-claims]');
     process.exit(1);
   }
 
@@ -148,6 +149,16 @@ async function main() {
     process.exit(1);
   }
 
+  try {
+    report.claimValidation = await enforceRenderedCvClaims(claimOptions.allowUnverifiedClaims ? [content] : extractDocumentSegments(content, absPath), claimOptions);
+  } catch (error) {
+    report.valid = false;
+    report.issues.push(error.message);
+    console.log(JSON.stringify(report, null, 2));
+    process.exit(1);
+  }
+  const claimMetadataPath = assertWritableOutput(`${targetPdf}.claims.json`, { root: PROJECT_ROOT });
+
   // --- Compile .tex → .pdf ---
   // Detect available engine: prefer tectonic, fall back to pdflatex
   let engine = null;
@@ -234,6 +245,7 @@ async function main() {
         path: targetPdf,
         sizeKB: parseFloat((pdfStat.size / 1024).toFixed(1)),
       };
+      await writeFile(claimMetadataPath, `${JSON.stringify(report.claimValidation, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
     } catch (err) {
       report.postCompileError = `Failed to finalize PDF: ${err.message}`;
     }
@@ -245,4 +257,4 @@ async function main() {
   process.exit(report.compiled && !report.postCompileError ? 0 : 1);
 }
 
-main();
+main().catch(error => { console.error(error.message); process.exitCode = 1; });

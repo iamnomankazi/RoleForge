@@ -17,6 +17,7 @@ export const TECHNOLOGY_ALIASES = Object.freeze({
   'typescript': 'typescript', 'ts': 'typescript',
   'node.js': 'node.js', 'nodejs': 'node.js',
   'react': 'react', 'next.js': 'next.js', 'nextjs': 'next.js',
+  'vue.js': 'vue.js', 'vuejs': 'vue.js', '.net': '.net', 'asp.net': 'asp.net',
   'python': 'python', 'java': 'java', 'c#': 'c#', 'c++': 'c++',
   'go': 'go', 'golang': 'go', 'rust': 'rust', 'ruby': 'ruby',
   'postgresql': 'postgresql', 'postgres': 'postgresql', 'mysql': 'mysql',
@@ -36,8 +37,8 @@ const STYLE_ONLY = /(?:^|\/)(?:voice-dna\.md|writing-samples(?:\/|$))/i;
 const HASH_RE = /^sha256:[a-f0-9]{64}$/;
 const HEADING_RE = /^(#{1,6})\s+(.+?)\s*#*\s*$/;
 const DATE_RE = /\b(?:19|20)\d{2}(?:\s*[-–—/] ?\s*(?:(?:19|20)\d{2}|present|current|now))?\b|\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(?:19|20)\d{2}\b/gi;
-const METRIC_RE = /(?:~|≈|about\s+|around\s+|approximately\s+|roughly\s+|nearly\s+)?(?:€|£|\$|(?:EUR|USD|GBP|CAD|AUD|SEK|NOK|DKK|CHF|JPY|INR)\s*)?\b\d[\d,]*(?:\.\d+)?\s*(?:%|percent|x|times|[kmb]|thousand|million|billion|rows?|records?|users?|requests?|transactions?|jobs?|items?|days?|weeks?|months?|years?|EUR|USD|GBP|CAD|AUD|SEK|NOK|DKK|CHF|JPY|INR)?\s*\+?/gi;
-const STOP_WORDS = new Set(('a an and are as at be been being by can did do does for from had has have he her hers him his i if in into is it its may me might my of on or our ours she should so that the their theirs them then there these they this those through to was we were what when where which while who will with would you your yours worked work built led used using developed designed implemented created responsible delivered managed improved helped support supporting').split(' '));
+const METRIC_RE = /(?:~|≈|approx\.?\s*|about\s+|around\s+|over\s+|more\s+than\s+|up\s+to\s+|approximately\s+|roughly\s+|nearly\s+)?(?:€|£|\$|(?:EUR|USD|GBP|CAD|AUD|SEK|NOK|DKK|CHF|JPY|INR)\s*)?\b\d[\d,]*(?:\.\d+)?\s*\+?\s*(?:%|percent|x|times|[kmb]\b|thousand|million|billion|rows?|records?|users?|requests?|transactions?|jobs?|items?|days?|weeks?|months?|years?|EUR|USD|GBP|CAD|AUD|SEK|NOK|DKK|CHF|JPY|INR)?\s*\+?/gi;
+const STOP_WORDS = new Set(('a an and are as at be been being by can did do does for from had has have he her hers him his i if in into is it its may me might my of on or our ours she should so that the their theirs them then there these they this those through to was we were what when where which while who will with would you your yours worked work built led used using developed designed implemented created authored wrote founded launched responsible delivered managed improved helped support supporting').split(' '));
 
 export function sha256(value) {
   const input = Buffer.isBuffer(value) || value instanceof Uint8Array ? value : String(value ?? '');
@@ -58,7 +59,8 @@ function cleanMarkdown(value) {
     .replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+)/, '')
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/`([^`]*)`/g, '$1')
-    .replace(/[*_~]/g, '')
+    .replace(/~~([^~]*)~~/g, '$1')
+    .replace(/[*_]/g, '')
     .replace(/<[^>]*>/g, '')
     .trim();
 }
@@ -69,7 +71,7 @@ function technologyMatches(text) {
   const matches = [];
   for (const alias of aliases) {
     const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const re = new RegExp(`(^|[^a-z0-9+#.-])(${escaped})(?=$|[^a-z0-9+#.-])`, 'gi');
+    const re = new RegExp(`(^|[^a-z0-9+#.-])(${escaped})(?=$|[^a-z0-9+#.-]|\\.(?![a-z0-9]))`, 'gi');
     let match;
     while ((match = re.exec(input))) {
       matches.push({ alias: match[2].toLowerCase(), canonical: TECHNOLOGY_ALIASES[match[2].toLowerCase()], start: match.index + match[1].length, end: match.index + match[1].length + match[2].length });
@@ -299,6 +301,45 @@ function claimedUnits(text) {
   return [...new Map(tokens.map((token) => [`${token.kind}:${token.value}`, token])).values()];
 }
 
+/** Split sentences without turning dotted technologies or decimal metrics into facts. */
+export function splitClaimSentences(value) {
+  const protectedText = String(value ?? '')
+    .replace(/\b(?:Node\.js|Next\.js|Vue\.js|ASP\.NET)\b|\.NET\b/gi, match => match.replace(/\./g, '\uE000'))
+    .replace(/\bapprox\.(?=\s*\d)/gi, match => match.replace('.', '\uE000'))
+    .replace(/(?<=\d)\.(?=\d)/g, '\uE000');
+  return (protectedText.match(/[^.!?]+(?:[.!?]+|$)/g) || [])
+    .map(part => part.replace(/\uE000/g, '.').trim()).filter(Boolean);
+}
+
+/** A rendered skills list contains independent entries rather than a sentence. */
+export function technologyListSegments(value) {
+  const text = String(value ?? '');
+  const matches = technologyMatches(text);
+  let remainder = normalizeText(text);
+  for (const match of [...matches].reverse()) remainder = remainder.slice(0, match.start) + ' ' + remainder.slice(match.end);
+  return matches.length && /^[\s,;|/&.]*$/.test(remainder.replace(/\band\b/g, '')) ? matches.map(match => match.alias) : null;
+}
+
+/** Facts in rendered letter fields, excluding ordinary salutations and courtesy. */
+export function hasFactUnits(text) {
+  return technologyMatches(text).length > 0 || dateTokens(text).length > 0 || metricTokens(text).length > 0
+    || namedEntityMentions(text).length > 0
+    || /\b(?:built|created|developed|authored|wrote|founded|designed|implemented|led|launched|invented|processed|managed|worked|fluent|proficient|degree|experience)\b/i.test(text)
+    || /\b(?:I|we)\s+(?:build|work|use|have|speak|know|develop|design|manage)\b/i.test(text)
+    || /\b(?:I|we)\s+(?!(?:would welcome|look forward|thank you)\b)[\p{L}]+/iu.test(text)
+    || /\b[A-Z][a-z]+\s+[A-Z][a-z]+\b/.test(String(text).replace(/^(?:Dear|Hello|Hi)\s+.*?,?$/i, ''));
+}
+
+const CREATION_RE = /\b(built|created|developed|authored|wrote|founded|designed|implemented|led|launched)\s+(.+?)(?=\s+(?:using|with|in|for|at|by|across|to)\b|[.!?;]|$)/gi;
+
+function creationRelationships(text) {
+  // Compare the action and its direct object; using a framework is not creating it.
+  let canonical = normalizeText(text);
+  for (const match of technologyMatches(canonical).reverse()) canonical = canonical.slice(0, match.start) + match.canonical + canonical.slice(match.end);
+  const safe = canonical.replace(/(?<=\p{L})\.(?=\p{L})/gu, '\uE000');
+  return [...safe.matchAll(CREATION_RE)].map(match => normalizeText(`${match[1]} ${match[2]}`).replace(/\uE000/g, '.'));
+}
+
 function containsWord(text, word) {
   const normalized = normalizeText(text);
   const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -340,7 +381,7 @@ function currentAllowedEntries(manifest, cv) {
     const current = byId.get(entry.id);
     return Boolean(current && current.textHash === entry.textHash && current.type === entry.type);
   }).filter((entry) => entry.state !== 'supported' || hasCurrentIndependentEvidence(entry))
-    .map((entry) => ({ ...entry, text: byId.get(entry.id).text }));
+    .map((entry) => ({ ...entry, text: byId.get(entry.id).text, sectionType: classifySection(byId.get(entry.id).section) }));
 }
 
 function hasCurrentIndependentEvidence(entry) {
@@ -392,7 +433,14 @@ export function validateClaims({ claims, manifest, cv } = {}) {
               : missingEntities.length ? 'unknown_named_entity' : 'unsupported_claim_text';
         return { claimId, status: 'fail', reasonCode, anchorIds: anchors };
       }
-      return { claimId, status: 'pass', anchorIds: anchors };
+      const relationships = creationRelationships(claim.text);
+      const covering = allowed.filter(entry => units.every(unit => unitCovered(unit, [entry]).length)
+        && entities.every(entity => normalizeText(entry.text).includes(entity))
+        && (!relationships.length || ((['project', 'role'].includes(entry.type)
+          || (entry.type === 'authorship' && ['project', 'role'].includes(entry.sectionType)))
+          && relationships.every(relationship => creationRelationships(entry.text).includes(relationship)))));
+      if (!covering.length) return { claimId, status: 'fail', reasonCode: 'unsupported_relationship', anchorIds: anchors };
+      return { claimId, status: 'pass', anchorIds: covering.map(entry => entry.id) };
     });
     if (results.length !== claims.length) throw new Error('claim_results_incomplete');
     return { ok: results.every((result) => result.status === 'pass'), results };

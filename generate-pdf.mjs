@@ -28,6 +28,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { randomUUID } from 'node:crypto';
 import { assertWritableOutput } from './output-safety.mjs';
+import { claimRenderOptions, enforceRenderedCvClaims, extractDocumentSegments } from './validate-cv-claims.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PDF_PAGE_MARGIN = '0.6in';
@@ -279,7 +280,7 @@ function updatePDFManifest(reportNum, pdfPath, htmlPath, format) {
  * @returns {Promise<{outputPath: string, pageCount: number, size: number}>}
  */
 async function generatePDF() {
-  const args = process.argv.slice(2);
+  const { args, options: claimOptions } = claimRenderOptions(process.argv.slice(2));
 
   // Parse arguments
   let inputPath, outputPath, format = 'a4', reportNum = '', allowReorder = false;
@@ -299,7 +300,7 @@ async function generatePDF() {
   }
 
   if (!inputPath || !outputPath) {
-    console.error('Usage: node generate-pdf.mjs <input.html> <output.pdf> [--format=letter|a4] [--report=NNN] [--allow-reorder]');
+    console.error('Usage: node generate-pdf.mjs <input.html> <output.pdf> [--cv] [--cv-source cv.md] [--anchors manifest.json] [--allow-unverified-claims] [--format=letter|a4] [--report=NNN] [--allow-reorder]');
     console.error('');
     console.error('This script only converts an already-built HTML file to PDF.');
     console.error('The input HTML is produced by the pdf mode: the agent fills cv-template.html');
@@ -347,13 +348,14 @@ async function generatePDF() {
   console.log(`📏 Format: ${format.toUpperCase()}`);
 
   let html = await readFile(inputPath, 'utf-8');
+  const isCv = claimOptions.cvMode || /class=["'][^"']*\b(?:cv-photo|summary-text)\b/i.test(html);
   let cvMarkdown = '';
   try {
-    cvMarkdown = await readFile(resolve(__dirname, 'cv.md'), 'utf-8');
+    cvMarkdown = await readFile(resolve(claimOptions.cvPath), 'utf-8');
   } catch (err) {
     if (err?.code !== 'ENOENT') throw err;
   }
-  validateCvSectionOrder(html, cvMarkdown, { allowReorder });
+  if (isCv) validateCvSectionOrder(html, cvMarkdown, { allowReorder });
 
   // Normalize text for ATS compatibility (issue #1)
   const normalized = normalizeTextForATS(html);
@@ -364,7 +366,11 @@ async function generatePDF() {
     console.log(`🧹 ATS normalization: ${totalReplacements} replacements (${breakdown})`);
   }
 
-  return renderHtmlToPdf(html, outputPath, { format, baseDir: dirname(inputPath), reportNum, inputPath });
+  const claimValidation = isCv ? await enforceRenderedCvClaims(extractDocumentSegments(html, inputPath), claimOptions) : null;
+  const claimMetadataPath = isCv ? assertWritableOutput(`${outputPath}.claims.json`, { root: __dirname }) : null;
+  const rendered = await renderHtmlToPdf(html, outputPath, { format, baseDir: dirname(inputPath), reportNum, inputPath });
+  if (claimMetadataPath) writeFileSync(claimMetadataPath, `${JSON.stringify(claimValidation, null, 2)}\n`, { flag: 'wx' });
+  return { ...rendered, ...(claimValidation ? { claimValidation } : {}) };
 }
 
 /**

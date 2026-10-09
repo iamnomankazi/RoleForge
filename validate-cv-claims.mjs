@@ -10,6 +10,9 @@ import {
   extractDriftFacts,
   loadManifest,
   sha256,
+  hasFactUnits,
+  splitClaimSentences,
+  technologyListSegments,
   validateClaims,
   validateManifest,
 } from './cv-claims.mjs';
@@ -108,15 +111,100 @@ function documentText(source, extension) {
       .replace(/<[^>]*>/g, ' '));
   }
   if (extension !== '.tex') return String(source ?? '');
-  return String(source ?? '').split(/\r?\n/).map((line) => line.replace(/(?<!\\)%.*$/, '')).join('\n')
-    .replace(/\\href\s*\{[^{}]*\}\s*\{([^{}]*)\}/g, '$1')
-    .replace(/\\(?:begin|end)\s*\{[^{}]*\}/g, '\n')
-    .replace(/\\item\b/g, '\n')
-    .replace(/\\(?:section|subsection|subsubsection|textbf|textit|emph|underline|texttt|large|Large|small|href)\*?/g, '')
-    .replace(/\\\\/g, '\n')
-    .replace(/\\([%$#&_{}])/g, '$1')
-    .replace(/[{}]/g, ' ')
-    .replace(/\\[A-Za-z]+\*?/g, ' ');
+  return renderedTexText(source);
+}
+
+/** Extract the template's visible arguments, never its preamble or layout values. */
+export function renderedTexText(source) {
+  const stripped = String(source ?? '').split(/\r?\n/).map(line => line.replace(/(?<!\\)%.*$/, '')).join('\n');
+  const body = /\\begin\s*\{document\}([\s\S]*?)\\end\s*\{document\}/.exec(stripped)?.[1];
+  if (body === undefined) throw new Error('tex_document_missing');
+  let index = 0;
+  const skipSpace = () => { while (/\s/.test(body[index] || '') && index < body.length) index++; };
+  const group = (open = '{', close = '}') => {
+    skipSpace();
+    if (body[index] !== open) return '';
+    const start = ++index;
+    let depth = 1;
+    while (index < body.length && depth) {
+      if (body[index] === '\\') { index += 2; continue; }
+      if (body[index] === open) depth++;
+      if (body[index] === close) depth--;
+      index++;
+    }
+    return body.slice(start, index - 1);
+  };
+  const drop = { vspace: 1, hspace: 1, color: 1, textcolor: 1, setlength: 2, addtolength: 2,
+    rule: 2, raisebox: 1, includegraphics: 1, label: 1, pagestyle: 1, urlstyle: 1,
+    fontsize: 2, fontfamily: 1, fontencoding: 1, geometry: 1, hypersetup: 1 };
+  const contentArgs = { resumeSubheading: 4, resumeSubheadingContinue: 2, resumeProjectHeading: 2,
+    resumeItem: 1, resumeSubItem: 1 };
+  let output = '';
+  while (index < body.length) {
+    if (body[index] !== '\\') { output += body[index++]; continue; }
+    index++;
+    if (body[index] === '\\') { index++; output += '\n'; continue; }
+    if (/[{}%$#&_]/.test(body[index] || '')) {
+      output += body[index] === '$' ? '\uE001' : body[index];
+      index++; continue;
+    }
+    const command = /^[A-Za-z]+\*?/.exec(body.slice(index))?.[0];
+    if (!command) { output += ' '; index++; continue; }
+    index += command.length;
+    const name = command.replace(/\*$/, '');
+    if (['newcommand', 'renewcommand', 'providecommand', 'def'].includes(name)) {
+      skipSpace();
+      if (body[index] === '{') group();
+      else { const macro = /^\\[A-Za-z]+/.exec(body.slice(index))?.[0] || ''; index += macro.length; }
+      skipSpace();
+      while (body[index] === '[') { group('[', ']'); skipSpace(); }
+      // For \def, parameter markers precede the definition body.
+      while (index < body.length && body[index] !== '{') index++;
+      group();
+      continue;
+    }
+    if (name === 'begin' || name === 'end') {
+      const environment = group();
+      skipSpace();
+      if (name === 'begin') {
+        if (body[index] === '[') group('[', ']');
+        if (/^(?:tabular\*?|tabularx|multicols)$/.test(environment)) {
+          group(); skipSpace();
+          if (body[index] === '[') group('[', ']');
+          if (environment !== 'tabular' && environment !== 'multicols') group();
+        }
+      }
+      output += '\n'; continue;
+    }
+    if (name === 'href') { group(); output += `{${group()}}`; continue; }
+    if (name === 'textasciitilde') { output += '~'; group(); continue; }
+    if (name === 'textdollar') { output += '\uE001'; group(); continue; }
+    if (name === 'textbackslash') { output += '\uE002'; group(); continue; }
+    if (name === 'textasciicircum') { output += '^'; group(); continue; }
+    if (name === 'approx') { output += '≈'; continue; }
+    if (Object.hasOwn(drop, name)) {
+      skipSpace();
+      while (body[index] === '[') { group('[', ']'); skipSpace(); }
+      for (let count = 0; count < drop[name]; count++) group();
+      continue;
+    }
+    if (Object.hasOwn(contentArgs, name)) {
+      output += '\n';
+      for (let count = 0; count < contentArgs[name]; count++) output += `${group()}\n`;
+      continue;
+    }
+    if (/^(?:section|subsection|subsubsection)$/.test(name)) {
+      const title = group(); output += `\n${hasFactUnits(title) ? title : ''}\n`; continue;
+    }
+    if (name === 'item') { skipSpace(); if (body[index] === '[') group('[', ']'); output += '\n'; continue; }
+    // Formatting commands have visible group contents. Recursively process these
+    // below; unrecognized command names themselves never become candidate facts.
+    if (!/^(?:textbf|textit|emph|underline|texttt|textrm|textsf|textnormal|mbox|hbox|normalfont|small|large|Large|LARGE|huge|Huge|tiny|footnotesize|scriptsize|normalsize|scshape|bfseries|itshape|rmfamily|sffamily|ttfamily|raggedright|raggedleft|centering|hfill|vfill|quad|qquad|newline|linebreak|noindent|selectfont|faEnvelope|faLinkedin|faGithub|resumeSubHeadingListStart|resumeSubHeadingListEnd|resumeItemListStart|resumeItemListEnd|pm|rightarrow)$/.test(name)) {
+      throw new Error(`unsupported_tex_command:${name}`);
+    }
+  }
+  if (/\\[A-Za-z]+/.test(output)) output = renderedTexText(`\\begin{document}${output}\\end{document}`);
+  return output.replace(/[{}$]/g, ' ').replace(/~(?!\s*\d)/g, ' ').replace(/\uE001/g, '$').replace(/\uE002/g, '\\');
 }
 
 function decodeHtml(value) {
@@ -133,16 +221,46 @@ export function extractDocumentSegments(source, filePath = 'document.txt') {
   const segments = [];
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.replace(/\s+/g, ' ').trim().replace(/^(?:[-*+•▪◦‣]|\d+[.)])\s+/, '')
-      .replace(/^(?:languages?|technical skills?|skills?|tools?|frameworks?|databases?|backend|frontend|machine learning|education|experience|projects?)\s*:\s*/i, '');
+      .replace(/^(?:programming languages?|languages?|technical skills?|skills?|tools?|frameworks?|databases?|backend|frontend|machine learning|coursework|education|experience|projects?)\s*:\s*/i, '');
     if (!line) continue;
-    if (/^(?:profile|professional summary|summary|technical skills|skills|work experience|experience|projects?|education|languages|certifications?|about)$/i.test(line)) continue;
-    const safeLine = line.replace(/(?<=\d)\.(?=\d)/g, '\uE000');
-    for (const part of safeLine.match(/[^.!?]+(?:[.!?]+|$)/g) || []) {
-      const clean = part.replace(/\uE000/g, '.').trim();
-      if (clean) segments.push(clean);
-    }
+    if (/^(?:profile|professional summary|summary|technical skills|skills|work experience|experience|personal projects|projects?|education|languages|certifications?|about)$/i.test(line)) continue;
+    segments.push(...(technologyListSegments(line) || splitClaimSentences(line)));
   }
   return segments;
+}
+
+/** Shared CLI claim flags; PDF's --cv is a mode flag, --cv-source supplies evidence. */
+export function claimRenderOptions(argv) {
+  const options = { cvPath: 'cv.md', anchorsPath: ACTIVE_MANIFEST, allowUnverifiedClaims: false, cvMode: false };
+  const args = [];
+  for (let index = 0; index < argv.length; index++) {
+    const arg = argv[index];
+    if (arg === '--allow-unverified-claims') options.allowUnverifiedClaims = true;
+    else if (arg === '--cv') options.cvMode = true;
+    else if (['--cv-source', '--anchors', '--manifest'].includes(arg.split('=')[0])) {
+      const [flag, inline] = arg.split('=');
+      const value = inline ?? argv[++index];
+      if (!value || value.startsWith('--')) throw new Error(`${flag} requires a path`);
+      options[flag === '--cv-source' ? 'cvPath' : 'anchorsPath'] = value;
+    } else args.push(arg);
+  }
+  return { args, options };
+}
+
+export async function enforceRenderedCvClaims(segments, options = {}) {
+  const contentHash = sha256(JSON.stringify(segments));
+  if (options.allowUnverifiedClaims) {
+    const warning = 'WARNING: --allow-unverified-claims bypasses CV fact validation. Output contains UNVERIFIED CLAIMS.';
+    console.error(warning);
+    return { status: 'unverified', allowUnverifiedClaims: true, warning, contentHash };
+  }
+  const cv = await readCv(options.cvPath || 'cv.md');
+  let manifest;
+  try { manifest = await loadManifest(resolve(options.anchorsPath || ACTIVE_MANIFEST)); }
+  catch (error) { throw new Error(`CV claim validation blocked: manifest_load_failed:${error.message}`); }
+  const checked = validateClaims({ claims: segments.map((text, index) => ({ id: `render-${index + 1}`, text })), manifest, cv });
+  if (!checked.ok) throw new Error(`CV claim validation failed: ${JSON.stringify(checked.results.filter(item => item.status !== 'pass'))}`);
+  return { status: 'pass', allowUnverifiedClaims: false, contentHash, cvHash: sha256(cv), manifestHash: sha256(JSON.stringify(manifest)), checked: segments.length };
 }
 
 async function initDraft({ cvText, cvPath, outputPath, json }) {

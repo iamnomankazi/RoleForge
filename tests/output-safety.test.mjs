@@ -122,12 +122,14 @@ test('all CV renderers reject approved and existing outputs without changing sen
     }
 
     const freshTex = join(outputRoot, 'fresh.tex');
-    const build = spawnSync(process.execPath, [join(ROOT, 'build-cv-latex.mjs'), inputs.json, freshTex], {
+    const build = spawnSync(process.execPath, [join(ROOT, 'build-cv-latex.mjs'), inputs.json, freshTex, '--allow-unverified-claims'], {
       cwd: ROOT,
       encoding: 'utf8',
     });
     assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
     assert.ok(readFileSync(freshTex, 'utf8').includes('\\begin{document}'));
+    assert.match(build.stderr, /WARNING.*UNVERIFIED CLAIMS/);
+    assert.equal(JSON.parse(build.stdout).claimValidation.status, 'unverified');
   } finally {
     rmSync(scratch, { recursive: true, force: true });
     rmSync(outputRoot, { recursive: true, force: true });

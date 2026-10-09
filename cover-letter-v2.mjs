@@ -9,6 +9,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { PDFDocument } from 'pdf-lib';
+import { hasFactUnits, splitClaimSentences } from './cv-claims.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_OUTPUT_DIR = resolve(ROOT, 'output', 'cover-letters');
@@ -50,7 +51,7 @@ export function draftHash(draft) {
 }
 
 function normalizeSpace(value) {
-  return String(value ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+  return String(value ?? '').normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
 function safeSlug(value, fallback) {
@@ -94,12 +95,13 @@ function bodyText(draft) {
 }
 
 function sentenceList(value) {
-  return String(value ?? '').match(/[^.!?]+(?:[.!?]+|$)/g)?.map(sentence => sentence.trim()).filter(Boolean) || [];
+  return splitClaimSentences(value);
 }
 
 function flattenClaims(draft) {
-  return (Array.isArray(draft?.paragraphs) ? draft.paragraphs : [])
-    .flatMap(paragraph => Array.isArray(paragraph?.claims) ? paragraph.claims : []);
+  return [...(Array.isArray(draft?.claims) ? draft.claims : []),
+    ...(Array.isArray(draft?.paragraphs) ? draft.paragraphs : [])
+      .flatMap(paragraph => Array.isArray(paragraph?.claims) ? paragraph.claims : [])];
 }
 
 function phrasePattern(phrase) {
@@ -177,7 +179,7 @@ export function detectLanguage(text) {
 }
 
 function requiredLanguage(jdText) {
-  const text = String(jdText ?? '');
+  const clauses = String(jdText ?? '').split(/[.!?;\n]|,|\b(?:but|however|whereas)\b|\band\s+(?=[\p{L}]+\s+(?:is\s+)?(?:optional|required|mandatory|essential|not|a\s+plus|nice[- ]to[- ]have)\b)/iu);
   const found = new Set();
   const names = [
     ['fi', 'Finnish|Suomi'],
@@ -185,8 +187,8 @@ function requiredLanguage(jdText) {
   ];
   for (const [code, name] of names) {
     const patterns = [
-      new RegExp(`\\b(?:${name})(?:\\s+(?:language|skills?))?(?:\\s+(?:at\\s+)?(?:level\\s+)?(?:A1|A2|B1|B2|C1|C2))?\\s*(?:is\\s+)?(?:required|mandatory|essential|must[- ]have)\\b`, 'i'),
-      new RegExp(`\\b(?:required|mandatory|essential|must\\s+(?:speak|know|have)|fluent\\s+in|proficient\\s+in)[^.!?\\n]{0,45}\\b(?:${name})\\b`, 'i'),
+      new RegExp(`\\b(?:${name})(?:\\s+(?:language|skills?|fluency|proficiency|knowledge))?(?:\\s+(?:at\\s+)?(?:level\\s+)?(?:A1|A2|B1|B2|C1|C2))?\\s*(?:is\\s+)?(?:required|mandatory|essential|must[- ]have)\\b`, 'i'),
+      new RegExp(`\\b(?:required|mandatory|essential|must\\s+(?:speak|know|have))[^.!?;\\n]{0,45}\\b(?:${name})\\b`, 'i'),
       new RegExp(`\\b(?:${name})\\s+(?:at\\s+)?(?:A1|A2|B1|B2|C1|C2)\\s+(?:or\\s+above\\s+)?(?:is\\s+)?required\\b`, 'i'),
     ];
     if (code === 'fi') {
@@ -195,7 +197,8 @@ function requiredLanguage(jdText) {
     if (code === 'de') {
       patterns.push(/\bdeutschkenntnisse\b[^.!?\n]{0,40}\b(?:erforderlich|vorausgesetzt|notwendig)\b/i);
     }
-    if (patterns.some(pattern => pattern.test(text))) found.add(code);
+    if (clauses.some(clause => !/\b(?:optional|a plus|nice[- ]to[- ]have|not (?:a )?requirement|not (?:required|mandatory|essential)|no (?:requirement|need)|need not|do(?:es)? not|don['’]t|isn['’]t|aren['’]t|nicht|kein\w*)\b/i.test(clause)
+      && patterns.some(pattern => pattern.test(clause)))) found.add(code);
   }
   return found.size === 1 ? [...found][0] : found.size > 1 ? 'ambiguous' : 'en';
 }
@@ -204,16 +207,24 @@ function isPlaceholder(text) {
   return /\{[^{}]*\}|\[[^\]]+\]|\bTODO\b|\bXXX\b|\bLorem(?:\s+ipsum)?\b/i.test(text);
 }
 
-function hasClaimCoverage(draft, jdText) {
+function hasClaimCoverage(draft, profileName) {
   const missing = [];
-  for (const [index, paragraph] of (draft.paragraphs || []).entries()) {
-    const claims = Array.isArray(paragraph?.claims) ? paragraph.claims : [];
-    const claimTexts = claims.filter(claim => typeof claim?.text === 'string').map(claim => normalizeSpace(claim.text));
-    for (const sentence of sentenceList(paragraph?.text)) {
+  const claimTexts = flattenClaims(draft).filter(claim => typeof claim?.text === 'string').map(claim => normalizeSpace(claim.text));
+  const signature = String(draft.signature ?? '').trim();
+  const plainName = /^(?:[\p{Lu}][\p{L}'’-]+\.?)(?:\s+[\p{Lu}][\p{L}'’-]+\.?){1,4}$/u.test(signature)
+    && signature.split(/\s+/).every(part => !hasFactUnits(part));
+  const fields = [
+    ['greeting', draft.greeting],
+    ...(draft.paragraphs || []).map((paragraph, index) => [`paragraph-${index + 1}`, paragraph?.text]),
+    ['closing', draft.closing],
+    ...(normalizeSpace(signature) === normalizeSpace(profileName) || plainName ? [] : [['signature', signature]]),
+  ];
+  for (const [field, text] of fields) {
+    for (const sentence of sentenceList(text)) {
       const normalizedSentence = normalizeSpace(sentence);
-      if (!normalizedSentence || normalizeSpace(jdText).includes(normalizedSentence)) continue;
-      if (!claimTexts.some(claim => claim === normalizedSentence || claim.includes(normalizedSentence) || normalizedSentence.includes(claim))) {
-        missing.push({ paragraph: index + 1, sentence });
+      if (!hasFactUnits(sentence)) continue;
+      if (!claimTexts.includes(normalizedSentence)) {
+        missing.push({ field, sentence });
       }
     }
   }
@@ -235,6 +246,9 @@ function statusFor(checks) {
 
 export async function checkCoverLetterDraft(draft, {
   jdText = '',
+  jdCompany,
+  jdRole,
+  profileName,
   validateClaims,
   manifest,
   cv,
@@ -256,14 +270,10 @@ export async function checkCoverLetterDraft(draft, {
 
   const company = String(normalizedDraft.company ?? '').trim();
   const role = String(normalizedDraft.role ?? '').trim();
-  const jdCompany = normalizedDraft.jd?.company;
-  const jdRole = normalizedDraft.jd?.role;
-  const companyMatches = Boolean(company && (typeof jdCompany === 'string'
-    ? normalizeSpace(company) === normalizeSpace(jdCompany)
-    : normalizeSpace(jdText).includes(normalizeSpace(company))));
-  const roleMatches = Boolean(role && (typeof jdRole === 'string'
-    ? normalizeSpace(role) === normalizeSpace(jdRole)
-    : normalizeSpace(jdText).includes(normalizeSpace(role))));
+  const companyMatches = Boolean(company && typeof jdCompany === 'string' && jdCompany.trim()
+    && normalizeSpace(company) === normalizeSpace(jdCompany) && phrasePattern(jdCompany).test(jdText));
+  const roleMatches = Boolean(role && typeof jdRole === 'string' && jdRole.trim()
+    && normalizeSpace(role) === normalizeSpace(jdRole) && phrasePattern(jdRole).test(jdText));
   checks.push(check('company_matches_jd', companyMatches ? 'pass' : 'fail', { reasonCode: 'company_mismatch' }));
   checks.push(check('role_matches_jd', roleMatches ? 'pass' : 'fail', { reasonCode: 'role_mismatch' }));
 
@@ -308,7 +318,7 @@ export async function checkCoverLetterDraft(draft, {
     || typeof claim.text !== 'string' || !claim.text.trim());
   const ids = claims.map(claim => String(claim?.id ?? '')).filter(Boolean);
   const duplicateIds = ids.filter((id, index) => ids.indexOf(id) !== index);
-  const missingCoverage = hasClaimCoverage(normalizedDraft, jdText);
+  const missingCoverage = hasClaimCoverage(normalizedDraft, profileName);
   checks.push(check('claim_coverage', claims.length && !invalidClaims.length && !duplicateIds.length && !missingCoverage.length
     ? 'pass' : 'fail', {
     reasonCode: !claims.length ? 'claims_missing' : invalidClaims.length ? 'invalid_claim' : duplicateIds.length
@@ -328,18 +338,17 @@ export async function checkCoverLetterDraft(draft, {
       const result = await validateClaims({ claims, manifest, cv });
       const results = Array.isArray(result?.results) ? result.results : [];
       const byId = new Map(results.map(item => [item?.claimId, item]));
+      const duplicateResults = results.filter((item, index) => results.findIndex(other => other?.claimId === item?.claimId) !== index)
+        .map(item => item?.claimId ?? null);
       const missingResults = claims.filter(claim => !byId.has(claim?.id)).map(claim => claim?.id ?? null);
-      const failedResults = claims.filter(claim => byId.get(claim?.id)?.status !== 'pass').map(claim => ({
-        claimId: claim?.id ?? null,
-        status: byId.get(claim?.id)?.status ?? 'missing',
-        reasonCode: byId.get(claim?.id)?.reasonCode,
-      }));
+      const failedResults = results.filter(item => item?.status !== 'pass');
       const extraResults = results.filter(item => !ids.includes(item?.claimId)).map(item => item?.claimId ?? null);
-      const isOk = result?.ok === true && claims.length > 0 && !missingResults.length && !failedResults.length && !extraResults.length;
+      const isOk = result?.ok === true && claims.length > 0 && results.length === claims.length
+        && !missingResults.length && !failedResults.length && !extraResults.length && !duplicateResults.length;
       checks.push(check('claim_validation', isOk ? 'pass' : 'fail', {
-        reasonCode: missingResults.length ? 'claim_result_missing' : extraResults.length ? 'unexpected_claim_result'
+        reasonCode: duplicateResults.length ? 'duplicate_claim_result' : missingResults.length ? 'claim_result_missing' : extraResults.length ? 'unexpected_claim_result'
           : 'claim_validation_failed',
-        missingResults, failedResults, extraResults,
+        missingResults, failedResults, extraResults, duplicateResults,
       }));
     } catch (error) {
       checks.push(check('claim_validation', 'blocked', {
@@ -391,6 +400,9 @@ async function writeReserved(path, contents) {
 
 export async function runCoverLetterV2(draft, {
   jdText = '',
+  jdCompany,
+  jdRole,
+  profileName,
   validateClaims,
   manifest,
   cv,
@@ -401,7 +413,7 @@ export async function runCoverLetterV2(draft, {
 } = {}) {
   const phrases = bannedPhrases || await loadBannedPhrases();
   const checked = await checkCoverLetterDraft(draft, {
-    jdText, validateClaims, manifest, cv, validatorError, bannedPhrases: phrases,
+    jdText, jdCompany, jdRole, profileName, validateClaims, manifest, cv, validatorError, bannedPhrases: phrases,
   });
   if (!checked.ok) return checked;
 
@@ -535,13 +547,16 @@ async function main() {
       'claims-validator': { type: 'string' },
       manifest: { type: 'string' },
       cv: { type: 'string' },
+      company: { type: 'string' },
+      role: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
     },
     allowPositionals: true,
     strict: true,
   });
+  const usage = 'Usage: node cover-letter-v2.mjs --draft <draft.json> --company <canonical-company> --role <canonical-role> [--claims-validator <module>] [--manifest <manifest.json> --cv <cv.md>]\n       node cover-letter-v2.mjs --approve <check.json>';
   if (values.help) {
-    console.log('Usage: node cover-letter-v2.mjs --draft <draft.json> [--claims-validator <module>] [--manifest <manifest.json> --cv <cv.md>]\n       node cover-letter-v2.mjs --approve <check.json>');
+    console.log(usage);
     return;
   }
   if (values.approve) {
@@ -550,7 +565,7 @@ async function main() {
     return;
   }
   if (!values.draft) {
-    console.log('Usage: node cover-letter-v2.mjs --draft <draft.json> [--claims-validator <module>] [--manifest <manifest.json> --cv <cv.md>]');
+    console.log(usage);
     process.exitCode = 1;
     return;
   }
@@ -570,7 +585,7 @@ async function main() {
   let cv;
   if (values.manifest) manifest = JSON.parse(await readFile(resolve(values.manifest), 'utf8'));
   if (values.cv) cv = await readFile(resolve(values.cv), 'utf8');
-  const result = await runCoverLetterV2(draft, { jdText, validateClaims, manifest, cv, validatorError });
+  const result = await runCoverLetterV2(draft, { jdText, jdCompany: values.company, jdRole: values.role, validateClaims, manifest, cv, validatorError });
   console.log(JSON.stringify({
     status: result.status,
     draftHash: result.draftHash,

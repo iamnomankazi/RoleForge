@@ -12,6 +12,7 @@ import {
   runCoverLetterV2,
 } from '../cover-letter-v2.mjs';
 import { buildHtml } from '../generate-cover-letter.mjs';
+import { createDraftManifest, validateClaims as realValidator } from '../cv-claims.mjs';
 
 const company = 'Northstar Labs';
 const role = 'Backend Engineer';
@@ -54,6 +55,8 @@ const passingValidator = async ({ claims }) => ({
 async function checkDraft(draft, options = {}) {
   return checkCoverLetterDraft(draft, {
     jdText: draft.jd.text,
+    jdCompany: company,
+    jdRole: role,
     validateClaims: passingValidator,
     ...options,
   });
@@ -125,9 +128,10 @@ test('claim validator failures, missing results, missing validator, and throws f
   assert.equal(claimCheck(thrown).reasonCode, 'claims_validator_threw');
 });
 
-test('candidate-fact sentences need claims; JD context sentences can be unclaimed', async () => {
+test('fact sentences need complete claims even when they also appear in the JD', async () => {
   const draft = makeDraft({ sentences: 10 });
   draft.paragraphs[0].claims = [];
+  draft.paragraphs[0].text = 'I built tools for 42 users.';
   const result = await checkDraft(draft);
   assert.equal(result.checks.find(item => item.id === 'claim_coverage').status, 'fail');
   assert.equal(result.checks.find(item => item.id === 'claim_coverage').reasonCode, 'candidate_sentence_without_claim');
@@ -135,11 +139,11 @@ test('candidate-fact sentences need claims; JD context sentences can be unclaime
   const contextDraft = makeDraft({ sentences: 10 });
   contextDraft.paragraphs[0].text += ' Northstar Labs has a distributed team.';
   contextDraft.jd.text += ' Northstar Labs has a distributed team.';
-  // The only omitted sentence is the explicitly supplied JD/company context.
+  // Every rendered fact needs a complete claim, including company context.
   const resultWithContext = await checkDraft(contextDraft, { validateClaims: async ({ claims }) => ({
     ok: true, results: claims.map(claim => ({ claimId: claim.id, status: 'pass' })),
   }) });
-  assert.equal(resultWithContext.checks.find(item => item.id === 'claim_coverage').status, 'pass');
+  assert.equal(resultWithContext.checks.find(item => item.id === 'claim_coverage').status, 'fail');
 });
 
 test('banned phrases and placeholders are rejected', async () => {
@@ -167,6 +171,7 @@ test('success writes a matching text and exactly one-page PDF with a hash sideca
     const draft = makeDraft();
     const result = await runCoverLetterV2(draft, {
       jdText: draft.jd.text,
+      jdCompany: company, jdRole: role,
       validateClaims: passingValidator,
       outputDirectory,
     });
@@ -199,11 +204,11 @@ test('colliding artifact names are refused without changing the existing pair', 
   try {
     const draft = makeDraft();
     const first = await runCoverLetterV2(draft, {
-      jdText: draft.jd.text, validateClaims: passingValidator, outputDirectory,
+      jdText: draft.jd.text, jdCompany: company, jdRole: role, validateClaims: passingValidator, outputDirectory,
     });
     const originalText = await readFile(first.files.text, 'utf8');
     const second = await runCoverLetterV2(draft, {
-      jdText: draft.jd.text, validateClaims: passingValidator, outputDirectory,
+      jdText: draft.jd.text, jdCompany: company, jdRole: role, validateClaims: passingValidator, outputDirectory,
     });
     assert.equal(second.status, 'blocked');
     assert.equal(second.checks.find(item => item.id === 'output_collision').reasonCode, 'output_exists');
@@ -219,6 +224,7 @@ test('explicit approval rechecks both pair hashes, creates one record, and refus
     const draft = makeDraft();
     const result = await runCoverLetterV2(draft, {
       jdText: draft.jd.text,
+      jdCompany: company, jdRole: role,
       validateClaims: passingValidator,
       outputDirectory,
     });
@@ -242,6 +248,7 @@ test('v2 approval refuses a PDF that changed after its check sidecar was written
     const draft = makeDraft();
     const result = await runCoverLetterV2(draft, {
       jdText: draft.jd.text,
+      jdCompany: company, jdRole: role,
       validateClaims: passingValidator,
       outputDirectory,
     });
@@ -268,4 +275,104 @@ test('user phrase lists are read at runtime and the legacy HTML template accepts
   } finally {
     await rm(userLayerDir, { recursive: true, force: true });
   }
+});
+
+function factualDraft() {
+  const sentence = 'I built API services for 30 users.';
+  const draft = makeDraft({ sentence, sentences: 26, closing: 'Thank you for considering my application.' });
+  const cv = '# Projects\n## Alpha\n- Built API services for 30 users.\n';
+  return { draft, options: { cv, manifest: createDraftManifest(cv), validateClaims: realValidator } };
+}
+
+test('a supported substring cannot authorize unsupported additions to a sentence', async () => {
+  const { draft, options } = factualDraft();
+  assert.equal((await checkDraft(draft, options)).status, 'pass');
+  draft.paragraphs[0].text = draft.paragraphs[0].text.replace('I built API services for 30 users.', 'I built API services for 30 users and invented TypeScript.');
+  draft.paragraphs[0].claims[0].text = 'I built API services for 30 users';
+  const result = await checkDraft(draft, options);
+  const coverage = result.checks.find(item => item.id === 'claim_coverage');
+  assert.equal(result.status, 'fail');
+  assert.equal(coverage.status, 'fail');
+  assert.ok(coverage.missingSentences.some(item => item.sentence.includes('invented TypeScript')));
+  draft.paragraphs[0].claims[0].text = 'I built API services for 30 users and invented TypeScript.';
+  assert.equal(claimCheck(await checkDraft(draft, options)).status, 'fail');
+});
+
+test('greeting, closing and factual signatures require complete validated claims', async () => {
+  for (const field of ['greeting', 'closing', 'signature']) {
+    const { draft, options } = factualDraft();
+    draft[field] = 'I authored TypeScript and Next.js and led 500 engineers.';
+    const unchecked = await checkDraft(draft, options);
+    assert.equal(unchecked.status, 'fail', field);
+    assert.ok(unchecked.checks.find(item => item.id === 'claim_coverage').missingSentences.some(item => item.field === field));
+    draft.claims = [{ id: `${field}-claim`, text: draft[field] }];
+    const checked = await checkDraft(draft, options);
+    assert.equal(checked.checks.find(item => item.id === 'claim_coverage').status, 'pass');
+    assert.equal(claimCheck(checked).status, 'fail');
+  }
+  const { draft, options } = factualDraft();
+  draft.closing = 'I built API services for 30 users.';
+  assert.equal((await checkDraft(draft, options)).status, 'pass');
+  draft.claims = [{ id: 'unrendered', text: 'I authored TypeScript.' }];
+  assert.equal(claimCheck(await checkDraft(draft, options)).status, 'fail');
+});
+
+test('company and role equal independently supplied complete names bound to JD phrases', async () => {
+  const draft = makeDraft({ companyName: 'Northstar', roleName: 'Engineer' });
+  draft.jd.text = 'Northstar Labs is hiring a Backend Engineer';
+  const partial = await checkDraft(draft);
+  assert.equal(partial.checks.find(item => item.id === 'company_matches_jd').status, 'fail');
+  assert.equal(partial.checks.find(item => item.id === 'role_matches_jd').status, 'fail');
+  draft.company = 'Fictional Corp'; draft.role = 'Chief Executive Officer';
+  draft.jd.company = draft.company; draft.jd.role = draft.role;
+  const forged = await checkDraft(draft);
+  assert.equal(forged.checks.find(item => item.id === 'company_matches_jd').status, 'fail');
+  assert.equal(forged.checks.find(item => item.id === 'role_matches_jd').status, 'fail');
+  const unbound = await checkDraft(draft, { jdCompany: draft.company, jdRole: draft.role });
+  assert.equal(unbound.checks.find(item => item.id === 'company_matches_jd').status, 'fail');
+  assert.equal(unbound.checks.find(item => item.id === 'role_matches_jd').status, 'fail');
+  const noCanonical = await checkDraft(makeDraft(), { jdCompany: undefined, jdRole: undefined });
+  assert.equal(noCanonical.checks.find(item => item.id === 'company_matches_jd').status, 'fail');
+  const boundary = await checkDraft(makeDraft(), { jdText: 'Northstar LabsX hires Backend Engineers.' });
+  assert.equal(boundary.checks.find(item => item.id === 'company_matches_jd').status, 'fail');
+  assert.equal(boundary.checks.find(item => item.id === 'role_matches_jd').status, 'fail');
+});
+
+test('optional and negated language skills do not impose a language requirement', async () => {
+  for (const text of [
+    'Fluent in German is a plus, not a requirement',
+    'You must have Python skills; German is optional',
+    'German is nice to have.', 'German is not required.', 'German is not mandatory.',
+    'German proficiency is optional but Python is required.', 'You do not have to speak German.',
+    'Fluent in German.', 'Required: Python skills; Finnish is a plus.',
+  ]) {
+    const draft = makeDraft();
+    draft.jd.text += ` ${text}`;
+    const result = await checkDraft(draft);
+    assert.equal(result.status, 'pass', text);
+    assert.equal(result.checks.find(item => item.id === 'language').requiredByJd, 'en', text);
+  }
+  for (const text of ['German is required.', 'You must speak German.', 'German is mandatory; Python is optional.',
+    'German is required and Python is optional.', 'German is required and Python is a plus.', 'German fluency is required.']) {
+    const draft = makeDraft(); draft.jd.text += ` ${text}`;
+    const result = await checkDraft(draft);
+    assert.equal(result.checks.find(item => item.id === 'language').requiredByJd, 'de', text);
+    assert.equal(result.checks.find(item => item.id === 'language').status, 'fail', text);
+  }
+});
+
+test('validator must return exactly one result per claim, including earlier rejections', async () => {
+  const draft = makeDraft();
+  for (const statuses of [['fail', 'pass'], ['pass', 'fail'], ['pass', 'pass']]) {
+    const result = await checkDraft(draft, { validateClaims: async ({ claims }) => ({ ok: true, results: [
+      ...claims.slice(1).map(claim => ({ claimId: claim.id, status: 'pass' })),
+      ...statuses.map(status => ({ claimId: claims[0].id, status })),
+    ] }) });
+    assert.equal(result.status, 'fail');
+    assert.equal(claimCheck(result).reasonCode, 'duplicate_claim_result');
+    assert.equal(claimCheck(result).duplicateResults.length, 1);
+  }
+  const missing = await checkDraft(draft, { validateClaims: async ({ claims }) => ({ ok: true,
+    results: claims.slice(1).map(claim => ({ claimId: claim.id, status: 'pass' })) }) });
+  assert.equal(claimCheck(missing).reasonCode, 'claim_result_missing');
 });

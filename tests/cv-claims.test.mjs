@@ -304,7 +304,72 @@ test('drift comparison flags PDF-only technology, metric, project, employer, and
 test('document extraction strips HTML and LaTeX markup and separates plain-text bullets and sentences', () => {
   assert.deepEqual(extractDocumentSegments('<h2>Experience</h2><p>Built API services. Added support.</p>', 'cv.html'), ['Built API services.', 'Added support.']);
   assert.deepEqual(extractDocumentSegments('- First bullet.\n- Second bullet.', 'cv.txt'), ['First bullet.', 'Second bullet.']);
-  assert.deepEqual(extractDocumentSegments('\\section{Experience}\n\\item Built \\textbf{API} services.', 'cv.tex'), ['Built API services.']);
+  assert.deepEqual(extractDocumentSegments('\\begin{document}\\section{Experience}\n\\item Built \\textbf{API} services.\\end{document}', 'cv.tex'), ['Built API services.']);
+});
+
+test('authorship and metrics require one complete project or experience anchor', () => {
+  const skillsCv = '# Skills\n- JavaScript, React, Git\n';
+  for (const text of ['I built Git.', 'I built React.']) {
+    const result = validateClaims({ claims: [{ id: 'c', text }], manifest: anchoredManifest(skillsCv), cv: skillsCv });
+    assert.equal(result.ok, false, text);
+    assert.equal(result.results[0].reasonCode, 'unsupported_relationship');
+  }
+  const cv = '# Projects\n## Alpha\n- Built API services for 30 users.\n## Beta\n- Built tools for 900 users.\n';
+  for (const [text, supported] of [['Built API services for 900 users', false], ['I built API services for 30 users.', true]]) {
+    const result = validateClaims({ claims: [{ id: 'c', text }], manifest: anchoredManifest(cv), cv });
+    assert.equal(result.ok, supported, text);
+    if (!supported) assert.equal(result.results[0].reasonCode, 'unsupported_relationship');
+    else assert.equal(result.results[0].anchorIds.length, 1);
+  }
+  const toolsCv = '# Projects\n## Alpha\n- Built API services with React.\n';
+  assert.equal(validateClaims({ claims: [{ id: 'c', text: 'I built React.' }], manifest: anchoredManifest(toolsCv), cv: toolsCv }).ok, false);
+  const authoredCv = '# Projects\n## Alpha\n- Authored a Node.js API.\n';
+  assert.equal(validateClaims({ claims: [{ id: 'c', text: 'I authored a Nodejs API.' }], manifest: anchoredManifest(authoredCv), cv: authoredCv }).ok, true);
+});
+
+test('all numeric approximation markers survive cleaning and never authorize precise metrics', () => {
+  for (const marked of ['~30', '≈30', 'approx. 30', 'about 30', 'around 30', 'over 30', 'more than 30', 'up to 30', '30+', '30 +']) {
+    const cv = `## Projects\n- Processed ${marked} users.\n`;
+    const manifest = anchoredManifest(cv);
+    assert.ok(manifest.claims.some(entry => entry.type === 'metric' && entry.text.includes(marked)), marked);
+    const precise = validateClaims({ claims: [{ id: 'c', text: 'Processed 30 users.' }], manifest, cv });
+    assert.equal(precise.ok, false, marked);
+    assert.equal(precise.results[0].reasonCode, 'unsupported_metric', marked);
+    assert.equal(validateClaims({ claims: [{ id: 'c', text: `Processed ${marked} users.` }], manifest, cv }).ok, true, marked);
+  }
+  const cv = '## Projects\n- Processed 30 users.\n';
+  assert.equal(validateClaims({ claims: [{ id: 'c', text: 'Processed 30.0 users.' }], manifest: anchoredManifest(cv), cv }).ok, false);
+});
+
+test('dotted technology aliases remain intact in HTML, plain text and TeX sentences', () => {
+  const cv = '# Skills\n- Node.js, Next.js, Vue.js, .NET, ASP.NET\n';
+  const manifest = anchoredManifest(cv);
+  for (const [source, path] of [
+    ['<p>Node.js</p><p>Next.js</p><p>Vue.js</p><p>.NET</p><p>ASP.NET</p>', 'cv.html'],
+    ['Node.js\nNext.js\nVue.js\n.NET\nASP.NET', 'cv.txt'],
+    ['\\begin{document}Node.js\\\\ Next.js\\\\ Vue.js\\\\ .NET\\\\ ASP.NET\\end{document}', 'cv.tex'],
+  ]) {
+    const segments = extractDocumentSegments(source, path);
+    assert.equal(segments.length, 5, JSON.stringify(segments));
+    assert.equal(validateClaims({ claims: segments.map((text, index) => ({ id: String(index), text })), manifest, cv }).ok, true);
+  }
+  const segments = extractDocumentSegments('<p>Used Node.js. Used Next.js.</p>', 'cv.html');
+  assert.deepEqual(segments, ['Used Node.js.', 'Used Next.js.']);
+});
+
+test('standard empty TeX template has no candidate facts; only rendered content is checked', async () => {
+  const template = (await readFile(resolve('templates/cv-template.tex'), 'utf8')).replace(/\{\{[A-Z_]+\}\}/g, '');
+  assert.deepEqual(extractDocumentSegments(template, 'cv.tex'), []);
+  const filled = template.replace('\\section{Education}', '\\section{Education}\n\\resumeItem{Processed 500 rows.}')
+    .replace('\\begin{document}', '\\begin{document}\n\\newcommand{\\fixture}[1]{TypeScript and 900 users}\n\\vspace{-7pt}');
+  const segments = extractDocumentSegments(filled, 'cv.tex');
+  assert.deepEqual(segments, ['Processed 500 rows.']);
+  assert.equal(validateClaims({ claims: segments.map(text => ({ id: 'c', text })), manifest: anchoredManifest(), cv: BASE_CV }).ok, true);
+  assert.throws(() => extractDocumentSegments('\\newcommand{\\hidden}{TypeScript}\n\\begin{document}Processed 500 rows.\\hidden\\end{document}', 'cv.tex'), /unsupported_tex_command:hidden/);
+  assert.throws(() => extractDocumentSegments('\\begin{document}Processed 500 rows.\\input{unverified-facts}\\end{document}', 'cv.tex'), /unsupported_tex_command:input/);
+  const currencyCv = '# Projects\n- Managed $30 for about 30 users.\n';
+  const currency = extractDocumentSegments('\\begin{document}Managed \\$30 for about 30 users.\\end{document}', 'cv.tex');
+  assert.equal(validateClaims({ claims: currency.map(text => ({ id: 'c', text })), manifest: anchoredManifest(currencyCv), cv: currencyCv }).ok, true);
 });
 
 test('strict document check reports unsupported generated facts with reason codes', async () => {

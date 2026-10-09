@@ -78,6 +78,7 @@ async function createApprovedV2Pair(f, options = {}) {
   const outputDirectory = join(f.root, 'output', 'cover-letters');
   const result = await runCoverLetterV2(draft, {
     jdText,
+    jdCompany: draft.company, jdRole: draft.role,
     validateClaims: v2PassingValidator,
     outputDirectory,
   });

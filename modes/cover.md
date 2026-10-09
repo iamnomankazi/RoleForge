@@ -34,7 +34,7 @@ Write the letter yourself in chat, then save the exact draft as JSON with this s
 }
 ```
 
-`jd` must contain exactly one of `path` or `text`. It may also include `hash` with the SHA-256 of the JD text. Every paragraph must include a `claims` array. Put each candidate-fact sentence in that paragraph's claims; JD and company context does not need a candidate claim. Do not invent, merge, or strengthen candidate facts. Give each claim a unique ID. Keep the greeting, paragraphs, and closing between 180 and 260 words in total; the signature is not counted.
+`jd` must contain exactly one of `path` or `text`. It may also include `hash` with the SHA-256 of the JD text. Every paragraph must include a `claims` array. Each rendered fact-bearing sentence must equal a complete listed claim after case and whitespace normalization. This includes the greeting and closing; use an optional top-level `claims` array for facts there. A plain candidate-name signature is exempt; factual signature text requires a claim. JD context does not exempt a rendered fact from checking. All listed claims are validated, including ones not rendered. Do not invent, merge, or strengthen candidate facts. Give each claim a unique ID. Keep the greeting, paragraphs, and closing between 180 and 260 words in total; the signature is not counted.
 
 Save the JSON under the user's ignored `output/` tree, for example `output/cover-letters/drafts/<slug>_<unique-id>.json`. For claim checking, use the candidate's manifest and CV required by the validator.
 
@@ -43,11 +43,15 @@ Save the JSON under the user's ignored `output/` tree, for example `output/cover
 ```bash
 node cover-letter-v2.mjs \
   --draft output/cover-letters/drafts/<draft>.json \
+  --company "<complete company name stated by the user/assistant>" \
+  --role "<complete role title stated by the user/assistant>" \
   --manifest <path-to-claim-manifest.json> \
   --cv cv.md
 ```
 
-The CLI dynamically loads `./cv-claims.mjs` by default. If it is stored elsewhere, pass `--claims-validator <module>`. The module must export `validateClaims({ claims, manifest, cv })`. Missing validators, thrown errors, missing claim results, or any rejected claim block output.
+The canonical company and role are supplied independently with `--company` and `--role`; library callers pass `jdCompany` and `jdRole` in the options. Draft names must equal those complete names, and each canonical name must appear as a whole phrase in the JD. Draft `jd.company` and `jd.role` fields cannot override them. Optional language skills, including "a plus", "nice to have", and negated requirements, do not change the default English policy; mandatory language wording must apply in the same clause.
+
+The CLI dynamically loads `./cv-claims.mjs` by default. If it is stored elsewhere, pass `--claims-validator <module>`. The module must export `validateClaims({ claims, manifest, cv })`. Missing validators, thrown errors, missing or duplicate claim results, or any rejected claim block output. Exactly one result is required per requested claim ID.
 
 The gate reports every check and creates files only when all checks pass and the rendered PDF has exactly one page:
 

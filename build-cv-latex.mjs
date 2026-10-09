@@ -7,6 +7,8 @@ import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
 import { randomUUID } from 'node:crypto';
 import { assertWritableOutput } from './output-safety.mjs';
+import { claimRenderOptions, enforceRenderedCvClaims } from './validate-cv-claims.mjs';
+import { hasFactUnits, splitClaimSentences } from './cv-claims.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEMPLATE_PATH = resolve(__dirname, 'templates', 'cv-template.tex');
@@ -94,17 +96,51 @@ function buildSkills(categories) {
   if (!Array.isArray(categories) || categories.length === 0) return '';
   return categories.map(c => {
     if (!c) return '';
+    if (typeof c === 'string') return `        ${escapeLatex(c)} \\\\`;
     const items = Array.isArray(c.items) ? c.items.join(', ') : (c.items || '');
     return `        \\textbf{${escapeLatex(c.category)}}{: ${escapeLatex(items)}} \\\\`;
   }).filter(Boolean).join('\n');
 }
 
+/** Validate the strings actually substituted, before escaping or adding TeX. */
+export function structuredCvSegments(payload) {
+  const segments = [];
+  const add = value => { if (typeof value === 'string' && value.trim()) segments.push(...splitClaimSentences(value)); };
+  const list = value => {
+    if (Array.isArray(value)) value.forEach(list);
+    else if (typeof value === 'string') value.split(/[,;|]/).forEach(add);
+  };
+  add(payload.name);
+  list(payload.contact_line);
+  add(payload.email?.display || sanitizeUrl(payload.email?.url || ''));
+  add(payload.linkedin?.display);
+  add(payload.github?.display);
+  for (const entry of Array.isArray(payload.education) ? payload.education : []) {
+    for (const key of ['institution', 'location', 'degree', 'dates']) add(entry?.[key]);
+    list(entry?.coursework);
+  }
+  for (const entry of Array.isArray(payload.experience) ? payload.experience : []) {
+    for (const key of ['company', 'dates', 'role', 'location']) add(entry?.[key]);
+    (Array.isArray(entry?.bullets) ? entry.bullets : []).forEach(add);
+  }
+  for (const entry of Array.isArray(payload.projects) ? payload.projects : []) {
+    add(entry?.name); list(entry?.context); add(entry?.dates);
+    (Array.isArray(entry?.bullets) ? entry.bullets : []).forEach(add);
+  }
+  for (const category of Array.isArray(payload.skills) ? payload.skills : []) {
+    if (typeof category !== 'string' && hasFactUnits(category?.category)
+      && !/^(?:programming languages?|languages?|frameworks?|libraries|databases?|tools?|technologies|technical skills|machine learning|cloud platforms?|backend|frontend|devops)$/i.test(category?.category || '')) add(category.category);
+    list(typeof category === 'string' ? category : category?.items);
+  }
+  return segments;
+}
+
 async function main() {
-  const args = process.argv.slice(2);
+  const { args, options: claimOptions } = claimRenderOptions(process.argv.slice(2));
 
   if (args.length === 0 || args.includes('--help')) {
     console.error('Usage:');
-    console.error('  node build-cv-latex.mjs <input.json> <output.tex>');
+    console.error('  node build-cv-latex.mjs <input.json> <output.tex> [--cv-source cv.md] [--anchors manifest.json] [--allow-unverified-claims]');
     console.error('  node build-cv-latex.mjs --test');
     process.exit(1);
   }
@@ -144,6 +180,8 @@ async function main() {
     console.error(`Failed to parse input JSON: ${err.message}`);
     process.exit(1);
   }
+
+  const claimValidation = await enforceRenderedCvClaims(structuredCvSegments(payload), claimOptions);
 
   if (!existsSync(TEMPLATE_PATH)) {
     console.error(`Template not found: ${TEMPLATE_PATH}`);
@@ -189,7 +227,7 @@ async function main() {
     mkdirSync(outDir, { recursive: true });
   }
 
-  await writeFile(absOutput, template, { encoding: 'utf-8', flag: 'wx' });
+  await writeFile(absOutput, `% RoleForge claim validation: ${JSON.stringify(claimValidation)}\n${template}`, { encoding: 'utf-8', flag: 'wx' });
 
   const fileInfo = await stat(absOutput);
   const sizeKB = (fileInfo.size / 1024).toFixed(1);
@@ -210,6 +248,7 @@ async function main() {
       })(),
     },
     valid: true,
+    claimValidation,
   };
 
   console.log(JSON.stringify(report, null, 2));
@@ -343,4 +382,7 @@ async function runSelfTest() {
   process.exit(0);
 }
 
-main();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => {
+  console.error(error.message);
+  process.exitCode = 1;
+});

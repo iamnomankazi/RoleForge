@@ -25,6 +25,22 @@ After building the `.tex` file in step 12, run
 before compiling it. If the check fails, stop and ask the user to review the
 unsupported segments before PDF generation or handoff.
 
+Both CLI entry points enforce the claim gate before writing or compiling.
+`build-cv-latex.mjs` checks the actual structured candidate fields before adding
+TeX markup. `generate-latex.mjs` checks rendered content between
+`\begin{document}` and `\end{document}`, excluding definitions and layout
+arguments. Skills lists are checked as individual entries; factual sentences
+must be covered by a single current anchor, preserving object and metric relationships.
+Unrecognized TeX macros and included document files need review rather than
+silently skipping their rendered content.
+
+The default evidence is `cv.md` with `data/cv-claim-anchors.json`. Both commands
+accept `--cv-source <cv.md>` and `--anchors <manifest.json>`. A missing manifest
+or rejected fact exits nonzero. The explicit `--allow-unverified-claims` flag
+prints a loud warning and records the bypass in the JSON report and generated
+TeX comment or `<output.pdf>.claims.json` metadata. Use it only for an intentionally
+unverified review artifact.
+
 **Requires:** `tectonic` (preferred — `brew install tectonic`, auto-downloads packages) or `pdflatex` (MiKTeX / TeX Live) on PATH.
 
 ## Language support
