@@ -1,0 +1,219 @@
+# Finland-focused employer boards verified against public list endpoints on
+# 2026-10-09. Counts in notes describe the HTTP response used for verification;
+# paginated Workday and SmartRecruiters boards report first-page counts.
+tracked_companies:
+  # Ashby posting API
+  - name: Reaktor
+    careers_url: https://jobs.ashbyhq.com/Reaktor
+    notes: "Verified 2026-10-09; 22 jobs returned, 18 Finland-located."
+    enabled: true
+
+  - name: Hoxhunt
+    careers_url: https://jobs.ashbyhq.com/hoxhunt
+    notes: "Verified 2026-10-09; 22 jobs returned, 12 Finland-located."
+    enabled: true
+
+  - name: Swarmia
+    careers_url: https://jobs.ashbyhq.com/swarmia
+    notes: "Verified 2026-10-09; 5 jobs returned, 4 Finland-located."
+    enabled: true
+
+  - name: Distance Technologies
+    careers_url: https://jobs.ashbyhq.com/distance
+    notes: "Verified 2026-10-09; 7 jobs returned, 6 Finland-located."
+    enabled: true
+
+  - name: Mapbox
+    careers_url: https://jobs.ashbyhq.com/mapbox
+    notes: "Verified 2026-10-09; 32 jobs returned, 4 Finland-located. Global employer with Helsinki roles."
+    enabled: true
+
+  - name: ICEYE
+    careers_url: https://jobs.ashbyhq.com/iceye
+    notes: "Verified 2026-10-09; 190 jobs returned, 94 Finland-located."
+    enabled: true
+
+  - name: Tandem Health
+    careers_url: https://jobs.ashbyhq.com/tandem-health
+    notes: "Verified 2026-10-09; 72 jobs returned, 4 Finland-located. Finland roles appear alongside Nordic openings."
+    enabled: true
+
+  # Greenhouse boards API
+  - name: EnergyHub / Kapacity.io
+    careers_url: https://job-boards.greenhouse.io/energyhub
+    notes: "Verified 2026-10-09; 14 jobs returned, 1 Finland-located. Includes the Helsinki-based Kapacity.io team."
+    enabled: true
+
+  - name: AlphaSense
+    careers_url: https://job-boards.greenhouse.io/alphasense
+    notes: "Verified 2026-10-09; 194 jobs returned, 7 Finland-located. Global employer with Helsinki roles."
+    enabled: true
+
+  - name: Speechify
+    careers_url: https://job-boards.greenhouse.io/speechify
+    notes: "Verified 2026-10-09; 492 jobs returned, 2 Finland-located. Global remote employer with Finland-listed roles."
+    enabled: true
+
+  # Lever postings API
+  - name: The Upright Project
+    careers_url: https://jobs.lever.co/uprightproject
+    notes: "Verified 2026-10-09; 3 jobs returned, 3 Finland-located."
+    enabled: true
+
+  - name: Brightly Works
+    careers_url: https://jobs.lever.co/brightlyworks
+    notes: "Verified 2026-10-09; 6 jobs returned, 3 Finland-located."
+    enabled: true
+
+  - name: Alif Semiconductor
+    careers_url: https://jobs.lever.co/alifsemi
+    notes: "Verified 2026-10-09; 11 jobs returned, 4 Finland-located, including Oulu roles."
+    enabled: true
+
+  # Teamtailor public RSS feeds
+  - name: Siili Solutions
+    careers_url: https://siili.teamtailor.com
+    notes: "Verified 2026-10-09; 6 jobs returned, 6 Finland-located."
+    enabled: true
+
+  - name: Eficode
+    careers_url: https://eficode.teamtailor.com
+    notes: "Verified 2026-10-09; 6 jobs returned, 4 Finland-located."
+    enabled: true
+
+  # Workday CXS jobs API. Counts are the first 20 results (or all results if
+  # the board returned fewer); total counts are included for context.
+  - name: Valmet
+    careers_url: https://valmet.wd103.myworkdayjobs.com/en-US/External
+    notes: "Verified 2026-10-09; first page 20 jobs, 2 Finland-located (158 total on board)."
+    enabled: true
+
+  - name: Stora Enso
+    careers_url: https://storaenso.wd502.myworkdayjobs.com/en-US/Stora_Enso_site_opportunities
+    notes: "Verified 2026-10-09; first page 20 jobs, 2 Finland-located (100 total on board)."
+    enabled: true
+
+  - name: UPM
+    careers_url: https://upm.wd103.myworkdayjobs.com/en-US/Careers
+    notes: "Verified 2026-10-09; first page 20 jobs, 5 Finland-located (65 total on board)."
+    enabled: true
+
+  - name: KONE
+    careers_url: https://kone.wd3.myworkdayjobs.com/en-US/Careers
+    notes: "Verified 2026-10-09; first page 20 jobs, 0 Finland-located (907 total on board); provider pagination reaches later pages."
+    enabled: true
+
+  - name: Fiskars Group
+    careers_url: https://fiskars.wd3.myworkdayjobs.com/en-US/FiskarsGroup
+    notes: "Verified 2026-10-09; first page 20 jobs, 3 Finland-located (28 total on board)."
+    enabled: true
+
+  - name: Huhtamaki
+    careers_url: https://huhtamaki.wd103.myworkdayjobs.com/en-US/DirectsExternal
+    notes: "Verified 2026-10-09; first page 20 jobs, 0 Finland-located (56 total on board); provider pagination reaches later pages."
+    enabled: true
+
+  - name: Silicon Labs
+    careers_url: https://silabs.wd1.myworkdayjobs.com/en-US/SiliconLabsCareers
+    notes: "Verified 2026-10-09; first page 20 jobs, 1 Finland-located (89 total on board)."
+    enabled: true
+
+  - name: S Group / SOK
+    careers_url: https://sok.wd502.myworkdayjobs.com/en-US/S-ryhman-avoimet-tyopaikat
+    notes: "Verified 2026-10-09; first page 20 jobs, 10 Finland-located (102 total on board). Includes digital and software roles."
+    enabled: true
+
+  - name: Hitachi Energy
+    careers_url: https://hitachi.wd1.myworkdayjobs.com/en-US/hitachi
+    notes: "Verified 2026-10-09; first page 20 jobs, 0 Finland-located (2,000 total on board); provider pagination reaches later pages."
+    enabled: true
+
+  - name: Normet
+    careers_url: https://normet.wd502.myworkdayjobs.com/en-US/NormetCareers
+    notes: "Verified 2026-10-09; 12 jobs returned, 1 Finland-located."
+    enabled: true
+
+  - name: Aalto University
+    careers_url: https://aalto.wd3.myworkdayjobs.com/en-US/aalto
+    notes: "Verified 2026-10-09; first page 20 jobs, 20 Finland-located (28 total on board). Includes research software roles."
+    enabled: true
+
+  - name: GE HealthCare
+    careers_url: https://gehc.wd5.myworkdayjobs.com/en-US/GEHC_ExternalSite
+    notes: "Verified 2026-10-09; first page 20 jobs, 0 Finland-located (992 total on board); provider pagination reaches later pages."
+    enabled: true
+
+  - name: Hewlett Packard Enterprise
+    careers_url: https://hpe.wd5.myworkdayjobs.com/en-US/Jobsathpe
+    notes: "Verified 2026-10-09; first page 20 jobs, 0 Finland-located (1,504 total on board); provider pagination reaches later pages."
+    enabled: true
+
+  - name: Trimble
+    careers_url: https://trimble.wd1.myworkdayjobs.com/en-US/TrimbleCareers
+    notes: "Verified 2026-10-09; first page 20 jobs, 0 Finland-located (214 total on board); provider pagination reaches later pages."
+    enabled: true
+
+  - name: Metsä Group
+    careers_url: https://metsagroup.wd103.myworkdayjobs.com/en-US/MetsaGroup_Careers
+    notes: "Verified 2026-10-09; first page 20 jobs, 8 Finland-located (50 total on board)."
+    enabled: true
+
+  # SmartRecruiters public postings API. Counts are the first response page;
+  # totalFound is included when the endpoint reported it.
+  - name: Tieto
+    careers_url: https://careers.smartrecruiters.com/Tieto2
+    notes: "Verified 2026-10-09; first page 100 jobs, 21 Finland-located (382 total on board). Software and data roles appear in Finland."
+    enabled: true
+
+  - name: Deloitte Finland
+    careers_url: https://careers.smartrecruiters.com/DeloitteNordic
+    notes: "Verified 2026-10-09; first page 100 jobs, 8 Finland-located (143 total on board), including Finland trainee programs."
+    enabled: true
+
+  - name: AFRY
+    careers_url: https://careers.smartrecruiters.com/AFRY
+    notes: "Verified 2026-10-09; first page 100 jobs, 7 Finland-located (992 total on board)."
+    enabled: true
+
+  - name: Bosch Group
+    careers_url: https://careers.smartrecruiters.com/BoschGroup
+    notes: "Verified 2026-10-09; first page 100 jobs, 0 Finland-located (4,917 total on board); provider pagination reaches later pages. Finland development centers hire software and data engineers."
+    enabled: true
+
+  - name: Mirantis
+    careers_url: https://careers.smartrecruiters.com/Mirantis
+    notes: "Verified 2026-10-09; 97 jobs returned, 3 Finland-located, including Helsinki software roles."
+    enabled: true
+
+  - name: Fastmarkets
+    careers_url: https://careers.smartrecruiters.com/Fastmarkets
+    notes: "Verified 2026-10-09; 37 jobs returned, 0 Finland-located in this list response; the employer has a Finland data and technology presence."
+    enabled: true
+
+  - name: YIT
+    careers_url: https://careers.smartrecruiters.com/YIT1
+    notes: "Verified 2026-10-09; 38 jobs returned, 10 Finland-located."
+    enabled: true
+
+  - name: Konecranes
+    careers_url: https://careers.smartrecruiters.com/Konecranes
+    notes: "Verified 2026-10-09; first page 100 jobs, 3 Finland-located (391 total on board)."
+    enabled: true
+
+  # Recruitee public offers API
+  - name: Happeo
+    careers_url: https://happeo.recruitee.com
+    notes: "Verified 2026-10-09; 1 job returned, 1 Finland-located. Its open application lists Product & Engineering as an area."
+    enabled: true
+
+  # Amazon Jobs public search API, narrowed to Finland and software keywords.
+  - name: Amazon / AWS
+    provider: amazon
+    careers_url: https://www.amazon.jobs/en/search
+    amazon:
+      normalized_country_code: [FIN]
+      base_query: software
+      loc_query: ""
+      sort: recent
+    notes: "Verified 2026-10-09; Finland/software query returned 2 jobs, both Finland-located."
+    enabled: true
