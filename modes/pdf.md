@@ -4,7 +4,10 @@
 
 Before applying the generic workflow below, read `config/profile.yml` and
 `modes/_profile.md`. When `cv.approved_system.enabled` is true, the profile's
-approved master and role PDFs are the factual and visual source of truth.
+approved master and role PDFs provide layout reference and drift-check material.
+For candidate facts, use only claims in `cv.md` that are present in the active
+claim manifest. PDF-only and `_profile.md` facts need review in `cv.md` before
+they can be used in a generated CV.
 
 1. Read the approved master PDF plus the three role PDFs listed in the profile.
 2. Classify the JD as data engineering, AI/ML, software/backend, or a genuine
@@ -14,7 +17,8 @@ approved master and role PDFs are the factual and visual source of truth.
    right evidence. This is the default and does not require HTML/PDF generation.
 4. Create a light edit only when a summary/skill/project/bullet reorder provides
    meaningful JD-specific value. Create a hybrid only when the JD materially spans
-   two role CVs. Use verified material from the approved master only.
+   two role CVs. Use only candidate claims present in `cv.md` and the active claim
+   manifest.
 5. Tailored output must preserve the approved system's one-page A4 layout:
    centered serif header/contact line, thin blue section rules, black serif body,
    and Profile -> Technical Skills -> Education -> Experience -> Projects -> Languages.
@@ -49,6 +53,13 @@ this mode. Keywords may be reformulated but never fabricated.
 16. Write HTML to `output/cv-{candidate}-{company}.html` (NOT a temp dir — the recorded HTML is what the dashboard's `D` hotkey regenerates from, so it must survive temp cleanup)
 17. Execute: `node generate-pdf.mjs output/cv-{candidate}-{company}.html output/cv-{candidate}-{company}-{YYYY-MM-DD}.pdf --format={letter|a4} --report={report number}` — `{report number}` is the NNN from the report filename/link (e.g. `008` for `reports/008-acme-….md`), not the tracker `#` column. Pass it whenever the application has (or will have) a report; it records the PDF↔report linkage in `data/pdf-index.tsv` so the dashboard can open and regenerate the exact PDF. Omit it only for one-off CVs with no tracker entry.
 18. Report: PDF path, number of pages, keyword coverage %
+
+## CV claim check
+
+After writing the generated HTML in step 16, run
+`node validate-cv-claims.mjs --check-document output/cv-{candidate}-{company}.html --strict`
+before executing the PDF renderer. If the check fails, stop and ask the user to
+review the unsupported segments before rendering or handing off the CV.
 
 ## ATS Rules (clean parsing)
 

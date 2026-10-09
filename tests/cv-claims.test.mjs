@@ -12,6 +12,7 @@ import {
   textHash,
   validateClaims,
 } from '../cv-claims.mjs';
+import { compareDriftFacts, extractDocumentSegments } from '../validate-cv-claims.mjs';
 
 const CLI = resolve('validate-cv-claims.mjs');
 const BASE_CV = `# Experience
@@ -230,11 +231,96 @@ test('init writes a hash-qualified draft and refuses to overwrite it', async () 
     assert.match(draftPath, /anchors\.[a-f0-9]{12}\.json$/);
     const original = await readFile(draftPath, 'utf8');
     const draft = JSON.parse(original);
-    assert.ok(draft.claims.every((entry) => entry.state === 'unanchored'));
+    assert.ok(draft.claims.every((entry) => entry.state === 'asserted'));
+    assert.ok(draft.claims.every((entry) => entry.evidence.some((ref) => ref.path === 'cv.md' && ref.relation === 'self' && ref.sourceHash === draft.cv.inputHash)));
 
     const second = spawnSync(process.execPath, args, { encoding: 'utf8' });
     assert.equal(second.status, 1);
     assert.match(`${second.stdout}\n${second.stderr}`, /init_collision/);
     assert.equal(await readFile(draftPath, 'utf8'), original);
+  });
+});
+
+test('refresh carries content-stable claims, asserts new claims, and reports stale changes/removals', async () => {
+  await withTemp(async (root) => {
+    const cvPath = join(root, 'cv.md');
+    const activePath = join(root, 'active.json');
+    const requested = join(root, 'output', 'refresh.json');
+    const newer = BASE_CV.replace('30 users', '40 users').replace('## Sample Project', '## Renamed Sample');
+    await writeFile(cvPath, newer);
+    await writeFile(activePath, `${JSON.stringify(anchoredManifest(), null, 2)}\n`);
+    const run = spawnSync(process.execPath, [CLI, '--cv', cvPath, '--anchors', activePath, '--refresh', requested, '--json'], { encoding: 'utf8' });
+    assert.equal(run.status, 0, run.stderr);
+    const report = JSON.parse(run.stdout);
+    assert.ok(report.delta.added.length > 0);
+    assert.ok(report.delta.changed.length > 0);
+    assert.ok(report.delta.removed.length > 0);
+    assert.ok(report.staleClaims.length > 0);
+    const refreshed = JSON.parse(await readFile(report.draftPath, 'utf8'));
+    assert.ok(refreshed.claims.every((entry) => entry.state === 'asserted'));
+    assert.ok(refreshed.claims.every((entry) => entry.evidence[0].relation === 'self'));
+    assert.ok(report.delta.added.every((id) => refreshed.claims.find((entry) => entry.id === id)?.state === 'asserted'));
+    assert.equal(JSON.parse(await readFile(activePath, 'utf8')).cv.inputHash, anchoredManifest().cv.inputHash);
+  });
+});
+
+test('activation refuses an existing active manifest unless replacement is explicit, then backs it up', async () => {
+  await withTemp(async (root) => {
+    const activePath = join(root, 'data', 'cv-claim-anchors.json');
+    const draftPath = join(root, 'output', 'draft.json');
+    const oldManifest = anchoredManifest();
+    const newManifest = createDraftManifest(BASE_CV.replace('30 users', '31 users'));
+    await mkdir(join(root, 'data'), { recursive: true });
+    await mkdir(join(root, 'output'), { recursive: true });
+    await writeFile(activePath, `${JSON.stringify(oldManifest)}\n`);
+    await writeFile(draftPath, `${JSON.stringify(newManifest)}\n`);
+    const refused = spawnSync(process.execPath, [CLI, '--activate', draftPath, '--anchors', activePath], { encoding: 'utf8' });
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /active_manifest_exists/);
+    assert.equal(JSON.parse(await readFile(activePath, 'utf8')).cv.inputHash, oldManifest.cv.inputHash);
+    assert.ok(await readFile(draftPath, 'utf8'));
+
+    const activated = spawnSync(process.execPath, [CLI, '--activate', draftPath, '--anchors', activePath, '--replace-active', '--json'], { encoding: 'utf8' });
+    assert.equal(activated.status, 0, activated.stderr);
+    const result = JSON.parse(activated.stdout);
+    assert.ok(result.backupPath);
+    assert.equal(JSON.parse(await readFile(result.backupPath, 'utf8')).cv.inputHash, oldManifest.cv.inputHash);
+    assert.equal(JSON.parse(await readFile(activePath, 'utf8')).cv.inputHash, newManifest.cv.inputHash);
+  });
+});
+
+test('drift comparison flags PDF-only technology, metric, project, employer, and language facts for review', () => {
+  const cv = `# Projects\n## Sample Processor\n- Processed 500 rows with Python.\n\n# Languages\n- English: Fluent\n`;
+  const approvedText = `Projects\nNew Ledger\nBuilt with Python and Rust across 750 rows.\nExperience\nEngineer | Example Labs | 2021-2022\nLanguages\nEnglish: Fluent\nFinnish: Beginner\n`;
+  const facts = compareDriftFacts(cv, approvedText);
+  assert.ok(facts.some((fact) => fact.type === 'technology' && fact.text === 'rust' && fact.state === 'needs_review'));
+  assert.ok(facts.some((fact) => fact.type === 'metric' && fact.text === '750 rows'));
+  assert.ok(facts.some((fact) => fact.type === 'project' && fact.text === 'New Ledger'));
+  assert.ok(facts.some((fact) => fact.type === 'employer' && fact.text === 'Example Labs'));
+  assert.ok(facts.some((fact) => fact.type === 'language_level' && fact.text === 'Finnish: Beginner'));
+  assert.ok(!facts.some((fact) => fact.text === 'Python' || fact.text === '500 rows' || fact.text === 'English: Fluent'));
+});
+
+test('document extraction strips HTML and LaTeX markup and separates plain-text bullets and sentences', () => {
+  assert.deepEqual(extractDocumentSegments('<h2>Experience</h2><p>Built API services. Added support.</p>', 'cv.html'), ['Built API services.', 'Added support.']);
+  assert.deepEqual(extractDocumentSegments('- First bullet.\n- Second bullet.', 'cv.txt'), ['First bullet.', 'Second bullet.']);
+  assert.deepEqual(extractDocumentSegments('\\section{Experience}\n\\item Built \\textbf{API} services.', 'cv.tex'), ['Built API services.']);
+});
+
+test('strict document check reports unsupported generated facts with reason codes', async () => {
+  await withTemp(async (root) => {
+    const cvPath = join(root, 'cv.md');
+    const anchorsPath = join(root, 'anchors.json');
+    const documentPath = join(root, 'generated.html');
+    await writeFile(cvPath, BASE_CV);
+    await writeFile(anchorsPath, `${JSON.stringify(anchoredManifest())}\n`);
+    await writeFile(documentPath, '<h2>Experience</h2><p>Built API services in JavaScript for 30 users.</p><p>Built API services in TypeScript for 30 users.</p>');
+    const run = spawnSync(process.execPath, [CLI, '--check-document', documentPath, '--cv', cvPath, '--anchors', anchorsPath, '--strict'], { encoding: 'utf8' });
+    assert.equal(run.status, 1);
+    const report = JSON.parse(run.stdout);
+    assert.equal(report.counts.checked, 2);
+    assert.equal(report.failures.length, 1);
+    assert.equal(report.failures[0].reasonCode, 'unsupported_technology');
+    assert.match(report.failures[0].text, /TypeScript/);
   });
 });

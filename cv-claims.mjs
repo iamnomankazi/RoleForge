@@ -7,7 +7,7 @@ import { PDFDocument } from 'pdf-lib';
 
 export const CV_CLAIM_SCHEMA_VERSION = 1;
 export const CLAIM_TYPES = Object.freeze([
-  'role', 'employer', 'dates', 'project', 'technology', 'metric', 'education', 'language', 'authorship',
+  'identity', 'role', 'employer', 'dates', 'project', 'technology', 'metric', 'education', 'language', 'authorship',
 ]);
 export const CLAIM_STATES = Object.freeze(['asserted', 'supported', 'conflict', 'needs_review', 'unanchored']);
 
@@ -143,6 +143,7 @@ export function parseCvClaims(cvText) {
   const lines = String(cvText ?? '').replace(/^\uFEFF/, '').split(/\r?\n/);
   const claims = new Map();
   const headings = [];
+  const firstContentLine = lines.findIndex((line) => line.trim());
   for (let index = 0; index < lines.length; index += 1) {
     const raw = lines[index];
     const lineNumber = index + 1;
@@ -152,6 +153,9 @@ export function parseCvClaims(cvText) {
       headings.length = Math.min(headings.length, level - 1);
       headings[level - 1] = cleanMarkdown(heading[2]);
       const section = headings.filter(Boolean).join(' / ');
+      if (level === 1 && index === firstContentLine && !/^(?:profile|summary|experience|employment|projects?|education|skills?|technical skills|languages|certifications?)$/i.test(cleanMarkdown(heading[2]))) {
+        addClaim(claims, 'identity', cleanMarkdown(heading[2]), section, lineNumber);
+      }
       if (classifySection(section) === 'project' && level >= 2) {
         addClaim(claims, 'project', cleanMarkdown(heading[2]), section, lineNumber);
       } else if (classifySection(section) === 'education' && level >= 3) {
@@ -205,14 +209,19 @@ export function parseCvClaims(cvText) {
 }
 
 export function createDraftManifest(cvText, cvPath = 'cv.md') {
-  const inputHash = sha256(String(cvText ?? '').replace(/^\uFEFF/, ''));
+  const source = String(cvText ?? '').replace(/^\uFEFF/, '');
+  const inputHash = sha256(source);
   return {
     schemaVersion: CV_CLAIM_SCHEMA_VERSION,
     cv: { path: cvPath, inputHash },
-    claims: parseCvClaims(cvText).map((claim) => ({
+    claims: parseCvClaims(source).map((claim) => ({
       id: claim.id, type: claim.type, text: claim.text, textHash: claim.textHash,
       cv: { startLine: claim.cv.startLine, endLine: claim.cv.endLine, textHash: claim.cv.textHash },
-      state: 'unanchored', evidence: [],
+      state: 'asserted',
+      evidence: [{
+        path: 'cv.md', locator: `lines:${claim.cv.startLine}${claim.cv.endLine === claim.cv.startLine ? '' : `-${claim.cv.endLine}`}`,
+        sourceHash: inputHash, relation: 'self',
+      }],
     })),
   };
 }
@@ -242,7 +251,8 @@ export function validateManifest(manifest) {
       if (typeof ref.path !== 'string' || !ref.path.trim()) errors.push(`invalid_evidence_path:${entry.id}`);
       if (typeof ref.locator !== 'string' || !ref.locator.trim()) errors.push(`invalid_evidence_locator:${entry.id}`);
       if (!HASH_RE.test(ref.sourceHash || '')) errors.push(`invalid_evidence_hash:${entry.id}`);
-      if (!['independent', 'derivative', 'historical'].includes(ref.relation)) errors.push(`invalid_evidence_relation:${entry.id}`);
+      if (!['self', 'independent', 'derivative', 'historical'].includes(ref.relation)) errors.push(`invalid_evidence_relation:${entry.id}`);
+      if (ref.relation === 'self' && ref.path !== 'cv.md') errors.push(`self_evidence_not_cv:${entry.id}`);
     }
     if (entry.state === 'supported' && (!Array.isArray(entry.evidence) || !entry.evidence.some((ref) => ref?.relation === 'independent'))) {
       errors.push(`supported_without_independent_evidence:${entry.id}`);
@@ -448,13 +458,13 @@ export async function validateManifestEvidence(manifest, { root = process.cwd(),
         const cvTextValue = String(cvText ?? '').replace(/^\uFEFF/, '');
         const locator = /^lines:(\d+)(?:-(\d+))?$/.exec(ref.locator);
         if (!locator) { entryIssues.push('evidence_locator_invalid'); continue; }
-        const claimStillCurrent = parseCvClaims(cvTextValue).some((claim) => claim.id === entry.id && claim.textHash === entry.textHash);
+        const currentClaim = parseCvClaims(cvTextValue).find((claim) => claim.id === entry.id && claim.textHash === entry.textHash);
+        const claimStillCurrent = Boolean(currentClaim);
         if (ref.sourceHash !== currentCvHash && !claimStillCurrent) entryIssues.push('evidence_source_stale');
         if (ref.sourceHash === currentCvHash) {
           const start = Number(locator[1]);
           const end = Number(locator[2] || locator[1]);
-          const lines = cvTextValue.split(/\r?\n/);
-          if (start < 1 || end < start || end > lines.length || !normalizeText(lines.slice(start - 1, end).join(' ')).includes(normalizeText(entry.text))) {
+          if (start < 1 || end < start || !currentClaim || start !== currentClaim.cv.startLine || end !== currentClaim.cv.endLine) {
             entryIssues.push('evidence_locator_mismatch');
           }
         }
@@ -582,4 +592,53 @@ export async function buildValidationReport({ cvText, cvPath = 'cv.md', manifest
     delta,
     errors: manifestErrors,
   };
+}
+
+const LANGUAGE_LEVEL_RE = /\b(English|Finnish|Spanish|Hindi|Gujarati|French|German|Dutch|Danish|Swedish|Norwegian|Italian|Portuguese|Arabic|Japanese|Chinese|Mandarin|Korean|Russian|Ukrainian|Polish|Estonian|Latvian|Lithuanian|Turkish|Persian|Urdu|Bengali|Tamil|Telugu|Punjabi)\s*[:\-–—]\s*([^\n;,|]{2,50})/gi;
+
+/** Extract a conservative set of facts from text for approved-document drift review. */
+export function extractDriftFacts(sourceText) {
+  const text = String(sourceText ?? '').normalize('NFKC');
+  const facts = [];
+  const add = (type, value) => {
+    const clean = String(value ?? '').replace(/\s+/g, ' ').trim().replace(/^[|–—-]+|[|–—-]+$/g, '').trim();
+    if (!clean) return;
+    const key = type === 'technology' ? TECHNOLOGY_ALIASES[normalizeText(clean)] || normalizeText(clean) : normalizeText(clean);
+    if (!facts.some((fact) => fact.type === type && fact.key === key)) facts.push({ type, text: clean, key });
+  };
+
+  for (const match of technologyMatches(text)) add('technology', match.alias);
+  for (const metric of extractMetrics(text)) {
+    if (/(?:%|percent|\b(?:EUR|USD|GBP|CAD|AUD|SEK|NOK|DKK|CHF|JPY|INR)\b|\b(?:x|times|k|m|b|thousand|million|billion|rows?|records?|users?|requests?|transactions?|jobs?|items?|days?|weeks?|months?|years?)\b)/i.test(metric)) add('metric', metric);
+  }
+  for (const match of text.matchAll(LANGUAGE_LEVEL_RE)) add('language_level', `${match[1]}: ${match[2]}`);
+
+  let section = '';
+  const lines = text.split(/\r?\n/);
+  for (const raw of lines) {
+    const line = raw.replace(/\s+/g, ' ').trim();
+    if (!line) continue;
+    const normalized = normalizeText(line).replace(/[:：]$/, '');
+    if (/^(?:selected |personal |academic )?projects?$/.test(normalized)) { section = 'project'; continue; }
+    if (/^(?:professional |work |employment )?(?:experience|history)$/.test(normalized)) { section = 'experience'; continue; }
+    if (/^(?:education|technical skills|skills|languages|profile|summary|certifications?)$/.test(normalized)) { section = ''; continue; }
+    const bullet = /^(?:[-*•▪◦‣]|\d+[.)])\s+/.test(line);
+    const value = line.replace(/^(?:[-*•▪◦‣]|\d+[.)])\s+/, '');
+    if (section === 'project' && !bullet && value.length <= 100 && !/[.!?]$/.test(value) && !/\d{4}/.test(value) && !/:/.test(value)) {
+      add('project', value.split(/\s+[|–—]\s+/)[0]);
+    }
+    if (section === 'experience' && /\b(?:19|20)\d{2}\b/.test(value)) {
+      const parts = value.split(/\s+[|]\s+/).map((part) => part.trim()).filter(Boolean);
+      if (parts.length > 1) add('employer', parts.map((part) => part.replace(DATE_RE, '').trim()).filter(Boolean).at(-1));
+      else {
+        const employer = /\b(?:at|for)\s+((?:[A-Z][\p{L}\p{N}&.'’-]*\s+){0,4}[A-Z][\p{L}\p{N}&.'’-]*(?:\s+(?:Inc\.?|Ltd\.?|Limited|LLC|GmbH|Oy|AB|AS|BV|Corporation|Corp\.?))?)/u.exec(value);
+        if (employer) add('employer', employer[1]);
+      }
+    }
+  }
+
+  const suffixEmployer = /\b([A-Z][\p{L}\p{N}&.'’-]*(?:\s+[A-Z][\p{L}\p{N}&.'’-]*){0,4}\s+(?:Inc\.?|Ltd\.?|Limited|LLC|GmbH|Oy|AB|AS|BV|Pvt\.?\s+Ltd\.?|Corporation|Corp\.?))\b/gu;
+  for (const match of text.matchAll(suffixEmployer)) add('employer', match[1]);
+
+  return facts;
 }

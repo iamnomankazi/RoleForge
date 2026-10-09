@@ -20,6 +20,11 @@ Export a tailored, ATS-optimized CV as a `.tex` file and compile it to PDF via `
     *(Replace `{candidate}`, `{company}`, `{YYYY-MM-DD}` with actual values.)*
 14. Report: .tex path, .pdf path, file sizes, section count, keyword coverage %
 
+After building the `.tex` file in step 12, run
+`node validate-cv-claims.mjs --check-document output/cv-{candidate}-{company}-{YYYY-MM-DD}.tex --strict`
+before compiling it. If the check fails, stop and ask the user to review the
+unsupported segments before PDF generation or handoff.
+
 **Requires:** `tectonic` (preferred — `brew install tectonic`, auto-downloads packages) or `pdflatex` (MiKTeX / TeX Live) on PATH.
 
 ## Language support

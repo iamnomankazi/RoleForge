@@ -30,6 +30,12 @@ The files below are the **ONLY** sources for user-facing content (CV, cover lett
 **RULE: NEVER claim the user authored a project, repo, library, tool, framework, or open-source artefact unless explicitly attributed to them in cv.md or article-digest.md.** Tool-of-trade conflation (user uses X → user built X) is the most common fabrication pattern and is forbidden.
 **RULE: Keywords get reformulated, never fabricated.** Reorder, reframe, emphasise — but never invent. If a claim isn't backed by an in-scope file, ask the user. If no answer, omit. Silence on a topic beats manufactured detail.
 
+## Generated CV claim checks
+
+For generated CV documents, `cv.md` is the canonical set of candidate assertions. The active `data/cv-claim-anchors.json` manifest records those assertions; approved PDFs and `_profile.md` may reveal drift for review, but they do not authorize adding facts. Do not add PDF-only or profile-only facts to a generated CV until they appear in `cv.md` and the manifest is refreshed and reviewed.
+
+After generating CV content as HTML, plain text, or TeX, run `node validate-cv-claims.mjs --check-document <file> --strict`. If the check fails, stop and ask the user to review the unsupported segments before rendering or handing off the CV.
+
 ---
 
 ## Scoring System
