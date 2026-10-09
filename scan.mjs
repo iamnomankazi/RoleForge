@@ -214,6 +214,43 @@ const TARGET_COUNTRY_ISO = new Map([
   ['netherlands', 'nl'],
 ]);
 
+const FINNISH_BUILTIN_CITIES = [
+  'Oulu', 'Kuopio', 'Jyväskylä', 'Lahti', 'Vaasa', 'Pori', 'Lappeenranta',
+  'Hämeenlinna', 'Seinäjoki', 'Rovaniemi', 'Kajaani', 'Kotka', 'Mikkeli',
+  'Porvoo', 'Salo', 'Kokkola',
+];
+
+const US_STATE_NAMES = new Map([
+  ['alabama', 'al'], ['alaska', 'ak'], ['arizona', 'az'], ['arkansas', 'ar'],
+  ['california', 'ca'], ['colorado', 'co'], ['connecticut', 'ct'], ['delaware', 'de'],
+  ['florida', 'fl'], ['georgia', 'ga'], ['hawaii', 'hi'], ['idaho', 'id'],
+  ['illinois', 'il'], ['indiana', 'in'], ['iowa', 'ia'], ['kansas', 'ks'],
+  ['kentucky', 'ky'], ['louisiana', 'la'], ['maine', 'me'], ['maryland', 'md'],
+  ['massachusetts', 'ma'], ['michigan', 'mi'], ['minnesota', 'mn'], ['mississippi', 'ms'],
+  ['missouri', 'mo'], ['montana', 'mt'], ['nebraska', 'ne'], ['nevada', 'nv'],
+  ['new hampshire', 'nh'], ['new jersey', 'nj'], ['new mexico', 'nm'], ['new york', 'ny'],
+  ['north carolina', 'nc'], ['north dakota', 'nd'], ['ohio', 'oh'], ['oklahoma', 'ok'],
+  ['oregon', 'or'], ['pennsylvania', 'pa'], ['rhode island', 'ri'], ['south carolina', 'sc'],
+  ['south dakota', 'sd'], ['tennessee', 'tn'], ['texas', 'tx'], ['utah', 'ut'],
+  ['vermont', 'vt'], ['virginia', 'va'], ['washington', 'wa'], ['west virginia', 'wv'],
+  ['wisconsin', 'wi'], ['wyoming', 'wy'], ['district of columbia', 'dc'],
+]);
+const US_STATE_CODES = new Set(US_STATE_NAMES.values());
+
+const LOCATION_COUNTRY_NAMES = [];
+const LOCATION_REGION_NAMES = new Intl.DisplayNames(['en'], { type: 'region' });
+for (let first = 97; first <= 122; first += 1) {
+  for (let second = 97; second <= 122; second += 1) {
+    const code = String.fromCharCode(first, second);
+    const name = LOCATION_REGION_NAMES.of(code.toUpperCase());
+    if (name && name.toLowerCase() !== code) LOCATION_COUNTRY_NAMES.push([name.toLowerCase(), code]);
+  }
+}
+LOCATION_COUNTRY_NAMES.sort((left, right) => right[0].length - left[0].length);
+const LOCATION_COUNTRY_CODES = new Set(LOCATION_COUNTRY_NAMES.map(([, code]) => code));
+const LOCATION_NON_COUNTRY_CODES = new Set(['eu', 'ez', 'un', 'xa', 'xb', 'xu', 'zz']);
+const LOCATION_TOKEN_PATTERN_CACHE = new Map();
+
 function locationKeywordEntries(value) {
   if (value == null) return [];
   const values = Array.isArray(value) ? value : [value];
@@ -226,10 +263,71 @@ function escapeLocationPattern(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function normalizeLocationText(value) {
+  return value.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+}
+
 function locationTextMatches(text, keyword) {
   if (!text || !keyword) return false;
-  if (!/^[\p{L}\p{N}]+$/u.test(keyword)) return text.includes(keyword);
-  return new RegExp(`(^|[^\\p{L}\\p{N}])${escapeLocationPattern(keyword)}(?=$|[^\\p{L}\\p{N}])`, 'u').test(text);
+  const normalizedText = normalizeLocationText(text);
+  const normalizedKeyword = normalizeLocationText(keyword);
+  if (!/^[\p{L}\p{N}]+$/u.test(normalizedKeyword)) return normalizedText.includes(normalizedKeyword);
+  let pattern = LOCATION_TOKEN_PATTERN_CACHE.get(normalizedKeyword);
+  if (!pattern) {
+    pattern = new RegExp(`(^|[^\\p{L}\\p{N}])${escapeLocationPattern(normalizedKeyword)}(?=$|[^\\p{L}\\p{N}])`, 'u');
+    LOCATION_TOKEN_PATTERN_CACHE.set(normalizedKeyword, pattern);
+  }
+  return pattern.test(normalizedText);
+}
+
+function structuredIsoFieldMatches(text, iso) {
+  if (text.trim().toLowerCase() === iso) return true;
+  return new RegExp(`(?:^|[,;(/-])\\s*${escapeLocationPattern(iso)}(?=$|[\\s,;)/-])`, 'i').test(text);
+}
+
+function createExplicitNonTargetLocationMatcher(targetEntries) {
+  const targetNames = new Set([
+    ...TARGET_COUNTRY_ISO.keys(),
+    ...targetEntries.map((entry) => entry.normalized),
+  ]);
+  const nonTargetCountries = LOCATION_COUNTRY_NAMES
+    .filter(([name, code]) => (
+      !targetNames.has(name) && !EUROPE_WIDE_TERMS.has(name) && name !== 'europe' && !LOCATION_NON_COUNTRY_CODES.has(code)
+    ))
+    .map(([name]) => name);
+  const countryPattern = new RegExp(
+    `(^|[^\\p{L}\\p{N}])(?:${nonTargetCountries.map((name) => escapeLocationPattern(normalizeLocationText(name))).join('|')})(?=$|[^\\p{L}\\p{N}])`,
+    'u',
+  );
+  const statePattern = new RegExp(
+    `(^|[^\\p{L}\\p{N}])(?:${[...US_STATE_NAMES.keys()].map(escapeLocationPattern).join('|')})(?=$|[^\\p{L}\\p{N}])`,
+    'u',
+  );
+  const nonTargetCountryCodes = new Set([...LOCATION_COUNTRY_CODES]
+    .filter((code) => ![...TARGET_COUNTRY_ISO.values()].includes(code) && !LOCATION_NON_COUNTRY_CODES.has(code)));
+  const usAliasPattern = /(?:^|[^\p{L}\p{N}])(?:u\.?s\.?a?\.?|usa)(?=$|[^\p{L}\p{N}])/iu;
+
+  return (text) => {
+    const lower = normalizeLocationText(text);
+    if (countryPattern.test(lower) || statePattern.test(lower) || usAliasPattern.test(text)) return true;
+
+    // Country abbreviations and state abbreviations are meaningful only as
+    // comma-separated location fields, never as arbitrary short words.
+    const fields = text.split(',').slice(1).map((field) => normalizeLocationText(field).trim());
+    for (const field of fields) {
+      const code = field.match(/^([a-z]{2})(?:\s+\d{5}(?:-\d{4})?)?$/)?.[1];
+      if (!code) continue;
+      if (US_STATE_CODES.has(code)) {
+        // Delaware's code is also Germany's ISO alias. Keep the established
+        // country-code form while recognizing the audited Delaware locations.
+        if (code === 'de' && /(?:^|[,;])\s*(?:wilmington|dover|newark)\s*(?:,|$)/i.test(text)) return true;
+        if (code === 'de' && /,\s*de\s+\d{5}(?:-\d{4})?\s*$/i.test(text)) return true;
+        if (code !== 'de') return true;
+      }
+      if (nonTargetCountryCodes.has(code)) return true;
+    }
+    return false;
+  };
 }
 
 function nonGeographicLocation(value, generic) {
@@ -290,6 +388,12 @@ export function buildLocationClassifier(locationFilter) {
   const configuredIso = [...TARGET_COUNTRY_ISO]
     .filter(([country]) => targetEntries.some((entry) => entry.normalized === country))
     .map(([country, iso]) => ({ iso, raw: targetEntries.find((entry) => entry.normalized === country).raw }));
+  const explicitNonTargetLocation = createExplicitNonTargetLocationMatcher(targetEntries);
+  const targetCountryEntries = targetEntries.filter((entry) => (
+    TARGET_COUNTRY_ISO.has(entry.normalized)
+    || LOCATION_COUNTRY_NAMES.some(([name]) => normalizeLocationText(name) === normalizeLocationText(entry.normalized))
+  ));
+  const hasConfiguredFinland = targetEntries.some((entry) => entry.normalized === 'finland');
 
   const findTarget = (text, { structured = false, permitShort = true } = {}) => {
     const entry = targetEntries.find((candidate) => (
@@ -297,12 +401,20 @@ export function buildLocationClassifier(locationFilter) {
     ));
     if (entry) return entry.raw;
     if (structured) {
-      const alias = configuredIso.find(({ iso }) => locationTextMatches(text, iso));
+      const alias = configuredIso.find(({ iso }) => (
+        structuredIsoFieldMatches(text, iso) && locationTextMatches(text, iso)
+      ));
       if (alias) return alias.raw;
     }
     return '';
   };
+  const findTargetCountryName = (text) => targetCountryEntries.find((entry) => (
+    locationTextMatches(text, entry.normalized)
+  ))?.raw || '';
   const findEurope = (text) => [...europeWide].find((keyword) => locationTextMatches(text, keyword)) || '';
+  const findFinnishCity = (text) => hasConfiguredFinland
+    ? FINNISH_BUILTIN_CITIES.find((city) => locationTextMatches(text, city)) || ''
+    : '';
   const isTargetScope = (scope) => Boolean(
     findTarget(scope.toLowerCase(), { structured: true }) || findEurope(scope.toLowerCase()),
   );
@@ -320,9 +432,19 @@ export function buildLocationClassifier(locationFilter) {
       }
     }
 
-    const locationTarget = findTarget(locationLower, { structured: true });
+    let locationTarget = '';
+    let locationEurope = '';
+    for (const part of locationText.split(/[;|·•]|\s+\/\s+/).map((entry) => entry.trim()).filter(Boolean)) {
+      locationEurope = findEurope(part.toLowerCase());
+      if (locationEurope) break;
+      locationTarget = findTargetCountryName(part.toLowerCase());
+      if (locationTarget) break;
+      if (explicitNonTargetLocation(part)) continue;
+      locationTarget = findTarget(part.toLowerCase(), { structured: true }) || findFinnishCity(part.toLowerCase());
+      if (locationTarget) break;
+    }
     if (locationTarget) return { status: 'eligible', code: 'target_region', matched: locationTarget, source: 'location' };
-    if (findEurope(locationLower)) return { status: 'eligible', code: 'europe_wide', matched: 'Europe', source: 'location' };
+    if (locationEurope) return { status: 'eligible', code: 'europe_wide', matched: 'Europe', source: 'location' };
     const titleTarget = findTarget(titleLower);
     if (titleTarget) return { status: 'eligible', code: 'target_region', matched: titleTarget, source: 'title' };
     if (findEurope(titleLower)) return { status: 'eligible', code: 'europe_wide', matched: 'Europe', source: 'title' };
