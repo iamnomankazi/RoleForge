@@ -34,7 +34,8 @@ import {
   validateArtifactRecord,
 } from './application-integrity.mjs';
 import { GENERIC_APPLICATION_CLASSIFICATION_SEMANTICS } from './application-reasoning.mjs';
-import { HUMAN_GATE_CAUSES, HUMAN_GATE_SIGNALS, sanitizeHumanGateUrl } from './application-form-core.mjs';
+import { HUMAN_GATE_CAUSES, HUMAN_GATE_SIGNALS, sanitizeHumanGateUrl, sanitizeUrl, sanitizePersistedUrls } from './application-form-core.mjs';
+import { hashFormValue } from './application-form-policy.mjs';
 import { normalizeTextKey, parseTrackerRow, resolveColumns } from './tracker-parse.mjs';
 import { loadCanonicalStates, resolveCanonicalState } from './tracker-utils.mjs';
 
@@ -145,6 +146,28 @@ function writeJsonAtomic(path, value) {
   const temp = join(dirname(path), `.${basename(path)}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
   writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
   renameSync(temp, path);
+}
+
+function sanitizedPreparation(value) {
+  const sanitized = sanitizePersistedUrls(value);
+  if (JSON.stringify(sanitized) !== JSON.stringify(value)) {
+    sanitized.evidenceHash = hashFormValue(JSON.stringify({ ...sanitized, evidenceHash: undefined }));
+  }
+  return sanitized;
+}
+
+function sanitizedBatchState(state) {
+  const sanitized = sanitizePersistedUrls(state);
+  for (const [index, candidate] of sanitized.candidates.entries()) {
+    const original = state.candidates[index];
+    if (original.formPreparation) candidate.formPreparation = sanitizedPreparation(original.formPreparation);
+    candidate.formPreparationHistory = (original.formPreparationHistory || []).map(sanitizedPreparation);
+  }
+  return sanitized;
+}
+
+function writeBatchState(path, state) {
+  writeJsonAtomic(path, sanitizedBatchState(state));
 }
 
 function assertKnownFields(value, allowed, label) {
@@ -509,7 +532,7 @@ export function createApplicationBatch({
   const manifestPath = join(batchDir, 'manifest.json');
   const statePath = join(batchDir, 'state.json');
   writeJsonExclusive(manifestPath, manifest);
-  writeJsonExclusive(statePath, initialBatchState(manifest));
+  writeJsonExclusive(statePath, sanitizedBatchState(initialBatchState(manifest)));
   return { manifest, manifestPath, statePath };
 }
 
@@ -947,6 +970,7 @@ function validateFormPreparation(value) {
 }
 
 export function appendFormPreparationEvidence(candidateState, formPreparation) {
+  formPreparation = sanitizedPreparation(formPreparation);
   validateFormPreparation(formPreparation);
   candidateState.formPreparation = formPreparation;
   candidateState.formPreparationHistory ??= [];
@@ -997,7 +1021,7 @@ function validateState(state, manifest) {
     ]), 'candidate state');
     const candidate = manifest.candidates[index];
     if (candidateState.candidate_id !== candidate.candidate_id || candidateState.run_id !== manifest.sourceRunId
-        || candidateState.listingUrl !== candidate.listingUrl) throw new Error('Batch state candidate identity or order mismatch');
+        || sanitizeUrl(candidateState.listingUrl) !== sanitizeUrl(candidate.listingUrl)) throw new Error('Batch state candidate identity or order mismatch');
     assertKnownFields(candidateState.artifacts, new Set(['cv', 'coverLetter', 'coverLetterText', 'combinedDocument']), 'candidate artifacts');
     if (!Array.isArray(candidateState.artifactHistory)) throw new Error('Artifact history must be an array');
     if (!Array.isArray(candidateState.abandonmentHistory)) throw new Error('Abandonment history must be an array');
@@ -1295,7 +1319,7 @@ export function recordStaleLockRecovery(manifestPath, recovery, {
   loaded.state.lockRecoveryHistory.push(event);
   loaded.state.revision += 1;
   loaded.state.updatedAt = now.toISOString();
-  writeJsonAtomic(loaded.statePath, loaded.state);
+  writeBatchState(loaded.statePath, loaded.state);
   return event;
 }
 function sourceMembership(manifest, root) {
@@ -1450,7 +1474,7 @@ export function confirmPreflight(manifestPath, confirmationBatchId, { root = ROO
     loaded.state.schemaVersion = APPLICATION_BATCH_STATE_SCHEMA_VERSION;
     loaded.state.revision += 1;
     loaded.state.updatedAt = timestamp;
-    writeJsonAtomic(loaded.statePath, loaded.state);
+    writeBatchState(loaded.statePath, loaded.state);
     return loaded.state.preflight;
   } finally {
     lock.release();
@@ -1599,7 +1623,7 @@ export function bindCandidateArtifacts(manifestPath, candidateId, bindings, {
     loaded.state.schemaVersion = APPLICATION_BATCH_STATE_SCHEMA_VERSION;
     loaded.state.revision += 1;
     loaded.state.updatedAt = timestamp;
-    writeJsonAtomic(loaded.statePath, loaded.state);
+    writeBatchState(loaded.statePath, loaded.state);
     return Object.fromEntries(records.map((item) => [item.key, item.record]));
   } finally {
     lock.release();
@@ -1646,7 +1670,7 @@ export function bindCandidateArtifact(manifestPath, selector, {
     loaded.state.schemaVersion = APPLICATION_BATCH_STATE_SCHEMA_VERSION;
     loaded.state.revision += 1;
     loaded.state.updatedAt = timestamp;
-    writeJsonAtomic(loaded.statePath, loaded.state);
+    writeBatchState(loaded.statePath, loaded.state);
     return record;
   } finally {
     lock.release();
@@ -1693,9 +1717,30 @@ export function bindVerifiedCombinedArtifact(manifestPath, candidateId, {
     loaded.state.schemaVersion = APPLICATION_BATCH_STATE_SCHEMA_VERSION;
     loaded.state.revision += 1;
     loaded.state.updatedAt = timestamp;
-    writeJsonAtomic(loaded.statePath, loaded.state);
+    writeBatchState(loaded.statePath, loaded.state);
     return record;
   } finally { ownedLock?.release(); }
+}
+
+// Save a paused pass without expanding the small human-action transition record.
+export function recordPartialFormPreparation(manifestPath, candidateId, evidence, {
+  root = ROOT, lockToken, now = new Date(),
+} = {}) {
+  const exactId = requireCandidateId(candidateId);
+  assertExecutionLock(manifestPath, lockToken, root, exactId);
+  const loaded = loadBatchState(manifestPath, { root });
+  assertPreflightConfirmed(loaded.manifest, loaded.state, { root, requireCv: true });
+  findManifestCandidate(loaded.manifest, exactId);
+  const candidate = loaded.state.candidates.find((row) => row.candidate_id === exactId);
+  if (candidate.state !== 'actual_form_reached') throw new Error('Partial preparation requires the exact active form');
+  const partial = sanitizedPreparation({ ...evidence, userActionRequired: true,
+    browserOpenRequired: true, deterministicReviewComplete: false, reviewComplete: false });
+  partial.evidenceHash = hashFormValue(JSON.stringify({ ...partial, evidenceHash: undefined }));
+  appendFormPreparationEvidence(candidate, partial);
+  loaded.state.revision += 1;
+  loaded.state.updatedAt = now.toISOString();
+  writeBatchState(loaded.statePath, loaded.state);
+  return candidate.formPreparation;
 }
 
 export function transitionCandidateState(manifestPath, selector, toState, {
@@ -1712,8 +1757,10 @@ export function transitionCandidateState(manifestPath, selector, toState, {
   if (!EXECUTION_STATES.includes(toState)) throw new Error(`Invalid execution state: ${toState}`);
   if (toState === 'abandoned') throw new Error('State abandoned may only be recorded by the canonical abandonment API');
   const isHumanPause = toState === 'human_action_required';
-  const current = requireHttpUrl(isHumanPause ? sanitizeHumanGateUrl(currentUrl) : currentUrl, 'current URL');
-  const evidence = isHumanPause ? `Human action required: ${humanAction?.cause}.` : inline(reason);
+  const current = requireHttpUrl(sanitizeUrl(currentUrl), 'current URL');
+  const evidence = isHumanPause ? `Human action required: ${humanAction?.cause}.` : sanitizePersistedUrls(inline(reason));
+  details = sanitizePersistedUrls(details);
+  if (formPreparation) formPreparation = sanitizedPreparation(formPreparation);
   if (isHumanPause && (details != null || formPreparation != null)) {
     throw new Error('Human action pause records only sanitized classifier evidence');
   }
@@ -1791,7 +1838,7 @@ export function transitionCandidateState(manifestPath, selector, toState, {
     loaded.state.revision += 1;
     loaded.state.schemaVersion = APPLICATION_BATCH_STATE_SCHEMA_VERSION;
     loaded.state.updatedAt = timestamp;
-    writeJsonAtomic(loaded.statePath, loaded.state);
+    writeBatchState(loaded.statePath, loaded.state);
     if (toState === 'closed') releaseCandidateClaim(root, loaded.manifest.batchId, candidate.candidate_id);
     return candidateState;
   } finally {
@@ -1864,7 +1911,7 @@ export function abandonApplicationBatch(manifestPath, {
     loaded.state.schemaVersion = APPLICATION_BATCH_STATE_SCHEMA_VERSION;
     loaded.state.revision += 1;
     loaded.state.updatedAt = timestamp;
-    writeJsonAtomic(loaded.statePath, loaded.state);
+    writeBatchState(loaded.statePath, loaded.state);
     for (const item of staged) rmSync(item.staged, { recursive: true, force: true });
     return { batchId: loaded.manifest.batchId, idempotent: false, candidates: changed.map((row) => row.candidate_id) };
   } catch (error) {
@@ -1974,7 +2021,7 @@ export function recordSubmissionConfirmation(manifestPath, selector, {
     };
     loaded.state.revision += 1;
     loaded.state.updatedAt = timestamp;
-    writeJsonAtomic(loaded.statePath, loaded.state);
+    writeBatchState(loaded.statePath, loaded.state);
     if (status === 'tracker_applied') releaseCandidateClaim(root, loaded.manifest.batchId, candidate.candidate_id);
     return { candidate: effectiveCandidate, candidateState, idempotent: false };
   } finally {

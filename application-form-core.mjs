@@ -35,7 +35,7 @@ export function classifyHumanOnlyField(field = {}) {
   return null;
 }
 
-export function sanitizeHumanGateUrl(value) {
+export function sanitizeUrl(value) {
   const url = new URL(value);
   if (!['http:', 'https:', 'about:'].includes(url.protocol)) throw new Error('Invalid human gate URL');
   url.search = '';
@@ -43,6 +43,22 @@ export function sanitizeHumanGateUrl(value) {
   url.username = '';
   url.password = '';
   return url.href;
+}
+
+// Retain the public handoff helper for callers and old batches.
+export const sanitizeHumanGateUrl = sanitizeUrl;
+
+export function sanitizePersistedUrls(value) {
+  if (typeof value === 'string') {
+    return value.replace(/(?:https?:\/\/|about:)[^\s<>"']+/g, (url) => {
+      try { return sanitizeUrl(url); } catch { return url; }
+    });
+  }
+  if (Array.isArray(value)) return value.map(sanitizePersistedUrls);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, sanitizePersistedUrls(item)]));
+  }
+  return value;
 }
 
 export function classifyHumanGate(pageSignals = {}) {
@@ -903,12 +919,16 @@ export async function reviewApplicationForm(page, profile, artifacts, execution,
     semanticClass: plan.finalActions.map((item) => item.semanticClass).join(' | ') || null,
     activated: snapshot.submitAttempts > 0,
   };
-  const userActionRequired = snapshot.loginGate || snapshot.captcha.manualActionRequired || unresolvedFields.length > 0;
-  const evidence = {
+  const classifiedGate = classifyHumanGate(snapshot).gate;
+  const gate = classifiedGate ? { state: 'human_action_required', ...classifiedGate,
+    stage: 'form_review', currentUrl: sanitizeUrl(snapshot.url),
+    reason: `Human action required: ${classifiedGate.cause}.` } : null;
+  const userActionRequired = Boolean(gate) || snapshot.loginGate || snapshot.captcha.manualActionRequired || unresolvedFields.length > 0;
+  const evidence = sanitizePersistedUrls({
     schemaVersion: 1,
     inspectedAt: new Date().toISOString(),
     reviewedAt: new Date().toISOString(),
-    currentUrl: snapshot.url,
+    currentUrl: sanitizeUrl(snapshot.url),
     formFingerprint: digest(applicationFields.map((field) => ({ label: field.label, type: field.type, required: field.required }))),
     requiredFieldCount: applicationFields.filter((field) => field.visible !== false && field.required).length,
     filledFields: execution.completed,
@@ -921,9 +941,9 @@ export async function reviewApplicationForm(page, profile, artifacts, execution,
     finalAction,
     uploadTopology: plan.uploadTopology,
     reviewComplete: !userActionRequired && !snapshot.validationErrors.length && finalAction.detected && !finalAction.activated,
-  };
+  });
   evidence.evidenceHash = digest(evidence);
-  return { snapshot, plan, evidence };
+  return { snapshot, plan, evidence, ...(gate ? { gate } : {}) };
 }
 
 async function prepareApplicationFormGuarded(page, profile, artifacts, { maxPasses = 4, ...options } = {}) {
@@ -947,6 +967,7 @@ async function prepareApplicationFormGuarded(page, profile, artifacts, { maxPass
     aggregate.unresolvedFields.push(...result.unresolvedFields);
   }
   const reviewed = await reviewApplicationForm(page, profile, artifacts, aggregate, options);
+  if (reviewed.gate?.state === 'human_action_required') return reviewed;
   if (reviewed.evidence.captcha.manualActionRequired) {
     return {
       ...reviewed,

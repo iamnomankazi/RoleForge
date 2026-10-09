@@ -397,3 +397,10 @@ test('cross-host redirects retain requisition identity checks', () => {
   assert.equal(requisitionIdentity(SELECTED), 'greenhouse:wolt:8035172');
   assert.equal(requisitionIdentity(`${SELECTED}/application`), 'greenhouse:wolt:8035172');
 });
+
+test('same-origin requisition mismatch cannot fall back to identical visible company and title', () => {
+  const listingUrl = 'https://job-boards.greenhouse.io/fixture/jobs/111';
+  const currentUrl = 'https://job-boards.greenhouse.io/fixture/jobs/222/application';
+  assert.equal(isCompatibleDestination({ listingUrl, currentUrl, identity: { verified: true } }), false);
+  assert.equal(isCompatibleDestination({ listingUrl, currentUrl: listingUrl+'/application', identity: { verified: true } }), true);
+});

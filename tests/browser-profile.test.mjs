@@ -6,6 +6,8 @@ import test from 'node:test';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import {
   acquireBrowserProfileLock,
   browserProfilePaths,
@@ -105,4 +107,56 @@ test('a stale lock is recovered only for a confirmed-gone local pid', () => {
   } finally {
     rmSync(join(profileRoot, '..'), { recursive: true, force: true });
   }
+});
+
+test('interleaved stale recovery cannot unlink a newly acquired live profile lock', () => {
+  const profileRoot = temporaryProfileRoot();
+  const { lockPath } = browserProfilePaths({ profileRoot });
+  mkdirSync(profileRoot, { recursive: true });
+  writeFileSync(lockPath, JSON.stringify({ pid: 2_000_000_000,
+    startedAt: '2020-01-01T00:00:00.000Z', hostname: hostname(), token: 'dead-owner' }));
+  const originalRead = fs.readFileSync;
+  let reads = 0;
+  let contender;
+  let refusal;
+  let recovered;
+  fs.readFileSync = (...args) => {
+    const value = originalRead(...args);
+    if (args[0] === lockPath && ++reads === 2) {
+      // Return the stale final read after another recovery contender has tried
+      // to remove it and acquire a live lock (the reviewer's exact interleave).
+      try { contender = acquireBrowserProfileLock({ profileRoot }); } catch (error) { refusal = error; }
+    }
+    return value;
+  };
+  syncBuiltinESMExports();
+  try {
+    recovered = acquireBrowserProfileLock({ profileRoot });
+    assert.match(refusal?.message || '', /recovery is already running/);
+    assert.equal(contender, undefined);
+    assert.equal(JSON.parse(readFileSync(lockPath, 'utf8')).token, recovered.owner.token);
+  } finally {
+    fs.readFileSync = originalRead;
+    syncBuiltinESMExports();
+    recovered?.release();
+    contender?.release();
+    rmSync(join(profileRoot, '..'), { recursive: true, force: true });
+  }
+});
+
+test('recovery mutex is recoverable only when old and its local owner is dead', () => {
+  const profileRoot = temporaryProfileRoot();
+  const recoveryPath = `${browserProfilePaths({ profileRoot }).lockPath}.recovery`;
+  mkdirSync(profileRoot, { recursive: true });
+  const owner = { pid: 2_000_000_000, startedAt: '2020-01-01T00:00:00.000Z', hostname: hostname(), token: 'dead-recovery' };
+  try {
+    writeFileSync(recoveryPath, JSON.stringify(owner));
+    assert.throws(() => acquireBrowserProfileLock({ profileRoot }), /recovery is already running/);
+    fs.utimesSync(recoveryPath, new Date(0), new Date(0));
+    const recovered = acquireBrowserProfileLock({ profileRoot });
+    recovered.release();
+    writeFileSync(recoveryPath, JSON.stringify({ ...owner, pid: process.pid }));
+    fs.utimesSync(recoveryPath, new Date(0), new Date(0));
+    assert.throws(() => acquireBrowserProfileLock({ profileRoot }), /recovery is already running/);
+  } finally { rmSync(join(profileRoot, '..'), { recursive: true, force: true }); }
 });

@@ -3,6 +3,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -57,6 +58,39 @@ function validOwner(owner) {
     && typeof owner?.token === 'string' && owner.token.length > 0;
 }
 
+const RECOVERY_MUTEX_STALE_MS = 60_000;
+
+function acquireRecoveryMutex(lockPath, contents, owner) {
+  const recoveryPath = `${lockPath}.recovery`;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let descriptor;
+    try {
+      descriptor = openSync(recoveryPath, 'wx', 0o600);
+      writeFileSync(descriptor, contents, 'utf8');
+      closeSync(descriptor);
+      return () => {
+        if (readLock(recoveryPath)?.owner?.token === owner.token) unlinkSync(recoveryPath);
+      };
+    } catch (error) {
+      if (descriptor !== undefined) closeSync(descriptor);
+      if (error.code !== 'EEXIST') throw error;
+      const existing = readLock(recoveryPath);
+      if (!existing) continue;
+      const age = Date.now() - statSync(recoveryPath).mtimeMs;
+      if (!validOwner(existing.owner) || existing.owner.hostname !== hostname()
+          || age < RECOVERY_MUTEX_STALE_MS || processIsAlive(existing.owner.pid)) {
+        throw new Error(`Browser profile lock recovery is already running: ${recoveryPath}`);
+      }
+      if (readLock(recoveryPath)?.raw === existing.raw) {
+        try { unlinkSync(recoveryPath); } catch (removeError) {
+          if (removeError.code !== 'ENOENT') throw removeError;
+        }
+      }
+    }
+  }
+  throw new Error(`Could not acquire browser profile recovery mutex: ${recoveryPath}`);
+}
+
 export function acquireBrowserProfileLock({ root = PROJECT_ROOT, profileRoot } = {}) {
   const paths = browserProfilePaths({ root, profileRoot });
   mkdirSync(paths.profileRoot, { recursive: true });
@@ -67,58 +101,64 @@ export function acquireBrowserProfileLock({ root = PROJECT_ROOT, profileRoot } =
     token: randomUUID(),
   };
   const contents = `${JSON.stringify(owner)}\n`;
-
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    let descriptor;
-    try {
-      descriptor = openSync(paths.lockPath, 'wx', 0o600);
-      writeFileSync(descriptor, contents, 'utf8');
-      closeSync(descriptor);
-      descriptor = undefined;
-      return {
-        ...paths,
-        owner,
-        release() {
-          const current = readLock(paths.lockPath);
-          if (!current || current.owner?.token !== owner.token) return false;
-          unlinkSync(paths.lockPath);
-          return true;
-        },
-      };
-    } catch (error) {
-      if (descriptor !== undefined) {
+  // Every contender holds this exclusive mutex through ownership rereads,
+  // stale removal and reacquisition, including a normal first acquisition.
+  const releaseRecovery = acquireRecoveryMutex(paths.lockPath, contents, owner);
+  try {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      let descriptor;
+      try {
+        descriptor = openSync(paths.lockPath, 'wx', 0o600);
+        writeFileSync(descriptor, contents, 'utf8');
         closeSync(descriptor);
-        try { unlinkSync(paths.lockPath); } catch (cleanupError) {
-          if (cleanupError.code !== 'ENOENT') throw cleanupError;
+        descriptor = undefined;
+        return {
+          ...paths,
+          owner,
+          release() {
+            const current = readLock(paths.lockPath);
+            if (!current || current.owner?.token !== owner.token) return false;
+            unlinkSync(paths.lockPath);
+            return true;
+          },
+        };
+      } catch (error) {
+        if (descriptor !== undefined) {
+          closeSync(descriptor);
+          try { unlinkSync(paths.lockPath); } catch (cleanupError) {
+            if (cleanupError.code !== 'ENOENT') throw cleanupError;
+          }
+        }
+        if (error.code !== 'EEXIST') throw error;
+
+        const existing = readLock(paths.lockPath);
+        if (!existing) continue;
+        if (!validOwner(existing.owner)) {
+          throw new Error(`Browser profile lock has invalid ownership data; refusing to recover it: ${paths.lockPath}`);
+        }
+        if (existing.owner.hostname !== hostname()) {
+          throw new Error(`Browser profile is locked by pid ${existing.owner.pid} on host ${existing.owner.hostname}; remote owners cannot be confirmed gone`);
+        }
+        if (processIsAlive(existing.owner.pid)) {
+          throw new Error(`Browser profile is already in use by pid ${existing.owner.pid} since ${existing.owner.startedAt}`);
+        }
+
+        // Compare before removing so a lock replaced since it was read is never
+        // mistaken for the confirmed-dead owner.
+        const latest = readLock(paths.lockPath);
+        if (!latest) continue;
+        if (latest.raw !== existing.raw) continue;
+        try {
+          unlinkSync(paths.lockPath);
+        } catch (removeError) {
+          if (removeError.code !== 'ENOENT') throw removeError;
         }
       }
-      if (error.code !== 'EEXIST') throw error;
-
-      const existing = readLock(paths.lockPath);
-      if (!existing) continue;
-      if (!validOwner(existing.owner)) {
-        throw new Error(`Browser profile lock has invalid ownership data; refusing to recover it: ${paths.lockPath}`);
-      }
-      if (existing.owner.hostname !== hostname()) {
-        throw new Error(`Browser profile is locked by pid ${existing.owner.pid} on host ${existing.owner.hostname}; remote owners cannot be confirmed gone`);
-      }
-      if (processIsAlive(existing.owner.pid)) {
-        throw new Error(`Browser profile is already in use by pid ${existing.owner.pid} since ${existing.owner.startedAt}`);
-      }
-
-      // Compare before removing so a lock replaced since it was read is never
-      // mistaken for the confirmed-dead owner.
-      const latest = readLock(paths.lockPath);
-      if (!latest) continue;
-      if (latest.raw !== existing.raw) continue;
-      try {
-        unlinkSync(paths.lockPath);
-      } catch (removeError) {
-        if (removeError.code !== 'ENOENT') throw removeError;
-      }
     }
+    throw new Error(`Could not acquire browser profile lock after stale-lock recovery: ${paths.lockPath}`);
+  } finally {
+    releaseRecovery();
   }
-  throw new Error(`Could not acquire browser profile lock after stale-lock recovery: ${paths.lockPath}`);
 }
 
 export async function openPersistentBrowserProfile({

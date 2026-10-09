@@ -148,10 +148,10 @@ test('a gate on the next application step returns a progression pause', async ()
   } finally { await page.close(); }
 });
 
-function batchFixture() {
+function batchFixture(listingUrl = 'https://fixture.invalid/jobs/1') {
   const root = mkdtempSync(join(tmpdir(), 'roleforge-human-gate-'));
   const runId = 'synthetic-human-gate-run';
-  const candidate = { company: 'Example Company', title: 'Backend Engineer', url: 'https://fixture.invalid/jobs/1', source: 'fixture-provider', recommendedCvVariant: 'software_backend', run_id: runId };
+  const candidate = { company: 'Example Company', title: 'Backend Engineer', url: listingUrl, source: 'fixture-provider', recommendedCvVariant: 'software_backend', run_id: runId };
   candidate.candidate_id = deriveCandidateId(candidate);
   const runDir = join(root, 'output', 'scan-runs', runId);
   mkdirSync(runDir, { recursive: true });
@@ -251,5 +251,29 @@ test('schema v4 legacy states migrate in memory without rewriting the file', () 
     assert.equal(loaded.state.schemaVersion, 5);
     assert.equal(loaded.state.migratedFromSchemaVersion, 4);
     assert.equal(readFileSync(fixture.created.statePath, 'utf8'), before);
+  } finally { fixture.close(); }
+});
+
+test('all batch URLs are sanitized at creation and normal transitions, and legacy trace evidence stays readable', () => {
+  const fixture = batchFixture('https://fixture.invalid/jobs/1?access_token=creation-secret#creation-fragment');
+  const observed = 'https://fixture.invalid/jobs/1?access_token=return-secret#verification-fragment';
+  try {
+    fixture.transition('listing_verified', { currentUrl: observed, details: { entryActions: [{
+      sourceUrl: observed, destinationUrl: observed, frame: { url: observed },
+    }] } });
+    fixture.transition('actual_form_reached', { currentUrl: observed });
+    const legacyPreparation = { schemaVersion: 1, currentUrl: observed, requiredFieldCount: 0,
+      filledFields: [], committedSelections: [], uploadedArtifacts: [], unresolvedFields: [], validationErrors: [],
+      userActionRequired: true, reviewComplete: false, finalAction: { detected: false, activated: false },
+      operationalArtifacts: { trace: 'legacy-playwright-trace.zip' }, evidenceHash: 'old-unsanitized-hash' };
+    fixture.transition('review_required', { currentUrl: observed, formPreparation: legacyPreparation });
+    fixture.transition('blocked', { currentUrl: observed, reason: 'Transport failed for '+observed });
+    const stored = readFileSync(fixture.created.statePath, 'utf8');
+    assert.doesNotMatch(stored, /creation-secret|creation-fragment|return-secret|verification-fragment|access_token/);
+    const state = loadBatchState(fixture.created.manifestPath, { root: fixture.root }).state.candidates[0];
+    assert.equal(state.listingUrl, 'https://fixture.invalid/jobs/1');
+    assert.equal(state.formPreparation.currentUrl, 'https://fixture.invalid/jobs/1');
+    assert.equal(state.formPreparation.operationalArtifacts.trace, 'legacy-playwright-trace.zip');
+    assert.notEqual(state.formPreparation.evidenceHash, legacyPreparation.evidenceHash);
   } finally { fixture.close(); }
 });

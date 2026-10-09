@@ -444,9 +444,9 @@ test('blocking overlay, disabled fields, and uncertain CAPTCHA stop before filli
   const profile = syntheticProfile;
   try {
     for (const [html, classification, state] of [
-      [blockingCaptchaOverlayFixture, 'active_blocking', 'blocked'],
-      [disabledPendingCaptchaFixture, 'active_blocking', 'blocked'],
-      [uncertainCaptchaFixture, 'uncertain', 'review_required'],
+      [blockingCaptchaOverlayFixture, 'active_blocking', 'human_action_required'],
+      [disabledPendingCaptchaFixture, 'active_blocking', 'human_action_required'],
+      [uncertainCaptchaFixture, 'uncertain', 'human_action_required'],
     ]) {
       const page = await browser.newPage();
       await page.setContent(html);

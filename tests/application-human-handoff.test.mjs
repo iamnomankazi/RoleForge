@@ -7,18 +7,21 @@ import { tmpdir } from 'node:os';
 import {
   bindCandidateArtifact, confirmPreflight, createApplicationBatch, loadBatchState,
   acquireBatchExecutionLock, transitionCandidateState,
+  loadExecutionContract,
 } from '../application-batch.mjs';
 import { deriveCandidateId } from '../candidate-identity.mjs';
-import { executeCandidate, buildCandidateFormContext, parseExecutorArgs } from '../application-browser-executor.mjs';
+import { executeCandidate, buildCandidateFormContext, parseExecutorArgs, prepareFormPassWithEvidence } from '../application-browser-executor.mjs';
 import { runSharedBrowserSession } from '../application-shared-browser.mjs';
 import { openPersistentBrowserProfile } from '../browser-profile.mjs';
 import { prepareOperationalApplicationForm } from '../application-form-engine.mjs';
 import { attachFactualSources } from './fixtures/application-evidence-profile.mjs';
+import { chromium } from 'playwright';
 
 let server;
 let origin;
 const modes = new Map();
 const form = '<form method="post"><label>Full name<input name="full_name" required></label><label>Email<input type="email" name="email" required></label><button type="submit" onclick="window.finalClicks++">Submit application</button></form>';
+const uploadForm = '<form id="application" method="post"><label>Full name<input name="full_name" required></label><label>Email<input type="email" name="email" required></label><label>CV / Resume<input type="file" name="resume" required></label><label>Cover letter<input type="file" name="cover_letter" required></label><button type="submit">Submit application</button></form>';
 const gates = {
   captcha: `${form}<div class="g-recaptcha" role="dialog" aria-modal="true" style="position:fixed;inset:0;background:white">Human verification required</div>`,
   login: '<h2>Sign in to apply</h2><form><input type="email" name="email"><input type="password" name="password"></form>',
@@ -28,27 +31,29 @@ const gates = {
 };
 function html(path) {
   const mode = modes.get(path);
-  const content = mode === 'listing' ? '<p>Role description</p><a href="/application/1">Apply</a>'
+  const content = mode === 'upload_clear' ? uploadForm
+    : mode === 'upload_wizard' ? `<div data-career-ops-wizard><p data-career-ops-step="1" data-career-ops-total-steps="2">Step 1 of 2</p><form id="application" method="post" action="/application/step/2"><label>Email<input name="email"></label><label>LinkedIn<input name="linkedin"></label><button type="submit">Continue</button></form></div><script>application.addEventListener('submit', e => { e.preventDefault(); document.body.innerHTML = ${JSON.stringify('<h1>Fixture Company Backend Engineer</h1>' + uploadForm)}; document.querySelector('input[type=file]').addEventListener('change', () => { const h = document.createElement('h2'); h.textContent = 'Verification required / Checking your browser'; document.body.append(h); }); });</script>`
+    : mode === 'listing' ? '<p>Role description</p><a href="/application/1">Apply</a>'
     : mode === 'no_form' ? '<p>No application form here.</p>' : gates[mode] || form;
   return `<!doctype html><title>Fixture Company Backend Engineer</title><h1>Fixture Company — Backend Engineer</h1>${content}<script>window.finalClicks=0;window.credentialInputs=0;document.addEventListener('input',e=>{if(e.target.type==='password'||e.target.autocomplete==='one-time-code')window.credentialInputs++});document.addEventListener('submit',e=>e.preventDefault())</script>`;
 }
 before(async () => {
   server = createServer((request, response) => {
     response.setHeader('Content-Type', 'text/html');
-    response.end(html(request.url));
+    response.end(html(new URL(request.url, 'http://fixture.test').pathname));
   });
   await new Promise((done) => server.listen(0, '127.0.0.1', done));
   origin = `http://127.0.0.1:${server.address().port}`;
 });
 after(async () => { await new Promise((done) => server.close(done)); });
 
-function fixture(count = 1, urlOrigin = origin) {
+function fixture(count = 1, urlOrigin = origin, urlPath = (index) => '/apply/'+(index+1)) {
   const root = mkdtempSync(join(tmpdir(), 'roleforge-human-handoff-'));
   const runId = 'synthetic-handoff-run';
   const runDir = join(root, 'output', 'scan-runs', runId);
   mkdirSync(runDir, { recursive: true });
   const candidates = Array.from({ length: count }, (_, index) => {
-    const row = { company: 'Fixture Company', title: 'Backend Engineer', url: `${urlOrigin}/apply/${index + 1}`,
+    const row = { company: 'Fixture Company', title: 'Backend Engineer', url: `${urlOrigin}${urlPath(index)}`,
       source: 'fixture', recommendedCvVariant: 'software_backend', run_id: runId };
     return { ...row, candidate_id: deriveCandidateId(row) };
   });
@@ -71,7 +76,7 @@ function fixture(count = 1, urlOrigin = origin) {
   });
   return { root, candidates, batches,
     state(index = 0) { return loadBatchState(batches[index].manifestPath, { root }).state.candidates[0]; },
-    cleanup() { rmSync(root, { recursive: true, force: true }); } };
+    cleanup() { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } };
 }
 const profile = attachFactualSources({ candidate: { full_name: 'Alex Example', email: 'alex@example.test' },
   cvText: 'Synthetic fixture CV.', answers: new Map(), priorApprovedAnswers: [], formRules: {} });
@@ -395,4 +400,166 @@ test('last shared candidate timeout closes the profile and returns without waiti
     assert.equal(existsSync(join(f.root, 'output', 'application-batches', 'handoff-1', '.execution.lock')), false);
     assertSafe(e);
   } finally { f.cleanup(); modes.clear(); }
+});
+
+for (const failure of [false, true]) {
+  test('clearance persists only sanitized URLs including '+(failure ? 'failed liveness' : 'successful evidence'), async () => {
+    const f = fixture();
+    modes.set('/apply/1', 'captcha');
+    const e = environment(f, { onSleep: async ({ page }) => {
+      modes.clear();
+      await page.goto(f.candidates[0].url+'?access_token=secret-return-token#verification-secret');
+      if (failure) e.dependencies.checkLivenessViaApi = async () => { throw new Error('failed at '+page.url()); };
+    } });
+    try {
+      const result = await executeCandidate(options(f), { root: f.root, dependencies: e.dependencies });
+      assert.equal(result.state, failure ? 'blocked' : 'form_prepared');
+      const state = f.state();
+      assert.equal(state.currentUrl, f.candidates[0].url);
+      if (!failure) assert.equal(state.formPreparation.currentUrl, f.candidates[0].url);
+      const stored = readFileSync(f.batches[0].statePath, 'utf8');
+      assert.doesNotMatch(stored, /secret-return-token|verification-secret|access_token/);
+      assertSafe(e);
+    } finally { f.cleanup(); modes.clear(); }
+  });
+}
+
+for (const processResume of [false, true]) {
+  test('matching identity on another same-origin requisition blocks '+(processResume ? 'process resume' : 'handoff'), async () => {
+    const atsOrigin = 'https://job-boards.greenhouse.io';
+    const f = fixture(1, atsOrigin, () => '/fixture/jobs/111');
+    modes.set('/fixture/jobs/111', 'captcha');
+    let preparations = 0;
+    const setup = (e) => {
+      e.dependencies.configureContext = async (context) => {
+        await context.route(atsOrigin+'/**', async (route) => route.fulfill({
+          contentType: 'text/html', body: html(new URL(route.request().url()).pathname),
+        }));
+      };
+      e.dependencies.prepareFormPassWithEvidence = async () => { preparations++; assert.fail('Wrong job must never be prepared'); };
+    };
+    const e = environment(f, processResume ? {} : { onSleep: async ({ page, signal }) => {
+      await page.goto(atsOrigin+'/fixture/jobs/222/application'); signal();
+    } });
+    setup(e);
+    try {
+      const first = await executeCandidate(options(f), { root: f.root, dependencies: e.dependencies });
+      if (processResume) {
+        assert.equal(first.state, 'human_action_required');
+        const recovery = environment(f); setup(recovery);
+        recovery.dependencies.checkUrlLiveness = async (page) => {
+          await page.goto(atsOrigin+'/fixture/jobs/222/application');
+          return { result: 'active', reason: 'fixture listing redirect' };
+        };
+        const result = await executeCandidate(options(f, 0, { resumePreparation: true }), { root: f.root, dependencies: recovery.dependencies });
+        assert.equal(result.state, 'blocked'); assertSafe(recovery);
+      } else assert.equal(first.state, 'blocked');
+      assert.equal(preparations, 0);
+      assertSafe(e);
+    } finally { f.cleanup(); modes.clear(); }
+  });
+}
+
+test('partial upload, ledger and wizard history persist before pause and extend after exact resume', async () => {
+  const f = fixture();
+  modes.set('/apply/1', 'upload_wizard');
+  const e = environment(f);
+  e.dependencies.prepareFormPassWithEvidence = async (page, _context, contract, _root, passOptions) =>
+    prepareOperationalApplicationForm(page, profile, contract.candidate.artifacts, {
+      ...passOptions, context: buildCandidateFormContext(contract), transitionStabilityMs: 0,
+    });
+  try {
+    const paused = await executeCandidate(options(f), { root: f.root, dependencies: e.dependencies });
+    assert.equal(paused.state, 'human_action_required');
+    const partial = f.state().formPreparation;
+    assert.equal(partial.reviewComplete, false);
+    assert.equal(partial.uploadedArtifacts.length, 1);
+    assert.equal(partial.progression.stepsAdvanced, 1);
+    assert.ok(partial.attemptLedger.some((row) => /cv|resume/.test(row.semantic)));
+    assert.equal(f.state().formPreparationHistory.length, 1);
+    modes.set('/apply/1', 'upload_clear');
+    const recovery = environment(f);
+    let loaded;
+    recovery.dependencies.prepareFormPassWithEvidence = async (page, _context, contract, _root, passOptions) => {
+      loaded = passOptions.previousEvidence;
+      return prepareOperationalApplicationForm(page, profile, contract.candidate.artifacts, {
+        ...passOptions, context: buildCandidateFormContext(contract),
+      });
+    };
+    const resumed = await executeCandidate(options(f, 0, { resumePreparation: true }), { root: f.root, dependencies: recovery.dependencies });
+    assert.equal(resumed.state, 'form_prepared');
+    assert.deepEqual(loaded.uploadedArtifacts, partial.uploadedArtifacts);
+    assert.deepEqual(loaded.attemptLedger, partial.attemptLedger);
+    const final = f.state().formPreparation;
+    assert.deepEqual(final.progression.transitions, partial.progression.transitions);
+    assert.ok(final.attemptLedger.length > partial.attemptLedger.length);
+    assert.ok(final.uploadedArtifacts.some((upload) => upload.sha256 === partial.uploadedArtifacts[0].sha256));
+    assert.equal(f.state().formPreparationHistory.length, 2);
+    assertSafe(e); assertSafe(recovery);
+  } finally { f.cleanup(); modes.clear(); }
+});
+
+for (const persistent of [false, true]) {
+  test('application evidence never starts raw tracing in '+(persistent ? 'persistent' : 'ephemeral')+' context', async () => {
+    const f = fixture();
+    mkdirSync(join(f.root, 'config'));
+    mkdirSync(join(f.root, 'modes'));
+    writeFileSync(join(f.root, 'config', 'profile.yml'), 'candidate:\n  full_name: Alex Example\n  email: alex@example.test\ncv:\n  approved_system:\n    master_pdf: output/documents/Synthetic CV.pdf\n    role_pdfs:\n      software_backend: output/documents/Synthetic CV.pdf\n      data_engineering: output/documents/Synthetic CV.pdf\n      ai_ml: output/documents/Synthetic CV.pdf\n');
+    writeFileSync(join(f.root, 'cv.md'), 'Alex Example synthetic CV');
+    writeFileSync(join(f.root, 'modes', '_profile.md'), 'Synthetic profile rules');
+    let session;
+    let browser;
+    try {
+      let context;
+      if (persistent) { session = await openPersistentBrowserProfile({ root: f.root, headless: true }); context = session.context; }
+      else { browser = await chromium.launch({ headless: true }); context = await browser.newContext(); }
+      context.tracing.start = async () => assert.fail('Raw tracing records authenticated request secrets');
+      context.tracing.stop = async () => assert.fail('Application sessions must not write a trace');
+      await context.addCookies([{ name: 'session', value: 'synthetic-auth-secret', url: origin }]);
+      const page = await context.newPage();
+      await page.goto(f.candidates[0].url);
+      const authenticatedRequests = [];
+      page.on('request', (request) => {
+        if (request.url().endsWith('/autosave')) authenticatedRequests.push(request);
+      });
+      await page.route('**/autosave', (route) => route.fulfill({
+        contentType: 'application/json', body: '{"token":"synthetic-response-secret"}',
+      }));
+      await page.evaluate(() => document.querySelector('input').addEventListener('input', () => {
+        fetch('/autosave', { method: 'POST', headers: { Authorization: 'Bearer synthetic-auth-secret' },
+          body: 'synthetic-candidate-draft' }).catch(() => {});
+      }));
+      const contract = loadExecutionContract(f.batches[0].manifestPath, f.candidates[0].candidate_id, { root: f.root, requireCoverLetter: true });
+      const result = await prepareFormPassWithEvidence(page, context, contract, f.root);
+      assert.ok(authenticatedRequests.length > 0, 'preparation made an authenticated autosave request');
+      const artifacts = result.evidence.operationalArtifacts;
+      assert.equal(Object.hasOwn(artifacts, 'trace'), false);
+      assert.ok(existsSync(artifacts.screenshotBefore));
+      assert.ok(existsSync(artifacts.screenshotAfter));
+      assert.equal(existsSync(join(artifacts.screenshotAfter, '..', 'playwright-trace.zip')), false);
+    } finally { await session?.close(); await browser?.close(); f.cleanup(); }
+  });
+}
+
+test('review resume rejects an arbitrary same-origin form with copied identity', async () => {
+  const f = fixture();
+  const lock = acquireBatchExecutionLock(f.batches[0].manifestPath, { root: f.root,
+    candidateId: f.candidates[0].candidate_id, operation: 'prepare_application' });
+  for (const state of ['listing_verified', 'actual_form_reached', 'review_required']) {
+    transitionCandidateState(f.batches[0].manifestPath, f.candidates[0].candidate_id, state, {
+      root: f.root, lockToken: lock.token, currentUrl: f.candidates[0].url, reason: 'Synthetic verified candidate.',
+    });
+  }
+  lock.release();
+  const e = environment(f);
+  e.dependencies.checkUrlLiveness = async (page) => {
+    await page.goto(origin+'/unrelated');
+    return { result: 'active', reason: 'synthetic redirect with matching identity' };
+  };
+  e.dependencies.prepareFormPassWithEvidence = async () => assert.fail('Arbitrary form must never be prepared');
+  try {
+    const result = await executeCandidate(options(f, 0, { resumePreparation: true }), { root: f.root, dependencies: e.dependencies });
+    assert.equal(result.state, 'blocked');
+    assertSafe(e);
+  } finally { f.cleanup(); }
 });

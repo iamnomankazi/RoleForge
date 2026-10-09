@@ -21,6 +21,7 @@ import {
   loadExecutionContract,
   transitionCandidateState,
   recordStaleLockRecovery,
+  recordPartialFormPreparation,
 } from './application-batch.mjs';
 import { checkLivenessViaApi } from './liveness-api.mjs';
 import { classifyLiveness } from './liveness-core.mjs';
@@ -87,38 +88,28 @@ export async function prepareFormPassWithEvidence(page, browserContext, contract
   mkdirSync(evidenceDir);
   const beforePath = join(evidenceDir, 'before.png');
   const afterPath = join(evidenceDir, 'after.png');
-  const tracePath = join(evidenceDir, 'playwright-trace.zip');
   const beforeSnapshot = await inspectOperationalApplicationForm(page);
   const screenshotBefore = await safeScreenshot(page, beforePath);
-  let tracing = false;
-  if (browserContext?.tracing?.start) {
-    await browserContext.tracing.start({ screenshots: true, snapshots: true, sources: false });
-    tracing = true;
-  }
-  let preparation;
-  try {
-    const profile = loadApplicationProfile(root);
-    const reasoningProvider = createConfiguredApplicationReasoningProvider(profile);
-    const artifacts = {
-      ...contract.candidate.artifacts,
-      coverLetterTextContent: readFileSync(contract.candidate.artifacts.coverLetterText.resolvedPath, 'utf8'),
-      coverLetterTextProvenance: contract.candidate.artifacts.coverLetterText.narrativeProvenance || null,
-    };
-    preparation = await prepareOperationalApplicationForm(page, profile, artifacts, {
-      context: buildCandidateFormContext(contract),
-      previousEvidence,
-      resumeMode,
-      passId,
-      reasoningProvider,
-    });
-  } finally {
-    if (tracing) await browserContext.tracing.stop({ path: tracePath }).catch(() => {});
-  }
+  // Application sessions can contain authentication headers and tokens.
+  // Keep local screenshots, but never start Playwright's raw network trace.
+  const profile = loadApplicationProfile(root);
+  const reasoningProvider = createConfiguredApplicationReasoningProvider(profile);
+  const artifacts = {
+    ...contract.candidate.artifacts,
+    coverLetterTextContent: readFileSync(contract.candidate.artifacts.coverLetterText.resolvedPath, 'utf8'),
+    coverLetterTextProvenance: contract.candidate.artifacts.coverLetterText.narrativeProvenance || null,
+  };
+  const preparation = await prepareOperationalApplicationForm(page, profile, artifacts, {
+    context: buildCandidateFormContext(contract),
+    previousEvidence,
+    resumeMode,
+    passId,
+    reasoningProvider,
+  });
   const screenshotAfter = await safeScreenshot(page, afterPath);
   return attachOperationalArtifacts(preparation, {
     screenshotBefore,
     screenshotAfter,
-    trace: tracing ? tracePath : null,
     uploadTopologyBefore: inspectOperationalUploadTopology(beforeSnapshot),
     uploadTopologyAfter: preparation.evidence.uploadTopology,
     browserSessionOwnership: {
@@ -476,10 +467,13 @@ export function isCompatibleApplicationEntryDestination({
   } catch {
     return false;
   }
-  if (current.hostname === listing.hostname) return true;
-  if (applyUrl && sameUrlIgnoringHash(applyUrl, currentUrl)) return true;
   const listingRequisition = requisitionIdentity(listingUrl);
   const currentRequisition = requisitionIdentity(currentUrl);
+  if (listing.origin === current.origin && listingRequisition && currentRequisition
+      && !verifyApplicationContinuity({ beforeUrl: listingUrl, currentUrl,
+        candidate: { listingUrl, applyUrl } }).verified) return false;
+  if (current.hostname === listing.hostname) return true;
+  if (applyUrl && sameUrlIgnoringHash(applyUrl, currentUrl)) return true;
   if (listingRequisition && listingRequisition === currentRequisition) return true;
   return isKnownApplicationHost(currentUrl);
 }
@@ -516,10 +510,13 @@ export function isCompatibleDestination({ listingUrl, applyUrl = null, currentUr
     return false;
   }
   if (current.protocol !== 'https:' && current.protocol !== 'http:') return false;
-  if (sameUrlIgnoringHash(listingUrl, currentUrl)) return true;
-  if (applyUrl && sameUrlIgnoringHash(applyUrl, currentUrl)) return true;
   const listingRequisition = requisitionIdentity(listingUrl);
   const currentRequisition = requisitionIdentity(currentUrl);
+  if (listing.origin === current.origin && listingRequisition && currentRequisition
+      && !verifyApplicationContinuity({ beforeUrl: listingUrl, currentUrl,
+        candidate: { listingUrl, applyUrl } }).verified) return false;
+  if (sameUrlIgnoringHash(listingUrl, currentUrl)) return true;
+  if (applyUrl && sameUrlIgnoringHash(applyUrl, currentUrl)) return true;
   if (listingRequisition && listingRequisition === currentRequisition) return true;
   return Boolean(identity?.verified);
 }
@@ -1376,7 +1373,18 @@ async function waitForCandidateReview(browser, ownsBrowser, state, options, depe
 function compatibleHumanDestination(contract, currentUrl, identity, gateUrl) {
   const origins = [contract.candidate.listingUrl, contract.candidate.applyUrl, gateUrl]
     .filter(Boolean).map((url) => new URL(url).origin);
-  return origins.includes(new URL(currentUrl).origin) && isCompatibleDestination({
+  const verifiedEntryRoutes = (contract.candidateState.history || [])
+    .filter((event) => event.to === 'actual_form_reached')
+    .map((event) => event.currentUrl);
+  const expected = [contract.candidate.listingUrl, contract.candidate.applyUrl,
+    ...verifiedEntryRoutes, gateUrl].filter(Boolean);
+  // A gate route grants no new job authority. Match an exact manifest route or
+  // retain its requisition through the existing progression continuity check.
+  const routeVerified = expected.some((url) => sameUrlIgnoringHash(sanitizeHumanGateUrl(url), sanitizeHumanGateUrl(currentUrl)))
+    || [gateUrl, ...expected].filter(Boolean).some((beforeUrl) =>
+      requisitionIdentity(beforeUrl) && verifyApplicationContinuity({ beforeUrl, currentUrl,
+        candidate: contract.candidate }).verified);
+  return routeVerified && origins.includes(new URL(currentUrl).origin) && isCompatibleDestination({
     listingUrl: contract.candidate.listingUrl, applyUrl: contract.candidate.applyUrl, currentUrl, identity,
   });
 }
@@ -1887,6 +1895,8 @@ async function prepareResumedForm(page, contract, root, executionLock, options =
       previousEvidence: contract.candidateState.formPreparation,
     });
     if (preparation.gate?.state === 'human_action_required') {
+      recordPartialFormPreparation(contract.manifestPath, contract.candidate.candidate_id,
+        preparation.evidence, { root, lockToken: executionLock.token });
       return await finishHumanHandoff(page, contract, preparation.gate,
         preparation.gate.stage || 'form_progression', options, { root, executionLock, dependencies });
     }
@@ -1964,8 +1974,7 @@ async function executePreparationResume(options, contract, { root, executionLock
     const listingSnapshot = await collectPageSnapshot(listingPage);
     const identity = verifyVisibleIdentity(listingSnapshot, contract.candidate);
     const form = classifyFormSnapshot(listingSnapshot);
-    const compatible = isCompatibleDestination({ listingUrl, applyUrl: contract.candidate.applyUrl,
-      currentUrl: listingSnapshot.currentUrl, identity });
+    const compatible = compatibleHumanDestination(contract, listingSnapshot.currentUrl, identity, null);
     if (compatible && (form.humanGate || form.loginRequired
         || (form.actualForm && ['human_action_required', 'login_required'].includes(fromState)))) {
       const state = await finishHumanHandoff(listingPage, contract, form.humanGate

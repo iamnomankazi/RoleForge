@@ -714,3 +714,33 @@ test('conditional fields exposed by the sole repair fail the mandatory fresh det
     assert.equal(result.evidence.finalAction.activated, false);
   });
 });
+
+for (const disposition of ['passed', 'review_required']) {
+  test('human verification appearing during async verifier overrides '+disposition, async () => {
+    await withPage('<form><label>Unfamiliar contact field<input required></label><button type="submit">Submit application</button></form>', async (page) => {
+      let calls = 0;
+      const provider = {
+        identity: { provider: 'fake', model: 'fixture' },
+        annotate: async (request) => ({ schemaVersion: 1, annotations: [{
+          resolutionKey: request.fields[0].resolutionKey, kind: 'semantic_classification', semantic: 'email',
+        }] }),
+        verify: async () => {
+          calls++;
+          await page.evaluate(() => {
+            const heading = document.createElement('h2');
+            heading.textContent = 'Verification required / Checking your browser';
+            document.body.append(heading);
+          });
+          return { schemaVersion: 1, disposition, findings: [] };
+        },
+      };
+      const result = await prepareOperationalApplicationForm(page, profile, {}, { context, reasoningProvider: provider });
+      assert.equal(calls, 1);
+      assert.equal(result.gate.state, 'human_action_required');
+      assert.equal(result.gate.cause, 'uncertain');
+      assert.equal(result.evidence.reviewComplete, false);
+      assert.equal(result.evidence.deterministicReviewComplete, false);
+      assert.equal(result.evidence.finalAction.activated, false);
+    });
+  });
+}

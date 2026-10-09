@@ -11,6 +11,8 @@ import {
   isSemanticFinalAction,
   PROGRESSION_ACTION_LABEL,
   sanitizeHumanGateUrl,
+  sanitizeUrl,
+  sanitizePersistedUrls,
 } from './application-form-core.mjs';
 import {
   canonicalFieldValue,
@@ -1519,20 +1521,21 @@ export async function reviewOperationalApplicationForm(page, profile, artifacts,
     mergeAnswerRecords(previousEvidence?.answerRecords || [], execution.answerRecords || []),
     plan.answerRecords || [],
   );
-  const userActionRequired = snapshot.loginGate || snapshot.captcha.manualActionRequired || unresolvedFields.length > 0;
+  const gate = humanGateOutcome(snapshot, 'form_review');
+  const userActionRequired = Boolean(gate) || snapshot.loginGate || snapshot.captcha.manualActionRequired || unresolvedFields.length > 0;
   const semanticVerification = reasoningState?.semanticVerification || {
     disposition: 'not_required', triggerReasons: [], findings: [], requestDigest: null, responseDigest: null,
     repair: { attempted: false, outcome: 'not_attempted', resolutionKey: null },
   };
   const deterministicReviewComplete = !userActionRequired && !snapshot.validationErrors.length
     && finalAction.detected && !finalAction.activated;
-  const evidence = {
+  const evidence = sanitizePersistedUrls({
     schemaVersion: 3,
     passId,
     resumeMode,
     inspectedAt: new Date().toISOString(),
     reviewedAt: new Date().toISOString(),
-    currentUrl: snapshot.url,
+    currentUrl: sanitizeUrl(snapshot.url),
     formFingerprint: digest(applicationFields.map((field) => ({
       stableFieldId: stableFieldIdentity(field, classifyFieldSemantics(field)),
       label: fieldQuestion(field),
@@ -1542,7 +1545,8 @@ export async function reviewOperationalApplicationForm(page, profile, artifacts,
     requiredFieldCount: applicationFields.filter((field) => field.visible !== false && field.required).length,
     filledFields: execution.completed || [],
     committedSelections: execution.committedSelections || [],
-    uploadedArtifacts: execution.uploadedArtifacts || [],
+    uploadedArtifacts: [...new Map((execution.uploadedArtifacts || []).map((upload) =>
+      [[upload.semantic, upload.sha256, upload.filename].join('|'), upload])).values()],
     unresolvedFields,
     validationErrors: snapshot.validationErrors,
     attemptLedger: execution.attemptLedger || previousEvidence?.attemptLedger || [],
@@ -1574,7 +1578,6 @@ export async function reviewOperationalApplicationForm(page, profile, artifacts,
     operationalArtifacts: {
       screenshotBefore: null,
       screenshotAfter: null,
-      trace: null,
       uploadTopologyBefore: null,
       uploadTopologyAfter: plan.uploadTopology,
       submissionGuardActiveAtHandoff,
@@ -1610,19 +1613,19 @@ export async function reviewOperationalApplicationForm(page, profile, artifacts,
     deterministicReviewComplete,
     reviewComplete: deterministicReviewComplete
       && ['not_required', 'passed'].includes(semanticVerification.disposition),
-  };
+  });
   evidence.evidenceHash = digest(evidence);
-  return { snapshot, plan, evidence };
+  return { snapshot, plan, evidence, ...(gate ? { gate } : {}) };
 }
 
 export function attachOperationalArtifacts(preparation, artifacts = {}) {
-  const evidence = {
+  const evidence = sanitizePersistedUrls({
     ...preparation.evidence,
     operationalArtifacts: {
       ...preparation.evidence.operationalArtifacts,
       ...artifacts,
     },
-  };
+  });
   evidence.evidenceHash = digest({ ...evidence, evidenceHash: undefined });
   return { ...preparation, evidence };
 }
@@ -1822,13 +1825,13 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
       live: false,
       repair: null,
     }];
-    const evidence = {
+    const evidence = sanitizePersistedUrls({
       ...effectivePreviousEvidence,
       schemaVersion: 3,
       passId,
       resumeMode,
       reviewedAt: new Date().toISOString(),
-      currentUrl: snapshot.url,
+      currentUrl: sanitizeUrl(snapshot.url),
       unresolvedFields: dedupeRows([
         ...(effectivePreviousEvidence.unresolvedFields || []),
         {
@@ -1846,13 +1849,14 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
       semanticVerification: structuredClone(reasoningState.semanticVerification),
       deterministicReviewComplete: false,
       reviewComplete: false,
-    };
+    });
     evidence.evidenceHash = digest({ ...evidence, evidenceHash: undefined });
+    const humanGate = humanGateOutcome(snapshot, 'form_review');
     return {
       snapshot,
       plan: { actions: [], unresolvedFields: evidence.unresolvedFields, finalActions: [], uploadTopology: effectivePreviousEvidence.uploadTopology },
       evidence,
-      gate: { state: 'review_required', reason: 'Controlled resume budget is exhausted; finish unresolved fields manually.' },
+      gate: humanGate || { state: 'review_required', reason: 'Controlled resume budget is exhausted; finish unresolved fields manually.' },
     };
   }
 
@@ -1869,7 +1873,7 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
   const historicalVisited = new Set(progression.visitedFingerprints);
   const progressionDeadlineMs = Math.min(sessionDeadlineMs, clock() + Math.min(progressionSessionMs, effectiveLimits.sessionMs));
   const aggregate = {
-    completed: [], uploadedArtifacts: [], committedSelections: [], unresolvedFields: [],
+    completed: [], uploadedArtifacts: [...(effectivePreviousEvidence?.uploadedArtifacts || [])], committedSelections: [], unresolvedFields: [],
     answerRecords: [],
     attemptLedger: effectivePreviousEvidence?.attemptLedger || [],
     timeLimits: effectiveLimits, sessionLimitReached: false, precomputedNarrativeCount: 0,
@@ -2165,6 +2169,10 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
     });
     outcome = { ...reviewed, gate: outcome.gate };
   }
+  // Final reviews can occur after asynchronous verification or repair. Their
+  // fresh human-gate classification always takes precedence over review gates.
+  const finalHumanGate = humanGateOutcome(outcome.snapshot, 'form_review');
+  if (finalHumanGate) outcome.gate = outcome.gate?.state === 'human_action_required' ? outcome.gate : finalHumanGate;
   if (outcome.gate?.state === 'human_action_required') {
     outcome.humanAction = {
       candidate_id: context.candidate?.candidate_id || context.candidate?.candidateId || null,
@@ -2181,6 +2189,11 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
   outcome.evidence.operationalArtifacts.submissionGuardActiveAtHandoff = false;
   outcome.evidence.browserOpenRequired = Boolean(outcome.gate) || outcome.evidence.userActionRequired;
   outcome.evidence.browserSession.keepOpenRequired = outcome.evidence.browserOpenRequired;
+  if (outcome.gate) {
+    outcome.evidence.reviewComplete = false;
+    outcome.evidence.deterministicReviewComplete = false;
+  }
+  outcome.evidence = sanitizePersistedUrls(outcome.evidence);
   outcome.evidence.evidenceHash = digest({ ...outcome.evidence, evidenceHash: undefined });
   return outcome;
 }
