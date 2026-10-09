@@ -136,6 +136,8 @@ const SYSTEM_PATHS = [
   'build-dashboard.mjs',
   'backup.mjs',
   'filter-replay.mjs',
+  'assessment-contract.mjs',
+  'shortlist.mjs',
   'lib/operational-cli.mjs',
   'generate-pdf.mjs',
   'generate-latex.mjs',

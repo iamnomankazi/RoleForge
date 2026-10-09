@@ -353,6 +353,7 @@ Save full evaluation in `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`.
 **Via:** {agency/recruiter firm, or — for direct applications}
 **Archetype:** {detected}
 **Score:** {X/5}
+**Action:** {apply | review | skip — derived by assessment-contract.mjs}
 **Legitimacy:** {High Confidence | Proceed with Caution | Suspicious}
 **PDF:** {path or pending}
 
@@ -393,6 +394,8 @@ Save full evaluation in `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`.
 
 **Machine Summary (required):** every report carries a `## Machine Summary` YAML fence directly after the header — same schema, exact field names, and rules as the "Machine Summary" block in `batch/batch-prompt.md` (do not duplicate the schema here; that file is the source of truth). It includes `advertised_comp`: the JD's own salary figure **verbatim** (e.g. `"80-90k EUR"`), or `null` when the JD states nothing — never estimated, never replaced with researched market data. This key seeds the advertised salary observation read by `node salary-gap.mjs`.
 
+Emit `fit_score` for technical/profile fit only, typed `blockers: [{code, evidence}]` and `flags` (optional `detail` on each), `review_reason`, `liveness: confirmed | unconfirmed`, and `location_country` (country name/ISO code, or `EU-remote` for a remote-only posting). Use the codes and thresholds in `_shared.md`; never lower fit for blockers or treat unknown sponsorship as a blocker. Merge pre-screen blockers/flags with their evidence when available. Code derives `fit_band`, the compatibility bucket, and a single action: any blocker → skip; otherwise >=4.0 and confirmed live → apply; otherwise >=3.5 → review; otherwise skip. Unconfirmed liveness caps action at review, which needs a non-empty one-line `review_reason`. Do not invent buckets or an application-worthy label. Validate with `validateMachineSummary` in `assessment-contract.mjs`, and use its derived action for `**Action:**`; `node shortlist.mjs` ranks reports with Finland first.
+
 ### 2. Record in tracker
 
 **ALWAYS** record in `data/applications.md`:
@@ -401,7 +404,7 @@ Save full evaluation in `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`.
 - Company — the END employer. If the JD is agency-mediated ("our client", agency domain, no employer named), ASK the user which agency it came through, use `?` as Company, and put a distinguishing descriptor in Notes (e.g. `fintech, Leeds`). Never write "Confidential" — the `?` marker is locale-invariant and can't collide with a real firm.
 - Via (when the tracker has the column) — the agency/recruiter firm, `—` for direct. In the tracker-addition TSV, append it as a tagged extra field: `via={Agency}` (see the TSV format spec).
 - Role
-- Score: match average (1-5) — Read `modes/_custom.md` → Scoring Rules, if it exists, and apply its override here. Default (if absent or silent): average of block scores.
+- Score: `fit_score` (1-5), technical/profile fit only — default equal-weight mean of CV match and North Star alignment. Read `modes/_custom.md` → Scoring Rules for fit weighting overrides; blockers and action thresholds remain governed by the assessment contract.
 - Status: `Evaluated`
 - PDF: ❌ (or ✅ if auto-pipeline generated PDF)
 - Report: root-relative link `[001](reports/001-company-2026-01-01.md)` (when merged via `merge-tracker.mjs` it is normalized to be relative to the tracker's own dir, e.g. `../reports/...`; see #760)

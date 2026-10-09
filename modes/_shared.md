@@ -34,7 +34,7 @@ The files below are the **ONLY** sources for user-facing content (CV, cover lett
 
 ## Scoring System
 
-The evaluation uses 6 blocks (A-F) with a global score of 1-5:
+The evaluation uses 6 blocks (A-F). `fit_score` (1.0-5.0) measures technical/profile fit only; never reduce it for blockers, compensation, culture, or posting liveness. Default: equal-weight mean of Match con CV and North Star alignment (50% each). Other dimensions remain descriptive context.
 
 | Dimension | What it measures |
 |-----------|-----------------|
@@ -42,14 +42,16 @@ The evaluation uses 6 blocks (A-F) with a global score of 1-5:
 | North Star alignment | How well the role fits the user's target archetypes (from _profile.md) |
 | Comp | Salary vs market (5=top quartile, 1=well below) |
 | Cultural signals | Company culture, growth, stability, remote policy |
-| Red flags | Blockers, warnings (negative adjustments) |
-| **Global** | Weighted average of above |
+| Red flags | Typed blockers and non-blocking flags with quoted JD text or profile facts |
+| **Fit score** | Equal-weight mean of CV match and North Star alignment |
 
-**Score interpretation:**
-- 4.5+ → Strong match, recommend applying immediately
-- 4.0-4.4 → Good match, worth applying
-- 3.5-3.9 → Decent but not ideal, apply only if specific reason
-- Below 3.5 → Recommend against applying (see Ethical Use in AGENTS.md)
+**Score interpretation:** `assessment-contract.mjs` derives the fit band, compatibility bucket, and action; evaluators do not invent buckets or judge "application-worthy".
+- 4.5+ → `strong`; 4.0-<4.5 → `good`; 3.5-<4.0 → `possible`; below 3.5 → `weak`.
+- Any blocker → `skip`; otherwise score >= 4.0 with confirmed liveness → `apply`; otherwise score >= 3.5 → `review`; otherwise → `skip`.
+- Unconfirmed liveness caps the action at `review`. Every review requires a non-empty one-line `review_reason`. Sponsorship unknown is never a blocker.
+- Blocker codes: `language_required`, `work_auth_restricted`, `location_ineligible`, `graduation_window`, `experience_outside`, `seniority_title`, `profile_exclusion`, `skill_gap_hard`, `posting_closed`.
+- Flag codes: `sponsorship_unknown`, `liveness_unconfirmed`, `experience_stretch`, `language_preferred`. Each blocker/flag needs `code`, `evidence` (quoted JD text or profile fact), and optional `detail`.
+- Merge any pre-screen `{ blockers: [...], flags: [...] }` evidence into the assessment; preserve its typed codes and evidence. See `batch/batch-prompt.md` for the exact Machine Summary schema.
 
 **How to score the "Cultural signals" dimension:**
 1. Read `culture_screen.require` from `config/profile.yml`. If `culture_screen` is missing or empty, skip the structural capping and score the dimension qualitatively based on company size, remote policy, and stability.

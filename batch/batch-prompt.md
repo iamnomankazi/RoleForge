@@ -37,9 +37,9 @@ Tipos de patrones que estos archivos pueden incluir:
 Aplicación durante la evaluación A-G:
 - **Bloque A:** aplicar caps de role-shape ANTES de calcular el score del bloque
 - **Bloques B-D:** aplicar adaptive framing por archetype y reglas de dimension scoring (location, comp, etc.)
-- **Bloque F:** aplicar recommendation overrides (SKIP forzado, etc.) — `_profile.md` puede convertir un score técnicamente alto en un SKIP por shape o por comp
+- **Bloque F:** registrar exclusiones explícitas del perfil como `profile_exclusion` con evidencia (p. ej., shape o comp), sin reducir `fit_score`; el código deriva `skip` del blocker
 
-**En conflicto, las reglas de `_profile.md` ganan sobre los defaults de `_shared.md`.** Esto es intencional: `_profile.md` es la capa de personalización del usuario.
+**En conflicto, las reglas de `_profile.md` ganan sobre los defaults de `_shared.md`.** Esto es intencional: `_profile.md` es la capa de personalización del usuario. Expresar exclusiones como blockers tipados; no sobrescribir los umbrales ni la acción derivada del contrato.
 
 ---
 
@@ -171,7 +171,7 @@ Analyze posting signals to assess whether this is a real, active opening.
 **Assessment:** Apply the same three tiers (High Confidence / Proceed with Caution / Suspicious), weighting available signals more heavily. If insufficient signals are available to make a determination, default to "Proceed with Caution" with a note about limited data.
 
 #### Score Global
-Read `modes/_custom.md` → Scoring Rules, if it exists, and apply its override here. Default (if absent or silent): calculate global score based on dimension scores below.
+Read `modes/_custom.md` → Scoring Rules for fit weighting overrides. Default: `fit_score` is the equal-weight mean of Match con CV and Alineación North Star (50% each), 1.0-5.0. It measures technical/profile fit only; comp, culture, blockers, and liveness do not reduce it. Action thresholds remain governed by `assessment-contract.mjs`.
 
 | Dimensión | Score |
 |-----------|-------|
@@ -179,22 +179,28 @@ Read `modes/_custom.md` → Scoring Rules, if it exists, and apply its override 
 | Alineación North Star | X/5 |
 | Comp | X/5 |
 | Señales culturales | X/5 |
-| Red flags | -X (si hay) |
-| **Global** | **X/5** |
+| Red flags | Blockers/flags con evidencia (sin ajuste al fit) |
+| **Fit score** | **X/5** |
 
 #### Machine Summary
 
-Create a machine-readable summary from the completed A-G evaluation and global score. This block is for downstream scripts; keep field names exact, use YAML, and do not add prose inside the fence.
+Create a machine-readable summary from the completed A-G evaluation and fit score. This block is for downstream scripts; keep field names exact, use YAML, and do not add prose inside the fence. Code derives the action and compatibility bucket; do not invent buckets or an application-worthy label.
 
 ```yaml
 company: "{empresa}"
 role: "{rol}"
-score: {X.X}
+fit_score: {X.X}
 legitimacy_tier: "{High Confidence | Proceed with Caution | Suspicious}"
 archetype: "{detectado}"
-final_decision: "{Apply | Consider | Research first | Skip}"
-hard_stops:
-  - "{blocking gap or risk}"
+blockers:
+  - code: "{allowed blocker code}"
+    evidence: "{quoted JD text or profile fact}"
+flags:
+  - code: "{allowed non-blocking flag code}"
+    evidence: "{quoted JD text or profile fact}"
+review_reason: "{non-empty one-line reason when derived action is review; otherwise empty}"
+liveness: "{confirmed | unconfirmed}"
+location_country: "{country name/ISO code, or EU-remote for remote-only postings}"
 soft_gaps:
   - "{non-blocking gap}"
 top_strengths:
@@ -208,9 +214,12 @@ advertised_comp: {verbatim JD salary/range as a quoted string (e.g. "80-90k EUR"
 ```
 
 Rules:
-- Use `[]` for `hard_stops`, `soft_gaps`, or `top_strengths` when empty.
-- `score` is numeric only, without `/5`.
-- `final_decision` must reflect the full evaluation, not only the CV match.
+- Use `[]` for `blockers`, `flags`, `soft_gaps`, or `top_strengths` when empty. Each blocker/flag requires `code` and non-empty `evidence`; optional `detail` adds an explanation.
+- `fit_score` is numeric 1.0-5.0, without `/5`, for technical/profile fit only; never reduce it for blockers.
+- Blocker codes: `language_required`, `work_auth_restricted`, `location_ineligible`, `graduation_window`, `experience_outside`, `seniority_title`, `profile_exclusion`, `skill_gap_hard`, `posting_closed`.
+- Non-blocking flag codes: `sponsorship_unknown`, `liveness_unconfirmed`, `experience_stretch`, `language_preferred`. Sponsorship unknown is never a blocker. Merge any pre-screen `{ blockers: [...], flags: [...] }` with its evidence into these arrays.
+- `assessment-contract.mjs` derives fit bands (>=4.5 strong, >=4.0 good, >=3.5 possible, else weak) and a single action: any blocker → `skip`; otherwise >=4.0 and confirmed live → `apply`; otherwise >=3.5 → `review`; otherwise → `skip`. Unconfirmed liveness caps action at `review`; every review requires a non-empty one-line `review_reason`.
+- Validate with `validateMachineSummary` and copy the derived action into `**Action:**`. The evaluator supplies evidence and fit, not a bucket or independent decision. `node shortlist.mjs` generates the ranked shortlist with Finland first.
 - `advertised_comp` is the JD's **own** figure, verbatim; `null` when the JD states nothing — never estimate it and never substitute researched market data (Block D research stays in Block D). Batch workers never write `data/salary-observations.tsv` — the report itself is the advertised observation (`salary-gap.mjs` reads it).
 - Do not invent missing data. If confidence is limited, set `confidence: "Low"` and explain the limitation in the human-readable sections.
 
@@ -231,6 +240,7 @@ Donde `{company-slug}` es el nombre de empresa en lowercase, sin espacios, con g
 **Fecha:** {{DATE}}
 **Arquetipo:** {detectado}
 **Score:** {X/5}
+**Action:** {apply | review | skip — derived by assessment-contract.mjs}
 **Legitimacy:** {High Confidence | Proceed with Caution | Suspicious}
 **URL:** {URL de la oferta original}
 **PDF:** {output/cv-candidate-{company-slug}-{{DATE}}.pdf if score ≥ the resolved `auto_pdf_score_threshold` from Paso 4, else `not generated — run /career-ops pdf {company-slug} to create on demand`}
@@ -243,12 +253,18 @@ Donde `{company-slug}` es el nombre de empresa en lowercase, sin espacios, con g
 ```yaml
 company: "{empresa}"
 role: "{rol}"
-score: {X.X}
+fit_score: {X.X}
 legitimacy_tier: "{High Confidence | Proceed with Caution | Suspicious}"
 archetype: "{detectado}"
-final_decision: "{Apply | Consider | Research first | Skip}"
-hard_stops:
-  - "{blocking gap or risk}"
+blockers:
+  - code: "{allowed blocker code}"
+    evidence: "{quoted JD text or profile fact}"
+flags:
+  - code: "{allowed non-blocking flag code}"
+    evidence: "{quoted JD text or profile fact}"
+review_reason: "{non-empty one-line reason when derived action is review; otherwise empty}"
+liveness: "{confirmed | unconfirmed}"
+location_country: "{country name/ISO code, or EU-remote for remote-only postings}"
 soft_gaps:
   - "{non-blocking gap}"
 top_strengths:
