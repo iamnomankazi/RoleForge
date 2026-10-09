@@ -76,7 +76,12 @@ function fixture(count = 1, urlOrigin = origin, urlPath = (index) => '/apply/'+(
   });
   return { root, candidates, batches,
     state(index = 0) { return loadBatchState(batches[index].manifestPath, { root }).state.candidates[0]; },
-    cleanup() { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } };
+    cleanup() {
+      // Windows can keep Chromium profile files locked briefly after close; a leftover temp dir is harmless.
+      try { rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }); } catch (error) {
+        if (!['EPERM', 'EBUSY'].includes(error.code)) throw error;
+      }
+    } };
 }
 const profile = attachFactualSources({ candidate: { full_name: 'Alex Example', email: 'alex@example.test' },
   cvText: 'Synthetic fixture CV.', answers: new Map(), priorApprovedAnswers: [], formRules: {} });
