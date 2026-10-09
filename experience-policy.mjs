@@ -4,15 +4,20 @@ const DEFAULTS = Object.freeze({
 });
 
 const SEVERITY = Object.freeze({ normal: 0, stretch: 1, outside: 2 });
-const EXPERIENCE_PATTERN = /\b(?:(?:approximately|approx\.?|about|around)\s+)?(?:(at\s+least|minimum(?:\s+of)?)\s+)?(\d+(?:[.,]\d+)?)\s*(?:(?:[-\u2010-\u2014\u2212]|\bto\b)\s*(\d+(?:[.,]\d+)?)|(\+))?\s*(?:years?|yrs?)\b/giu;
+const NUMBER_WORDS = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen'];
+const EXPERIENCE_NUMBER = String.raw`(?:\d+(?:[.,]\d+)?|(?:${NUMBER_WORDS.join('|')})\b)`;
+const EXPERIENCE_PATTERN = new RegExp(
+  String.raw`\b(?:(?:approximately|approx\.?|about|around)\s+)?(?:(at\s+least|minimum(?:\s+of)?)\s+)?(${EXPERIENCE_NUMBER})\s*(?:(?:[-\u2010-\u2014\u2212]|\bto\b)\s*(${EXPERIENCE_NUMBER})|(\+))?\s*(?:years?|yrs?)\b`,
+  'giu',
+);
 const HEADING_MARKER = '__CAREER_OPS_EXPERIENCE_HEADING__';
-const PREFERRED_SECTION = /^(?:preferred\s+qualifications?|preferred\s+experience|nice\s+to\s+have(?:s|'s)?|bonus(?:\s+points(?:\s+for)?)?)\s*:?\s*$/i;
+const PREFERRED_SECTION = /^(?:(?:strongly\s+)?preferred(?:\s+(?:qualifications?|experience))?|desired(?:\s+(?:qualifications?|experience))?|good\s+to\s+have|nice[\s-]+to[\s-]+have(?:s|'s)?|bonus(?:\s+points(?:\s+for)?)?)\s*:?\s*$/i;
 const REQUIRED_SECTION = /^(?:requirements?|qualifications?|required\s+qualifications?|minimum\s+qualifications?|must\s+have(?:s)?|what\s+you(?:'|\u2019)?ll\s+need|candidate\s+profile|what\s+we(?:'|\u2019)?re\s+looking\s+for|what\s+we\s+expect)\s*:?\s*$/i;
 const NON_REQUIREMENT_SECTION = /^(?:about\s+(?:us|the\s+company|company)|benefits?|what\s+we\s+offer|our\s+story|company\s+history|culture)\s*:?\s*$/i;
 const DIRECT_PREFERRED_PREFIX = /(?:^|[:(]\s*)(?:ideally|preferably|nice\s+to\s+have(?:s|'s)?|bonus(?:\s+points\s+for)?|preferred(?:\s+qualifications?)?)\s*[,;:]?\s*$/i;
-const DIRECT_PREFERRED_SUFFIX = /^[\s,;:]*(?:\(\s*)?(?:(?:of\s+(?:[\p{L}\p{N}/+_-]+\s+){0,4})?experience\s*[,;:]?\s*)?(?:preferred\b|(?:is\s+)?a\s+plus\b)(?:\s*\))?/iu;
+const DIRECT_PREFERRED_SUFFIX = /^[\s,;:]*(?:\(\s*)?(?:(?:of\s+(?:[\p{L}\p{N}/+_-]+\s+){0,4})?experience\s*[,;:]?\s*)?(?:\(\s*)?(?:preferred\b|(?:is\s+)?a\s+plus\b)(?:\s*\))?/iu;
 const UNKNOWN_NUMERIC_RANGE_SEPARATOR = /[\p{Dash_Punctuation}\u2212]/u;
-const EXPERIENCE_DURATION = String.raw`\d+(?:[.,]\d+)?\s*(?:(?:\+)|(?:[-\u2010-\u2014\u2212]\s*\d+(?:[.,]\d+)?)|(?:\bto\b\s*\d+(?:[.,]\d+)?))?\s*(?:years?|yrs?)\b`;
+const EXPERIENCE_DURATION = String.raw`${EXPERIENCE_NUMBER}\s*(?:(?:\+)|(?:[-\u2010-\u2014\u2212]\s*${EXPERIENCE_NUMBER})|(?:\bto\b\s*${EXPERIENCE_NUMBER}))?\s*(?:years?|yrs?)\b`;
 const ORGANIZATION_HISTORY = new RegExp(
   String.raw`\b(?:we|company|business|organization|product|our\s+(?:company|business|organization|product)|the\s+(?:company|business|organization|product))\b[\s\S]{0,60}\b(?:operated|operating|served|serving|existed|exists|existing|built|building|founded|established|run|running|maintained|maintaining)\b[\s\S]{0,80}${EXPERIENCE_DURATION}`,
   'i',
@@ -25,12 +30,18 @@ const BENEFIT_DURATION = new RegExp(
   String.raw`\b(?:years?|yrs?)\b[\s\S]{0,45}\b(?:for|until|before)\s+(?:pension|vesting|benefits?|vacation|leave)\b`,
   'i',
 );
+const COLLECTIVE_EXPERIENCE_CONTEXT = new RegExp(
+  String.raw`(?:${EXPERIENCE_DURATION}\s+(?:of\s+)?(?:combined|collective)\s+(?:team\s+)?experience\b|\b(?:combined|collective)\s+(?:team\s+)?experience\s+(?:of\s+)?${EXPERIENCE_DURATION})`,
+  'gi',
+);
+const TEAM_EXPERIENCE_SUBJECT = /\b(?:team|our\s+(?:engineers|employees|colleagues|founders))\b(?:(?!\b(?:you|your|applicants?|candidates?|need(?:s)?|requires?|must|should)\b)[^.;\n]){0,120}$/i;
 const NEGATIVE_EXPERIENCE_CONTEXT = [
   /\b(?:years?|yrs?)\s+(?:old|ago|of\s+age|in\s+business|of\s+(?:service|employment|tenure|vacation|leave|benefits?|history|company(?:\s+history)?|business(?:\s+history)?|product(?:\s+history)?))\b/i,
   ORGANIZATION_HISTORY,
-  /\b(?:company|business|organization|product)\s+(?:age|history)\b[\s\S]{0,40}\b\d+(?:[.,]\d+)?\s*(?:years?|yrs?)\b/i,
+  new RegExp(String.raw`\b(?:company|business|organization|product)\s+(?:age|history)\b[\s\S]{0,40}\b${EXPERIENCE_DURATION}`, 'i'),
   ROLE_DURATION,
   BENEFIT_DURATION,
+  COLLECTIVE_EXPERIENCE_CONTEXT,
 ];
 const CANDIDATE_EVIDENCE = /\b(?:professional|relevant|industry|commercial|hands?[- ]on|experience)\b/i;
 const CANDIDATE_SUBJECT_EVIDENCE = /\b(?:applicants?|candidates?|you|your|must\s+have|required|requires?|at\s+least|seeking|need(?:s)?)\b/i;
@@ -39,6 +50,11 @@ const CANDIDATE_ACTIVITY_EVIDENCE = /\b(?:building|working|developing|engineerin
 function finiteNumber(value, fallback) {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : fallback;
+}
+
+function experienceYearsFor(value) {
+  const wordIndex = NUMBER_WORDS.indexOf(value.toLowerCase());
+  return wordIndex >= 0 ? wordIndex + 1 : Number(value.replace(',', '.'));
 }
 
 export function normalizeExperiencePolicy(value) {
@@ -121,13 +137,20 @@ function strengthFor(text, start, end, sectionState) {
 function isOrphanUpperBound(text, start) {
   const before = text.slice(0, start);
   if (/(?:^|[^\d])\d[\d.,]*[,.]\s*$/u.test(before)) return true;
-  return new RegExp(`\\b\\d+(?:[.,]\\d+)?\\s*${UNKNOWN_NUMERIC_RANGE_SEPARATOR.source}\\s*$`, 'u').test(before);
+  if (/\b(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)[\s\p{Dash_Punctuation}\u2212]+$/iu.test(before)) return true;
+  return new RegExp(String.raw`\b${EXPERIENCE_NUMBER}\s*${UNKNOWN_NUMERIC_RANGE_SEPARATOR.source}\s*$`, 'iu').test(before);
 }
 
 function hasNegativeExperienceContext(text, start, end) {
   const { left, right } = clauseBounds(text, start, end);
   const clause = text.slice(left, right);
-  return NEGATIVE_EXPERIENCE_CONTEXT.some((pattern) => pattern.test(clause));
+  return NEGATIVE_EXPERIENCE_CONTEXT.some((pattern) => {
+    if (pattern !== COLLECTIVE_EXPERIENCE_CONTEXT) return pattern.test(clause);
+    return Array.from(clause.matchAll(pattern)).some(match => (
+      match.index < end - left && match.index + match[0].length > start - left
+      && (TEAM_EXPERIENCE_SUBJECT.test(clause.slice(0, match.index)) || /\bteam\s+experience\b/i.test(match[0]))
+    ));
+  });
 }
 
 function isConciseNumericPrefix(value) {
@@ -190,8 +213,8 @@ export function extractExperienceRequirements(text, policyValue = DEFAULTS) {
     for (const match of line.text.matchAll(EXPERIENCE_PATTERN)) {
       if (isOrphanUpperBound(line.text, match.index)) continue;
       if (!isCandidateExperienceEvidence(line.text, match.index, match.index + match[0].length, sectionState)) continue;
-      const minimumYears = Number(match[2].replace(',', '.'));
-      const maximumYears = match[3] === undefined ? null : Number(match[3].replace(',', '.'));
+      const minimumYears = experienceYearsFor(match[2]);
+      const maximumYears = match[3] === undefined ? null : experienceYearsFor(match[3]);
       const bound = maximumYears !== null ? 'range' : (match[1] || match[4] ? 'minimum' : 'exact');
       const strength = strengthFor(line.text, match.index, match.index + match[0].length, sectionState);
       const interpretation = interpretationFor({ minimumYears, maximumYears, bound }, policy);

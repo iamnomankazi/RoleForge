@@ -361,3 +361,140 @@ test('experience policy config validates numeric ordering and types', async () =
   });
   assert.ok(overlap.errors.some(error => error.path === 'experience_policy.outside_min_years'));
 });
+
+test('short and hyphenated preferred headings make experience requirements nonblocking', () => {
+  for (const heading of [
+    'Preferred', 'Strongly preferred', 'Desired', 'Good to have', 'Nice-to-have', 'Bonus points',
+    'Strongly preferred qualifications', 'Desired experience',
+  ]) {
+    for (const text of [
+      `${heading}:\n7 years of experience`,
+      `<h3>${heading}</h3><li>7 years of experience</li>`,
+    ]) {
+      const result = classifyExperienceRequirements(text, policy);
+      assert.equal(result.interpretation, 'preferred_only', text);
+      assert.equal(result.requirements[0].strength, 'preferred', text);
+      assert.equal(result.numeric_hard_blocker, false, text);
+    }
+    const result = classifyExperienceRequirements(`${heading}\n7 years\nRequirements\n5 years`, policy);
+    assert.deepEqual(result.requirements.map(item => item.strength), ['preferred', 'required'], heading);
+    assert.equal(result.numeric_hard_blocker, true, heading);
+  }
+});
+
+test('preferred heading words within ordinary sentences do not change section state', () => {
+  for (const text of [
+    'Preferred candidates have strong communication skills.\n7 years of experience required.',
+    'Desired outcomes include reliable services.\n7 years of experience required.',
+    'Good to have a clear roadmap.\n7 years of experience required.',
+  ]) {
+    assert.equal(classifyExperienceRequirements(text, policy).numeric_hard_blocker, true, text);
+  }
+});
+
+test('parenthesised preference after experience directly qualifies the years', () => {
+  for (const text of [
+    '7 years of experience (preferred)',
+    '7 years of relevant experience ( preferred )',
+    '7+ years experience, (preferred)',
+    '7 years of experience (a plus)',
+    '4,5 years of experience (preferred)',
+  ]) {
+    const result = classifyExperienceRequirements(text, policy);
+    assert.equal(result.interpretation, 'preferred_only', text);
+    assert.equal(result.requirements[0].strength, 'preferred', text);
+    assert.equal(result.numeric_hard_blocker, false, text);
+  }
+  for (const text of [
+    '7 years of experience (Python preferred)',
+    '7 years of experience (required), Kubernetes preferred',
+    '7 years of experience; (preferred) cloud certification',
+  ]) {
+    assert.equal(classifyExperienceRequirements(text, policy).numeric_hard_blocker, true, text);
+  }
+});
+
+test('one through fifteen word numbers preserve exact experience values and source text', () => {
+  const words = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen'];
+  for (const [index, word] of words.entries()) {
+    const text = `${word.toUpperCase()} ${index === 0 ? 'year' : 'years'} of experience`;
+    const result = classifyExperienceRequirements(text, policy);
+    assert.equal(result.requirements.length, 1, text);
+    const [requirement] = result.requirements;
+    assert.equal(requirement.minimum_years, index + 1, text);
+    assert.equal(requirement.maximum_years, null, text);
+    assert.equal(requirement.bound, 'exact', text);
+    assert.equal(requirement.text, text.replace(' of experience', ''), text);
+    assert.equal(result.numeric_hard_blocker, index + 1 >= 4, text);
+  }
+});
+
+test('word-number ranges and minimums preserve the same bounds as numeric requirements', () => {
+  for (const [text, minimum, maximum, bound, expected] of [
+    ['three to five years', 3, 5, 'range', 'stretch'],
+    ['two+ years', 2, null, 'minimum', 'normal'],
+    ['At least five years of experience', 5, null, 'minimum', 'outside'],
+    ['Minimum of four years', 4, null, 'minimum', 'outside'],
+    ['one to two years', 1, 2, 'range', 'normal'],
+    ['four to fifteen years', 4, 15, 'range', 'outside'],
+    ['two to 5,5 years', 2, 5.5, 'range', 'stretch'],
+    ['2 to five years', 2, 5, 'range', 'stretch'],
+    ['two-five years', 2, 5, 'range', 'stretch'],
+  ]) {
+    const result = classifyExperienceRequirements(text, policy);
+    assert.equal(result.requirements.length, 1, text);
+    const [requirement] = result.requirements;
+    assert.deepEqual([requirement.minimum_years, requirement.maximum_years, requirement.bound], [minimum, maximum, bound], text);
+    assert.equal(result.interpretation, expected, text);
+    assert.equal(result.numeric_hard_blocker, expected === 'outside', text);
+  }
+  const preferred = classifyExperienceRequirements('five years of experience (preferred)', policy);
+  assert.equal(preferred.interpretation, 'preferred_only');
+  assert.equal(preferred.numeric_hard_blocker, false);
+});
+
+test('word-number support does not extract partial numbers or non-experience durations', () => {
+  for (const text of [
+    'twenty-five years of experience', 'twenty five years of experience',
+    'one hundred five years of experience', 'someone years of experience',
+    'two\u2015five years of experience',
+    'We have operated for five years.', 'The company history spans fifteen years.',
+    'The company is five years old.', 'This role lasts five years.',
+    'Five years for pension vesting.',
+  ]) {
+    assert.equal(classifyExperienceRequirements(text, policy), null, text);
+  }
+  const result = classifyExperienceRequirements('two years Python and one year AWS', policy);
+  assert.deepEqual(result.requirements.map(item => item.minimum_years), [2, 1]);
+});
+
+test('combined and collective team experience does not become a candidate hard blocker', () => {
+  for (const text of [
+    'Join a team with 20 years of combined experience. You need 1 year.',
+    'Our team has 20 years of collective experience. You need 1 year.',
+    'Our team has a combined experience of 20 years. You need 1 year.',
+    'Our engineers have fifteen years of combined experience. You need 1 year.',
+    '20 years of combined team experience. You need 1 year.',
+    'Join a team with 20 years of combined experience and you need 1 year.',
+    'Our team has 20 years of collective experience and 30 years of combined experience; you need 1 year.',
+  ]) {
+    const result = classifyExperienceRequirements(text, policy);
+    assert.equal(result.interpretation, 'normal', text);
+    assert.equal(result.numeric_hard_blocker, false, text);
+    assert.deepEqual(result.requirements.map(item => item.minimum_years), [1], text);
+  }
+  assert.equal(classifyExperienceRequirements('<h3>Requirements</h3><li>Our team has 20 years of combined experience.</li>', policy), null);
+});
+
+test('individual combined experience and requirements near team descriptions remain required', () => {
+  for (const text of [
+    'You need 5 years of combined experience in backend development and DevOps.',
+    'You need 5 years of experience working in a team.',
+    'Our team has 20 years of combined experience and you need 5 years.',
+    'Our team has 20 years of combined experience and you need 5 years of combined experience in backend development and DevOps.',
+  ]) {
+    const result = classifyExperienceRequirements(text, policy);
+    assert.deepEqual(result.requirements.map(item => item.minimum_years), [5], text);
+    assert.equal(result.numeric_hard_blocker, true, text);
+  }
+});
