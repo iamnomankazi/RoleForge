@@ -92,17 +92,41 @@ test('field and final-action semantics cover common ATS patterns', () => {
   assert.equal(classifyField({ label: 'Motivation letter', type: 'file' }), 'cover_letter_upload');
   assert.equal(classifyField({ label: 'Phone country', tag: 'select', type: 'select-one' }), 'phone_country');
   assert.equal(classifyField({ label: 'I certify this is accurate', type: 'checkbox' }), 'legal_consent');
-  const workflow = { insideApplicationForm: true, candidateFieldCount: 2, workflowVerified: true, hasRemainingStep: true, formId: 'application', applicationFormId: 'application' };
+  const workflow = { insideApplicationForm: true, candidateFieldCount: 2, workflowVerified: true, hasRemainingStep: true, stepIndicator: { current: 1, total: 3 }, formId: 'application', applicationFormId: 'application' };
   assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', label: 'Continue' }), 'progression');
   assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', label: 'Next' }), 'progression');
   assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', formAction: '/step/2', label: 'Save and continue' }), 'progression');
   assert.equal(isSemanticFinalAction({ type: 'submit', label: 'Submit application', insideApplicationForm: true }), true);
   assert.equal(isSemanticFinalAction({ type: 'button', label: 'Apply Now', insideApplicationForm: false }), false);
   assert.equal(isSemanticFinalAction({ type: 'button', label: 'Apply Now', insideApplicationForm: true }), true);
-  assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', label: 'Continue and submit' }), 'ambiguous');
+  assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', label: 'Continue and submit' }), 'final');
   assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', label: 'Review application' }), 'ambiguous');
   assert.equal(classifyApplicationControl({ ...workflow, type: 'button', label: 'Review application' }), 'ambiguous');
   assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', label: 'Continue', hasRemainingStep: false }), 'ambiguous');
+});
+
+test('localized progression requires a numbered remaining step and all final words are terminal', () => {
+  const workflow = {
+    type: 'submit', insideApplicationForm: true, candidateFieldCount: 2, workflowVerified: true,
+    hasRemainingStep: true, stepIndicator: { current: 1, total: 3 }, formId: 'application', applicationFormId: 'application',
+  };
+  for (const label of ['seuraava', 'jatka', 'nästa', 'fortsätt', 'volgende', 'doorgaan', 'næste', 'fortsæt', 'weiter']) {
+    assert.equal(classifyApplicationControl({ ...workflow, label }), 'progression', label);
+    assert.equal(classifyApplicationControl({ ...workflow, label, stepIndicator: null }), 'ambiguous', label);
+    assert.equal(classifyApplicationControl({ ...workflow, label, stepIndicator: { current: 3, total: 3 } }), 'ambiguous', label);
+  }
+  for (const label of [
+    'Submit', 'Send application', 'Apply now', 'Finish', 'Complete', 'Confirm',
+    'Absenden', 'Senden', 'Jetzt bewerben', 'Abschicken', 'Verzenden', 'Versturen', 'Solliciteren',
+    'Send', 'Indsend', 'Ansøg', 'Lähetä hakemus', 'Hae', 'Valmis', 'Skicka', 'Ansök',
+    'Envoyer', 'Postuler', 'Soumettre', 'Valider', 'Continue and submit', 'Weiter und Absenden',
+  ]) {
+    assert.equal(classifyApplicationControl({ ...workflow, label }), 'final', label);
+    assert.equal(isSemanticFinalAction({ ...workflow, label }), true, label);
+  }
+  assert.equal(classifyApplicationControl({ ...workflow, label: 'Continue', text: 'Lähetä hakemus' }), 'final');
+  assert.equal(classifyApplicationControl({ ...workflow, label: 'Continue', stepIndicator: { current: 0, total: 3 } }), 'ambiguous');
+  assert.equal(classifyApplicationControl({ ...workflow, label: 'Continue', stepIndicator: { current: 1.5, total: 3 } }), 'ambiguous');
 });
 
 test('text-only cover fields receive the complete bound letter and one-document fields require an explicit combined artifact', () => {

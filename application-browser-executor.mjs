@@ -350,7 +350,7 @@ function predictedEntryDestination(control) {
   return inline(control?.href || control?.formAction || control?.dataDestination);
 }
 
-function safePredictedEntryDestination(destination, { listingUrl, applyUrl = null } = {}) {
+function safePredictedEntryDestination(destination, { listingUrl } = {}) {
   if (!destination || rejectPrivateOrInvalid(destination)) return false;
   let parsed;
   let listing;
@@ -361,7 +361,6 @@ function safePredictedEntryDestination(destination, { listingUrl, applyUrl = nul
     return false;
   }
   if (DANGEROUS_ACTION_PATH.test(`${parsed.pathname} ${parsed.search}`)) return false;
-  if (applyUrl && sameUrlIgnoringHash(applyUrl, destination)) return true;
   if (parsed.hostname === listing.hostname) return true;
   return isKnownApplicationHost(destination);
 }
@@ -392,17 +391,17 @@ export function classifyApplicationEntryAction(control, {
   const associatedForm = Boolean(control?.associatedForm || control?.inForm);
   const formMethod = normalized(control?.formMethod || 'get');
   if (control?.formHasCandidateFields) return reject('associated form contains candidate data');
-  if (associatedForm && formMethod === 'post') return reject('POST-associated controls may submit candidate data');
+  if (formMethod === 'post') return reject('POST-associated controls may submit candidate data');
+  if (associatedForm) return reject('form-associated controls are never application-entry actions');
   const destination = predictedEntryDestination(control);
-  if (tag === 'a' && !destination) return reject('entry links require a destination');
-  if (associatedForm && !destination) return reject('form-associated entry controls require a verified GET destination');
-  if (destination && !safePredictedEntryDestination(destination, { listingUrl, applyUrl })) {
+  if (!destination) return reject('application-entry destination cannot be verified before clicking; continue manually');
+  if (!safePredictedEntryDestination(destination, { listingUrl })) {
     return reject('entry destination is not the selected company or a known ATS route');
   }
   return {
     safe: true,
-    reason: tag === 'a' ? 'verified listing-page application link' : 'non-submitting listing-page application button',
-    destination: destination || null,
+    reason: tag === 'a' ? 'verified listing-page application link' : 'verified listing-page application button destination',
+    destination,
   };
 }
 
@@ -574,7 +573,7 @@ export async function collectPageSnapshot(page) {
         index,
         controlId,
         tag: element.tagName.toLowerCase(),
-        type: element.getAttribute('type') || '',
+        type: element instanceof HTMLButtonElement || element instanceof HTMLInputElement ? element.type : element.getAttribute('type') || '',
         text: [element.innerText, element.getAttribute('value'), element.getAttribute('aria-label'), element.getAttribute('title')]
           .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim(),
         href: element instanceof HTMLAnchorElement ? element.href : '',
@@ -674,7 +673,7 @@ async function inspectEntryControl(locator) {
       return {
         controlId: element.getAttribute('data-career-ops-entry-id') || '',
         tag: element.tagName.toLowerCase(),
-        type: element.getAttribute('type') || '',
+        type: element instanceof HTMLButtonElement || element instanceof HTMLInputElement ? element.type : element.getAttribute('type') || '',
         text: [element.innerText, element.getAttribute('value'), element.getAttribute('aria-label'), element.getAttribute('title')]
           .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim(),
         href: element instanceof HTMLAnchorElement ? element.href : '',
@@ -896,7 +895,7 @@ async function inspectContinuationAttempt(context, page, before, beforeUrl, expe
         || Number(snapshot.formCount || 0) > 0
       )
     );
-    const exactDestination = expectedDestination
+    const exactDestination = expectedDestination && !sameUrlIgnoringHash(expectedDestination, beforeUrl)
       ? snapshots.find(({ snapshot }) => meaningfulSnapshot(snapshot) && sameUrlIgnoringHash(snapshot.currentUrl, expectedDestination))
       : null;
     const consequential = snapshots.find(({ snapshot, page: candidatePage }) => {
@@ -1003,6 +1002,7 @@ export async function followSafeContinuation(context, page, control, scope, {
       acquired = await reacquireSafeContinuation(page, control, scope);
       if (method === 'playwright_click') {
         await acquired.locator.click({ trial: true, timeout: 3_000 });
+        acquired = await reacquireSafeContinuation(page, control, scope);
         await acquired.locator.click({ timeout: 7_000 });
       } else {
         if (!acquired.control.attached || !acquired.control.enabled || !acquired.control.topmostMatches) {
@@ -1136,6 +1136,8 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
     };
     const rankedContinuations = await rankSafeApplyContinuations(page, snapshot.controls, scope);
     if (!rankedContinuations.length) {
+      const rejectedEntry = snapshot.controls.find((control) => control.visible && ENTRY_ACTION_LABEL.test(inline(control.text)));
+      const rejection = rejectedEntry ? classifyApplicationEntryAction(rejectedEntry, scope) : null;
       return {
         page,
         snapshot,
@@ -1144,7 +1146,10 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
         compatible,
         hops,
         siteChromeActions,
-        reason: 'No safe listing-page application-entry action was found.',
+        ...(rejection ? { manualReviewRequired: true } : {}),
+        reason: rejection
+          ? `Application entry requires manual review: ${rejection.reason}.`
+          : 'No safe listing-page application-entry action was found.',
       };
     }
     const preferred = rankedContinuations[0];

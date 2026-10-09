@@ -2,9 +2,8 @@ import { createHash } from 'node:crypto';
 import { groundedFieldValue } from './application-profile.mjs';
 import { validateNarrativeProvenanceRecord } from './application-evidence.mjs';
 
-const FINAL_ACTION_LABEL = /^(?:apply(?: now)?|submit(?: application)?|send(?: application)?|complete(?: application)?|finish(?: application)?|finali[sz]e(?: application)?|confirm(?: submission| application)?|review and (?:apply|submit)|apply and submit)$/i;
-const FINAL_TOKEN = /\b(?:apply(?: now)?|submit|send|complete|finish|finali[sz]e|confirm)\b/i;
-const PROGRESSION_ACTION_LABEL = /^(?:next|continue|save (?:and|&) continue|proceed|continue application|review application)$/i;
+export const FINAL_TOKEN = /(?:^|[^\p{L}\p{N}_])(?:apply|submit|send|complete|finish|finali[sz]e|confirm|absenden|senden|bewerben|abschicken|verzenden|versturen|solliciteren|indsend|ansøg|lähetä|hae|valmis|skicka|ansök|envoyer|postuler|soumettre|valider)(?=$|[^\p{L}\p{N}_])/iu;
+export const PROGRESSION_ACTION_LABEL = /^(?:next|continue|save (?:and|&) continue|proceed|continue application|review application|seuraava|jatka|nästa|fortsätt|volgende|doorgaan|næste|fortsæt|weiter)$/i;
 const LOGIN_WORDS = /\b(sign in to apply|log in to apply|login to apply|create an account to apply|sign in or create|login or register|verify (?:your )?email|one[- ]time code|mfa|two[- ]factor)\b/i;
 const LEGAL_WORDS = /\b(certify|declare|privacy|terms|accurate|truthful|consent|signature|background check|data processing)\b/i;
 const CAPTCHA_SIGNAL_WORDS = /\b(captcha|recaptcha|hcaptcha|turnstile|are you human|human verification)\b/i;
@@ -105,14 +104,15 @@ export function applicationControlSignature(control) {
 export function classifyApplicationControl(control) {
   const label = controlLabel(control);
   const insideForm = Boolean(control?.insideApplicationForm);
-  if (insideForm && FINAL_ACTION_LABEL.test(label)) return 'final';
-  if (FINAL_TOKEN.test(label)) return 'ambiguous';
+  if (FINAL_TOKEN.test(clean([label, control?.text, control?.value].join(' ')))) return insideForm ? 'final' : 'ambiguous';
   if (!PROGRESSION_ACTION_LABEL.test(label)) return 'ambiguous';
   if (clean(control?.type).toLowerCase() !== 'submit' || control?.invokesSubmit) return 'ambiguous';
   if (label.toLowerCase() === 'review application' && control?.type === 'submit') return 'ambiguous';
   const verifiedContext = insideForm
     && Number(control?.candidateFieldCount || 0) > 0
     && Boolean(control?.hasRemainingStep)
+    && Number.isInteger(control?.stepIndicator?.current) && control.stepIndicator.current > 0
+    && Number.isInteger(control?.stepIndicator?.total) && control.stepIndicator.current < control.stepIndicator.total
     && Boolean(control?.workflowVerified)
     && clean(control?.formId)
     && clean(control?.applicationFormId) === clean(control?.formId);
@@ -351,7 +351,8 @@ export function buildFormPlan(snapshot, profile, artifacts, { candidateId = null
 }
 
 export async function inspectApplicationForm(page) {
-  const snapshot = await page.evaluate(() => {
+  const snapshot = await page.evaluate(({ finalTokenSource, finalTokenFlags }) => {
+    const finalToken = new RegExp(finalTokenSource, finalTokenFlags);
     const visible = (element) => {
       if (!element || element.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
       const style = getComputedStyle(element);
@@ -429,7 +430,7 @@ export async function inspectApplicationForm(page) {
       const text = ownText || (element.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
       const current = Number(element.getAttribute('data-career-ops-step') || 0);
       const total = Number(element.getAttribute('data-career-ops-total-steps') || 0);
-      if (current > 0 && total > current) return { current, total, text: text || `Step ${current} of ${total}` };
+      if (Number.isInteger(current) && current > 0 && Number.isInteger(total) && total > 0) return { current, total, text: text || `Step ${current} of ${total}` };
       const match = text.match(/\b(?:step|page)\s*(\d+)\s+(?:of|\/)\s+(\d+)\b/i);
       if (!match) return null;
       return { current: Number(match[1]), total: Number(match[2]), text: match[0] };
@@ -471,7 +472,7 @@ export async function inspectApplicationForm(page) {
         .map((control) => `${control.getAttribute('aria-label') || ''} ${control.innerText || ''} ${control.value || ''}`)
         .join(' ');
       const hasApplicationAction = /\b(?:apply|application)\b/i.test(controlText);
-      const hasTerminalAction = /\b(?:apply|submit|send|complete|finish|finali[sz]e)\b/i.test(controlText);
+      const hasTerminalAction = finalToken.test(controlText);
       const visibleText = visible(form) ? (form.innerText || '') : '';
       const formApplicationContext = /\b(?:application|candidate|privacy|data notice|certif(?:y|ication)|resume|\bcv\b|cover letter|work authori[sz]|sponsor)\b/i.test(visibleText);
       const workflowAssociation = workflowAssociations.get(form);
@@ -479,7 +480,7 @@ export async function inspectApplicationForm(page) {
       const hasFormStepEvidence = [...form.querySelectorAll('[data-career-ops-step], [aria-current="step"]')].some(visible)
         || /\b(?:step|page)\s*\d+\s+(?:of|\/)\s+\d+\b/i.test(visibleText);
       const independentApplicationIdentity = hasApplicationAction
-        || (applicationSpecificSignals > 0 && hasTerminalAction)
+        || (applicationSpecificSignals > 0 && (hasTerminalAction || structurallyAssociated || hasFormStepEvidence))
         || (formApplicationContext && hasTerminalAction);
       const associationBonus = structurallyAssociated || hasFormStepEvidence || hasApplicationAction ? 100 : 0;
       return {
@@ -542,6 +543,7 @@ export async function inspectApplicationForm(page) {
           applicationFormId,
           workflowVerified: Boolean(form && form === uniqueTopForm),
           hasRemainingStep: Boolean(stepIndicator && stepIndicator.total > stepIndicator.current),
+          stepIndicator,
           invokesSubmit: Boolean(element.getAttribute('onclick')?.match(/submit|requestSubmit/i)),
         };
       });
@@ -654,7 +656,7 @@ export async function inspectApplicationForm(page) {
       submitAttempts: Number(globalThis.__careerOpsSubmitAttempts || 0),
       progressionSubmits: Number(globalThis.__careerOpsProgressionSubmits || 0),
     };
-  });
+  }, { finalTokenSource: FINAL_TOKEN.source, finalTokenFlags: FINAL_TOKEN.flags });
   return { ...snapshot, captcha: classifyCaptchaState(snapshot.captchaSignals) };
 }
 

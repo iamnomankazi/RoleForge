@@ -57,16 +57,95 @@ function artifacts() {
 }
 
 test('three-way classifier separates progression, final, and ambiguous controls', () => {
-  const workflow = { insideApplicationForm: true, candidateFieldCount: 1, workflowVerified: true, hasRemainingStep: true, formId: 'application', applicationFormId: 'application' };
+  const workflow = { insideApplicationForm: true, candidateFieldCount: 1, workflowVerified: true, hasRemainingStep: true, stepIndicator: { current: 1, total: 3 }, formId: 'application', applicationFormId: 'application' };
   assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', label: 'Continue' }), 'progression');
   assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', label: 'Next' }), 'progression');
   assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', formAction: '/application/step/2', label: 'Save and continue' }), 'progression');
   assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', label: 'Submit application' }), 'final');
   assert.equal(classifyApplicationControl({ ...workflow, type: 'button', label: 'Apply' }), 'final');
-  assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', label: 'Continue and submit' }), 'ambiguous');
+  assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', label: 'Continue and submit' }), 'final');
   assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', label: 'Review application' }), 'ambiguous');
   assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', label: 'Continue', hasRemainingStep: false }), 'ambiguous');
   assert.equal(classifyApplicationControl({ ...workflow, type: 'button', label: 'Continue' }), 'ambiguous');
+});
+
+test('localized controls stop at review unless a remaining numbered step authorizes progression', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    for (const { label, step, extraControl, expectedClicks, final } of [
+      { label: 'Continue', step: 3, expectedClicks: 0, final: false },
+      { label: 'Continue', step: null, expectedClicks: 0, final: false },
+      { label: 'Continue', step: 1, extraControl: 'Weiter', expectedClicks: 0, final: false },
+      { label: 'Weiter', step: 1, expectedClicks: 1, final: false },
+      { label: 'Absenden', step: 1, expectedClicks: 0, final: true },
+      { label: 'Lähetä hakemus', step: 1, expectedClicks: 0, final: true },
+    ]) {
+      const page = await browser.newPage();
+      const fixtureUrl = 'https://fixture.career-ops.invalid/application/localized';
+      await page.route(fixtureUrl, (route) => route.fulfill({ contentType: 'text/html; charset=utf-8', body: `
+        <div data-career-ops-wizard>${step ? `<p data-career-ops-step="${step}" data-career-ops-total-steps="3">Step ${step} of 3</p>` : ''}
+        <form id="application" method="post" action="/application/step/2">
+          <label>First name<input id="first" name="first_name" required></label>
+          <label>Email<input id="email" name="email" type="email" required></label>
+          <label>LinkedIn<input name="linkedin"></label>
+          <button id="action" type="submit"${label === 'Continue' ? ' aria-label="Continue application"' : ''}>${label}</button>
+          ${extraControl ? `<button type="button">${extraControl}</button>` : ''}
+        </form></div><script>
+          action.addEventListener('click', () => { window.actionClicks=(window.actionClicks||0)+1; });
+          application.addEventListener('submit', event => { event.preventDefault(); });
+        </script>` }));
+      await page.goto(fixtureUrl);
+      const result = await prepareOperationalApplicationForm(page, profile, {}, {
+        context, transitionTimeoutMs: 150, transitionStabilityMs: 0,
+      });
+      assert.equal(await page.evaluate(() => window.actionClicks || 0), expectedClicks, label);
+      if (!final) assert.equal(result.gate?.state, 'review_required', label);
+      assert.equal(result.evidence.finalAction.detected, final, label);
+      assert.equal(result.evidence.finalAction.activated, false, label);
+      assert.equal(await page.locator('#email').inputValue(), profile.candidate.email, label);
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test('the click guard rechecks the step and final label after a progression permit was granted', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    for (const mutation of ['last-step', 'removed-step', 'hidden-step', 'absenden', 'lähetä']) {
+      const page = await browser.newPage();
+      await page.setContent(`
+        <div data-career-ops-wizard><p id="step" data-career-ops-step="1" data-career-ops-total-steps="3">Step 1 of 3</p>
+        <form id="application"><label>Email<input name="email"></label>
+          <button id="continue" type="submit" aria-label="Continue application">Continue</button>
+        </form></div><script>
+          document.getElementById('continue').addEventListener('click', () => { window.clicks=(window.clicks||0)+1; });
+          application.addEventListener('submit', event => { event.preventDefault(); window.submits=(window.submits||0)+1; });
+        </script>
+      `);
+      const snapshot = await inspectOperationalApplicationForm(page);
+      const control = snapshot.controls.find((row) => row.text === 'Continue');
+      const options = { applicationIdentity: 'fixture', stateFingerprint: applicationFormStateFingerprint(snapshot) };
+      assert.equal(await grantProgressionPermit(page, control, options), true);
+      await page.evaluate((mutation) => {
+        const step = document.getElementById('step');
+        if (mutation === 'last-step') { step.dataset.careerOpsStep='3'; step.textContent='Step 3 of 3'; }
+        if (mutation === 'removed-step') step.remove();
+        if (mutation === 'hidden-step') step.hidden=true;
+        if (mutation === 'absenden') document.getElementById('continue').textContent='Absenden';
+        if (mutation === 'lähetä') document.getElementById('continue').textContent='Lähetä hakemus';
+      }, mutation);
+      await page.locator('#continue').click();
+      assert.equal(await page.evaluate(() => window.clicks || 0), 0, mutation);
+      assert.equal(await page.evaluate(() => window.submits || 0), 0, mutation);
+      assert.equal((await inspectOperationalApplicationForm(page)).progressionSubmits, 0, mutation);
+      await removeOperationalSubmissionGuard(page);
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+  }
 });
 
 test('progression permit is exact, rejects other/final controls, and is single-use', async () => {
@@ -648,15 +727,35 @@ async function runFixture(options = {}) {
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();
+    const requests = [];
+    if (options.post) {
+      await page.route('**/application/background/*', async (route) => {
+        requests.push({ url: route.request().url(), method: route.request().method(), body: route.request().postData() });
+        await route.fulfill({ body: 'saved' });
+      });
+    }
     await page.route('**/application/step/*', async (route) => {
       const step = Number(new URL(route.request().url()).pathname.split('/').pop());
-      await route.fulfill({ contentType: 'text/html', body: multiStepApplicationFixture(step, options) });
+      let body = multiStepApplicationFixture(step, options);
+      if (options.post) {
+        requests.push({ step, method: route.request().method() });
+        body = body.replace(/<form id="application" action=/g, '<form id="application" method="post" enctype="multipart/form-data" action=');
+        body += `<script>
+          document.querySelector('form').addEventListener('input', event => {
+            if (event.target.type !== 'file') fetch('/application/background/autosave', { method:'POST', body:event.target.value });
+          });
+          for (const input of document.querySelectorAll('input[type=file]')) input.addEventListener('change', () => {
+            fetch('/application/background/upload', { method:'POST', body:input.files[0] });
+          });
+        </script>`;
+      }
+      await route.fulfill({ contentType: 'text/html', body });
     });
     await page.goto('https://fixture.career-ops.invalid/application/step/1');
     const result = await prepareOperationalApplicationForm(page, profile, fixture.value, {
       context, transitionTimeoutMs: 1_500, progressionSessionMs: 15_000,
     });
-    return { page, result, browser, fixture };
+    return { page, result, browser, fixture, requests };
   } catch (error) {
     await browser.close();
     rmSync(fixture.dir, { recursive: true, force: true });
@@ -677,6 +776,27 @@ test('realistic four-step form fills, advances three times, and stops before fin
     assert.equal(await run.page.evaluate(() => window.fixtureFinalSubmits || 0), 0);
     await run.page.locator('#final-submit').click();
     assert.equal(await run.page.evaluate(() => window.fixtureFinalSubmits || 0), 1);
+  } finally {
+    await run.browser.close();
+    rmSync(run.fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test('multi-step POSTs, upload requests, and autosave keep working without final activation', { timeout: 30_000 }, async () => {
+  const run = await runFixture({ post: true });
+  try {
+    assert.equal(run.result.gate, undefined);
+    assert.equal(run.result.evidence.progression.stepsAdvanced, 3);
+    assert.deepEqual(run.requests.filter((request) => request.step > 1).map((request) => request.method), ['POST', 'POST', 'POST']);
+    assert.ok(run.requests.some((request) => request.url?.endsWith('/autosave') && request.method === 'POST' && request.body === profile.candidate.email));
+    const uploads = run.requests.filter((request) => request.url?.endsWith('/upload'));
+    assert.equal(uploads.length, 2);
+    assert.ok(uploads.every((request) => request.method === 'POST' && request.body === '%PDF fixture'));
+    assert.equal(run.result.evidence.uploadedArtifacts.length, 2);
+    assert.equal(await run.page.locator('#linkedin-final').inputValue(), profile.candidate.linkedin);
+    assert.equal(run.result.evidence.finalAction.detected, true);
+    assert.equal(run.result.evidence.finalAction.activated, false);
+    assert.equal(await run.page.evaluate(() => window.fixtureFinalSubmits || 0), 0);
   } finally {
     await run.browser.close();
     rmSync(run.fixture.dir, { recursive: true, force: true });

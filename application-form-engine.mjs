@@ -4,8 +4,10 @@ import {
   classifyApplicationControl,
   classifyCaptchaState,
   classifyUserGate,
+  FINAL_TOKEN,
   inspectApplicationForm as inspectLegacyApplicationForm,
   isSemanticFinalAction,
+  PROGRESSION_ACTION_LABEL,
 } from './application-form-core.mjs';
 import {
   canonicalFieldValue,
@@ -663,6 +665,7 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
   const ambiguousActions = applicationControls.filter((control) => (
     classifyApplicationControl(control) === 'ambiguous'
     && (control.type === 'submit' || control.formAction || control.invokesSubmit
+      || PROGRESSION_ACTION_LABEL.test(cleanFormText(control.label || control.text || control.value))
       || /\b(?:next|continue|proceed|review|apply|submit|send|complete|finish|finali[sz]e|confirm)\b/i.test(
         cleanFormText(control.label || control.text || control.value),
       ))
@@ -692,16 +695,42 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
 
 const operationalGuardContexts = new WeakSet();
 
-function installOperationalGuardInDocument() {
+function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, progressionLabelSource, progressionLabelFlags }) {
     if (!String(globalThis.name || '').split('|').includes('career-ops-guard-active')) return;
     if (globalThis.__careerOpsOperationalGuard?.document === document) return;
     if (globalThis.__careerOpsOperationalGuard) delete globalThis.__careerOpsOperationalGuard;
     globalThis.__careerOpsSubmitAttempts = Number(globalThis.__careerOpsSubmitAttempts || 0);
     globalThis.__careerOpsProgressionSubmits = Number(globalThis.__careerOpsProgressionSubmits || 0);
-    const block = (event) => {
+    const finalToken = new RegExp(finalTokenSource, finalTokenFlags);
+    const progressionLabel = new RegExp(progressionLabelSource, progressionLabelFlags);
+    const isIntermediateControl = (control, form) => {
+      const label = String(control.getAttribute('aria-label') || control.innerText || control.value || '').replace(/\s+/g, ' ').trim().replace(/\s*&\s*/g, ' & ');
+      if (!progressionLabel.test(label) || finalToken.test(`${label} ${control.innerText || ''} ${control.value || ''}`)) return false;
+      const root = form.closest('[data-career-ops-workflow-id]') || form;
+      const candidates = [...root.querySelectorAll('[data-career-ops-step], [aria-current="step"], [role="progressbar"], .step, .steps, .progress')];
+      if (root !== form) candidates.push(...[...root.querySelectorAll('*')].filter((element) => !form.contains(element)));
+      for (const element of candidates) {
+        if (element.closest('[hidden], [inert], [aria-hidden="true"]')) continue;
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        if (style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity || 1) <= 0 || rect.width <= 0 || rect.height <= 0) continue;
+        const ownText = [...element.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE)
+          .map((node) => node.textContent || '').join(' ').replace(/\s+/g, ' ').trim();
+        const text = ownText || element.getAttribute('aria-label') || '';
+        let current = Number(element.getAttribute('data-career-ops-step') || 0);
+        let total = Number(element.getAttribute('data-career-ops-total-steps') || 0);
+        if (!Number.isInteger(current) || current <= 0 || !Number.isInteger(total) || total <= 0) {
+          const match = text.match(/\b(?:step|page)\s*(\d+)\s+(?:of|\/)\s+(\d+)\b/i);
+          if (!match) continue;
+          current = Number(match[1]);
+          total = Number(match[2]);
+        }
+        return current > 0 && current < total;
+      }
+      return false;
+    };
+    const permittedControl = (submitter, form) => {
       const permit = globalThis.__careerOpsProgressionPermit;
-      const submitter = event?.submitter;
-      const form = event?.target;
       const liveSignature = submitter && form ? {
         controlId: String(submitter.getAttribute('data-career-ops-control-id') || '').trim(),
         formId: String(form.getAttribute('data-career-ops-form-id') || '').trim(),
@@ -712,7 +741,7 @@ function installOperationalGuardInDocument() {
       } : null;
       const signatureMatches = liveSignature && permit?.expected
         && Object.keys(permit.expected).every((key) => liveSignature[key] === permit.expected[key]);
-      const permitted = Boolean(
+      return Boolean(
         permit
         && permit.classification === 'progression'
         && permit.consumed !== true
@@ -724,7 +753,12 @@ function installOperationalGuardInDocument() {
         && form
         && form === permit.formElement
         && signatureMatches
+        && isIntermediateControl(submitter, form)
       );
+    };
+    const block = (event) => {
+      const permit = globalThis.__careerOpsProgressionPermit;
+      const permitted = event?.type === 'submit' && permittedControl(event.submitter, event.target);
       if (permitted) {
         permit.consumed = true;
         delete globalThis.__careerOpsProgressionPermit;
@@ -737,10 +771,19 @@ function installOperationalGuardInDocument() {
       event?.stopImmediatePropagation?.();
       throw new Error('Career-Ops blocked a final form submission attempt');
     };
+    const guardClick = (event) => {
+      const control = event.target?.closest?.('button, input[type="submit"], input[type="button"], a[role="button"], a.btn');
+      const form = control && (control.form || control.closest('form'));
+      if (!form) return;
+      const text = `${control.getAttribute('aria-label') || ''} ${control.innerText || ''} ${control.value || ''}`;
+      if (control.type !== 'submit' && !finalToken.test(text) && !progressionLabel.test(text.trim())) return;
+      if (!permittedControl(control, form)) block(event);
+    };
     const nativeSubmit = HTMLFormElement.prototype.submit;
     const nativeRequestSubmit = HTMLFormElement.prototype.requestSubmit;
-    globalThis.__careerOpsOperationalGuard = { block, nativeSubmit, nativeRequestSubmit, document };
+    globalThis.__careerOpsOperationalGuard = { block, guardClick, isIntermediateControl, nativeSubmit, nativeRequestSubmit, document };
     document.addEventListener('submit', block, true);
+    document.addEventListener('click', guardClick, true);
     HTMLFormElement.prototype.submit = function guardedSubmit() { block(); };
     HTMLFormElement.prototype.requestSubmit = function guardedRequestSubmit(submitter) {
       const permit = globalThis.__careerOpsProgressionPermit;
@@ -758,9 +801,13 @@ function installOperationalGuardInDocument() {
 }
 
 async function installSubmissionGuard(page) {
+  const rules = {
+    finalTokenSource: FINAL_TOKEN.source, finalTokenFlags: FINAL_TOKEN.flags,
+    progressionLabelSource: PROGRESSION_ACTION_LABEL.source, progressionLabelFlags: PROGRESSION_ACTION_LABEL.flags,
+  };
   const context = page.context?.();
   if (context?.addInitScript && !operationalGuardContexts.has(context)) {
-    await context.addInitScript(installOperationalGuardInDocument);
+    await context.addInitScript(installOperationalGuardInDocument, rules);
     operationalGuardContexts.add(context);
   }
   await page.evaluate(() => {
@@ -768,7 +815,7 @@ async function installSubmissionGuard(page) {
     if (!parts.includes('career-ops-guard-active')) parts.push('career-ops-guard-active');
     globalThis.name = parts.join('|');
   });
-  await page.evaluate(installOperationalGuardInDocument);
+  await page.evaluate(installOperationalGuardInDocument, rules);
 }
 
 export async function removeOperationalSubmissionGuard(page) {
@@ -776,6 +823,7 @@ export async function removeOperationalSubmissionGuard(page) {
     const guard = globalThis.__careerOpsOperationalGuard;
     if (!guard) return;
     document.removeEventListener('submit', guard.block, true);
+    document.removeEventListener('click', guard.guardClick, true);
     HTMLFormElement.prototype.submit = guard.nativeSubmit;
     HTMLFormElement.prototype.requestSubmit = guard.nativeRequestSubmit;
     delete globalThis.__careerOpsProgressionPermit;
@@ -813,6 +861,7 @@ export async function grantProgressionPermit(page, control, {
       formMethod: String(controlElement.getAttribute('formmethod') || formElement.getAttribute('method') || 'get').trim().toLowerCase(),
     };
     if (!Object.keys(expected).every((key) => live[key] === expected[key])) return false;
+    if (!globalThis.__careerOpsOperationalGuard?.isIntermediateControl(controlElement, formElement)) return false;
     globalThis.__careerOpsApplicationIdentity = identity;
     globalThis.__careerOpsCurrentStateFingerprint = fingerprint;
     globalThis.__careerOpsProgressionPermit = {

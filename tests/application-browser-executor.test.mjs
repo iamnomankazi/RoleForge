@@ -312,7 +312,7 @@ test('fresh executor DOM may confirm a delayed safe entry without changing scann
     bodyText: 'Fluxion Data Scientist / AI Engineer',
     formCount: 0,
     fields: [],
-    controls: [{ tag: 'button', type: 'button', text: 'Apply', visible: true }],
+    controls: [{ tag: 'button', type: 'button', text: 'Apply', visible: true, dataDestination: listingUrl }],
   };
   assert.equal(listingSnapshotConfirmsSafeEntry(snapshot, candidate, { listingUrl }), true);
   assert.equal(listingSnapshotConfirmsSafeEntry({ ...snapshot, bodyText: 'Other company', documentTitle: 'Other company' }, candidate, { listingUrl }), false);
@@ -354,7 +354,7 @@ test('opaque HRworks apply form is recognized by its bounded POST terminal struc
 
 test('only safe listing anchors are eligible and final controls remain unavailable', () => {
   const safe = {
-    index: 0, tag: 'a', type: '', text: 'Apply now', href: 'https://example.test/application', inForm: false, visible: true,
+    index: 0, tag: 'a', type: '', text: 'Apply now', href: 'https://jobs.lever.co/acme/application', inForm: false, visible: true,
   };
   const listingScope = {
     listingUrl: SELECTED,
