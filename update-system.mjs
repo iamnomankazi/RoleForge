@@ -135,6 +135,7 @@ const SYSTEM_PATHS = [
   'KIMI.md',
   'build-dashboard.mjs',
   'backup.mjs',
+  'filter-replay.mjs',
   'lib/operational-cli.mjs',
   'generate-pdf.mjs',
   'generate-latex.mjs',
