@@ -163,7 +163,7 @@ export function importLegacyQueue({
 function parseArgs(argv) {
   const options = { rowNumbers: [], selectedUrls: [], selectedCandidateIds: [] };
   const repeated = new Map([['--row', 'rowNumbers'], ['--url', 'selectedUrls'], ['--candidate-id', 'selectedCandidateIds']]);
-  const singles = new Map([['--queue-file', 'queueFile'], ['--source-run', 'sourceRunId'], ['--batch-id', 'batchId']]);
+  const singles = new Map([['--queue-file', 'queueFile'], ['--source-run', 'sourceRunId'], ['--batch-id', 'batchId'], ['--allow-duplicate', 'allowDuplicateReason']]);
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     const value = argv[index + 1];
@@ -180,7 +180,7 @@ function parseArgs(argv) {
 }
 
 function usage() {
-  return 'Usage: node legacy-queue-importer.mjs --queue-file <exact.csv> --source-run <run-id> [--batch-id <id>] (--row <csv-row>|--url <exact-queue-url>|--candidate-id <exact-id>) [...]';
+  return 'Usage: node legacy-queue-importer.mjs --queue-file <exact.csv> --source-run <run-id> [--batch-id <id>] [--allow-duplicate <reason>] (--row <csv-row>|--url <exact-queue-url>|--candidate-id <exact-id>) [...]';
 }
 
 function main() {

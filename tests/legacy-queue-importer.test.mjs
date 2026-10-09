@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { importLegacyQueue } from '../legacy-queue-importer.mjs';
 import {
   acquireBatchExecutionLock,
@@ -141,4 +143,46 @@ test('importer rejects implicit queue, unmatched rows, ambiguity, and overwrite'
   const args = { root: f.root, queueFile: f.queue, sourceRunId: f.runId, batchId: 'no-overwrite', selectedUrls: [f.candidates[2].url] };
   importLegacyQueue(args);
   assert.throws(() => importLegacyQueue(args), /EEXIST|already exists/i);
+}));
+
+test('CLI forwards --allow-duplicate with a required explicit reason', () => usingFixture((f) => {
+  const queue = join(f.root, 'fictional queue.csv');
+  writeFileSync(queue, `url\n${f.candidates[0].url}\n`);
+  importLegacyQueue({
+    root: f.root, queueFile: queue, sourceRunId: f.runId,
+    batchId: 'cli-existing', selectedUrls: [f.candidates[0].url],
+  });
+  // Relocate the entry points so the CLI writes only to the fictional root.
+  for (const name of ['application-batch.mjs', 'legacy-queue-importer.mjs']) {
+    const sourceUrl = new URL(`../${name}`, import.meta.url);
+    const script = readFileSync(sourceUrl, 'utf8').replace(/from '(\.\/[^']+)'/g, (_, path) => {
+      const target = path === './application-batch.mjs'
+        ? pathToFileURL(join(f.root, 'application-batch.mjs')) : new URL(path, sourceUrl);
+      return `from '${target.href}'`;
+    });
+    writeFileSync(join(f.root, name), script);
+  }
+  const entry = join(f.root, 'legacy-queue-importer.mjs');
+  const args = ['--queue-file', queue, '--source-run', f.runId, '--batch-id', 'cli-override', '--row', '2'];
+  const run = (extra = []) => spawnSync(process.execPath, [entry, ...args, ...extra], { cwd: f.root, encoding: 'utf8' });
+  const help = run(['--help']);
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /--allow-duplicate <reason>/);
+  const refused = run();
+  assert.equal(refused.status, 1, refused.stderr);
+  assert.match(refused.stderr, /application batch cli-existing.*--allow-duplicate/);
+  const missing = run(['--allow-duplicate']);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /Missing value for --allow-duplicate/);
+  const empty = run(['--allow-duplicate', '   ']);
+  assert.equal(empty.status, 1);
+  assert.match(empty.stderr, /--allow-duplicate requires a non-empty reason/);
+  const reason = 'Alex Example approved this intentional fictional retry.';
+  const allowed = run(['--allow-duplicate', reason]);
+  assert.equal(allowed.status, 0, allowed.stderr);
+  const result = JSON.parse(allowed.stdout);
+  const { manifest } = loadBatchState(result.manifest, { root: f.root });
+  assert.equal(manifest.duplicateOverride.reason, reason);
+  assert.equal(manifest.legacyImport.selectedRows[0].rowNumber, 2);
+  assert.equal(manifest.candidates[0].candidate_id, f.candidates[0].candidate_id);
 }));

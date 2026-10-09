@@ -373,9 +373,30 @@ function selectSourceCandidates(context, selectedCandidateIds, selectedUrls) {
   return selected;
 }
 
+function companyDuplicateKey(value) {
+  let name = String(value ?? '').normalize('NFKC').toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, ' ').trim();
+  const suffix = /(?:^| )(?:gmbh co kg|gmbh|ag|se|oy|oyj|ab|aps|a s|as|bv|b v|nv|ltd|limited|llc|inc|corp|corporation|plc|sa|sas|srl|spa|kg)$/;
+  while (suffix.test(name)) {
+    const stripped = name.replace(suffix, '').trim();
+    if (!stripped) break;
+    name = stripped;
+  }
+  return normalizeTextKey(name);
+}
+
+function roleDuplicateKey(value) {
+  const role = String(value ?? '').normalize('NFKC').toLowerCase()
+    .replace(/\bc\+\+/g, 'cplusplus')
+    .replace(/\bc#/g, 'csharp')
+    .replace(/\bf#/g, 'fsharp')
+    .replace(/\.net\b/g, 'dotnet');
+  return normalizeTextKey(role);
+}
+
 function assertNoDuplicateApplications(root, selected) {
-  const matches = (candidate, row) => normalizeTextKey(candidate.company) === normalizeTextKey(row.company)
-    && normalizeTextKey(candidate.title) === normalizeTextKey(row.role ?? row.title);
+  const matches = (candidate, row) => companyDuplicateKey(candidate.company) === companyDuplicateKey(row.company)
+    && roleDuplicateKey(candidate.title) === roleDuplicateKey(row.role ?? row.title);
   const refuse = (candidate, conflict) => {
     throw new Error(`Duplicate application for ${candidate.company} — ${candidate.title}: ${conflict}. To override, pass --allow-duplicate "<reason>" with an explicit reason.`);
   };
@@ -399,10 +420,18 @@ function assertNoDuplicateApplications(root, selected) {
     if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
     const manifestPath = join(batchesRoot, entry.name, 'manifest.json');
     if (!existsSync(manifestPath)) continue;
-    const { manifest, statePath } = loadManifest(manifestPath, { root });
-    const conflicts = selected.filter((candidate) => manifest.candidates.some((row) => matches(candidate, row)));
-    if (!conflicts.length) continue;
-    const state = existsSync(statePath) ? loadBatchState(manifestPath, { root }).state : null;
+    let manifest;
+    let state;
+    let conflicts;
+    try {
+      const loaded = loadManifest(manifestPath, { root });
+      manifest = loaded.manifest;
+      conflicts = selected.filter((candidate) => manifest.candidates.some((row) => matches(candidate, row)));
+      if (!conflicts.length) continue;
+      state = existsSync(loaded.statePath) ? loadBatchState(manifestPath, { root }).state : null;
+    } catch (error) {
+      throw new Error(`Cannot check duplicates against application batch ${entry.name} at ${manifestPath}: ${error.message}. Inspect/repair or abandon that batch, or use --allow-duplicate "<reason>" if this candidate is intentionally a duplicate.`, { cause: error });
+    }
     for (const candidate of conflicts) {
       if (manifest.candidates.some((row, index) => matches(candidate, row)
           && state?.candidates[index]?.state !== 'abandoned')) {

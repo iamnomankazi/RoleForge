@@ -38,6 +38,109 @@ function withFixture(callback) {
   }
 }
 
+function writeRun(f, runId, company, title = f.candidate.title) {
+  const runDir = join(f.root, 'output', 'scan-runs', runId);
+  mkdirSync(runDir, { recursive: true });
+  const candidate = { company, title, url: `https://jobs.example.test/${runId}` };
+  writeFileSync(join(runDir, 'manifest.json'), JSON.stringify({ run_id: runId }));
+  writeFileSync(join(runDir, 'candidates.json'), JSON.stringify([candidate]));
+  return { sourceRunId: runId, selectedUrls: [candidate.url] };
+}
+
+for (const suffix of [
+  'GmbH', 'AG', 'SE', 'Oy', 'Oyj', 'AB', 'ApS', 'A/S', 'AS', 'BV', 'B.V.', 'NV',
+  'Ltd', 'Limited', 'LLC', 'Inc.', 'Corp.', 'Corporation', 'PLC', 'SA', 'SAS', 'SRL', 'SpA',
+  'GmbH & Co. KG', 'KG',
+]) {
+  test(`trailing ${suffix} matches bare company names in trackers and batches in both directions`, () => {
+    for (const [existingCompany, company] of [
+      [`Example Labs, ${suffix}`, 'Example Labs'], ['Example Labs', `Example Labs ${suffix}`],
+    ]) {
+      withFixture((f) => {
+        const selected = writeRun(f, 'suffix-candidate', company);
+        f.writeTracker('Applied', existingCompany);
+        assert.throws(() => f.create('tracker-refused', selected), /tracker row #42/);
+        assert.equal(existsSync(join(f.root, 'output', 'application-batches')), false);
+        f.writeTracker('Evaluated', existingCompany);
+        f.create('suffix-existing', writeRun(f, 'suffix-original', existingCompany));
+        assert.throws(() => f.create('batch-refused', selected), /application batch suffix-existing/);
+      });
+    }
+  });
+}
+
+test('legal suffix stripping is limited to trailing company tokens', () => withFixture((f) => {
+  for (const company of ['GmbH Example Labs', 'Example Labsag', 'Example Labs Partners']) {
+    f.writeTracker('Applied', company);
+    const result = f.create(`distinct-company-${company.replace(/ /g, '-')}`, writeRun(f, 'bare-company', 'Example Labs'));
+    abandonApplicationBatch(result.manifestPath, { root: f.root, entireBatch: true, reason: 'Reset fictional company case.' });
+  }
+  f.writeTracker('Applied', 'Example Labs', 'Senior Data Engineer GmbH');
+  const selected = writeRun(f, 'bare-role', 'Example Labs');
+  f.create('distinct-role', selected);
+  f.writeTracker('Evaluated');
+  assert.equal(f.create('role-suffix', writeRun(f, 'suffixed-role', 'Example Labs', 'Senior Data Engineer GmbH')).manifest.duplicateOverride, undefined);
+}));
+
+for (const [existingRole, role] of [
+  ['C++ Developer', 'C# Developer'], ['C++ Developer', 'C Developer'],
+  ['C# Developer', 'C Developer'], ['F# Developer', 'F Developer'], ['.NET Developer', 'NET Developer'],
+]) {
+  test(`${existingRole} and ${role} stay distinct in trackers and batches`, () => withFixture((f) => {
+    f.writeTracker('Applied', 'Example Labs', existingRole);
+    const selected = writeRun(f, 'technology-candidate', 'Example Labs', role);
+    const created = f.create('different-technology', selected);
+    assert.equal(created.manifest.duplicateOverride, undefined);
+    f.writeTracker('Evaluated');
+    assert.equal(f.create('original-technology', writeRun(f, 'technology-original', 'Example Labs', existingRole)).manifest.duplicateOverride, undefined);
+  }));
+}
+
+for (const [role, equivalent] of [
+  ['C++ Developer', 'CPLUSPLUS-DEVELOPER'], ['C# Developer', 'CSHARP Developer'],
+  ['F# Developer', 'FSHARP Developer'], ['.NET Developer', 'DOTNET Developer'],
+  ['Ｃ＋＋ Developer', 'c++-DEVELOPER'],
+]) {
+  test(`${role} preserves technology, case, whitespace and dash equivalence`, () => withFixture((f) => {
+    const selected = writeRun(f, 'equivalent-candidate', 'Example Labs', role);
+    f.writeTracker('Applied', 'Example Labs', `  ${equivalent}  `);
+    assert.throws(() => f.create('tracker-equivalent', selected), /tracker row #42/);
+    f.writeTracker('Evaluated');
+    f.create('technology-existing', writeRun(f, 'equivalent-original', 'Example Labs', equivalent));
+    assert.throws(() => f.create('batch-equivalent', selected), /application batch technology-existing/);
+  }));
+}
+
+for (const corruption of ['manifest-json', 'manifest-hash', 'state-json', 'state-scope']) {
+  test(`${corruption} load failures identify the batch, manifest path and recovery options`, () => withFixture((f) => {
+    const original = f.create('damaged-batch');
+    const path = corruption.startsWith('manifest') ? original.manifestPath : original.statePath;
+    if (corruption.endsWith('json')) writeFileSync(path, '{broken json');
+    else {
+      const value = JSON.parse(readFileSync(path, 'utf8'));
+      if (corruption === 'manifest-hash') value.createdAt = '2025-01-01T00:00:00.000Z';
+      else value.manifestScopeHash = 'sha256:' + '0'.repeat(64);
+      writeFileSync(path, JSON.stringify(value));
+    }
+    const damaged = readFileSync(path, 'utf8');
+    const selected = corruption.startsWith('manifest')
+      ? writeRun(f, 'unrelated-candidate', 'Other Example Labs') : {};
+    assert.throws(() => f.create('refused-damaged', selected), (error) => {
+      assert.match(error.message, /Cannot check duplicates against application batch damaged-batch/);
+      assert.ok(error.message.includes(original.manifestPath));
+      assert.match(error.message, /Inspect\/repair or abandon that batch/);
+      assert.match(error.message, /--allow-duplicate.*intentionally a duplicate/);
+      assert.ok(error.cause instanceof Error);
+      assert.ok(error.message.includes(error.cause.message));
+      return true;
+    });
+    assert.equal(existsSync(join(f.root, 'output', 'application-batches', 'refused-damaged')), false);
+    assert.equal(readFileSync(path, 'utf8'), damaged);
+    const reason = 'Alex Example approved an intentional duplicate while inspecting the damaged fixture.';
+    assert.equal(f.create('override-damaged', { ...selected, allowDuplicateReason: reason }).manifest.duplicateOverride.reason, reason);
+  }));
+}
+
 for (const status of [
   'Applied', 'Responded', 'Interview', 'Offer', 'Rejected', 'Discarded', 'SKIP', 'Hired', 'Unknown',
   'aPpLiEd', '**APPLIED**', 'sent', 'respondido', 'entrevista', 'oferta',
