@@ -138,6 +138,7 @@ const SYSTEM_PATHS = [
   'filter-replay.mjs',
   'assessment-contract.mjs',
   'shortlist.mjs',
+  'prescreen.mjs',
   'lib/operational-cli.mjs',
   'generate-pdf.mjs',
   'generate-latex.mjs',
