@@ -11,6 +11,7 @@ import {
   prepareOperationalApplicationForm,
 } from '../application-form-engine.mjs';
 import {
+  canonicalFieldValue,
   classifyFieldSemantics,
   containsUnresolvedPlaceholder,
   generateCustomNarrativeAnswer,
@@ -18,6 +19,7 @@ import {
   resolveAuthorizationAnswer,
   validateGroundedNarrative,
 } from '../application-form-policy.mjs';
+import { groundedFieldValue } from '../application-profile.mjs';
 import { createNarrativeProvenanceRecord, resolveFactualEvidence } from '../application-evidence.mjs';
 import { attachFactualSources } from './fixtures/application-evidence-profile.mjs';
 const syntheticEvidence = [
@@ -57,7 +59,14 @@ const profile = attachFactualSources({
   education: { expected_graduation_date: '31/12/2030' },
   formRules: {
     current_location: { city: 'Example City', country: 'Finland', combined: 'Example City, Finland' },
-    work_authorization: { home_country: 'Finland' },
+    work_authorization: {
+      home_country: 'Finland',
+      finland_authorized: true,
+      finland_sponsorship: false,
+      outside_finland_local_authorized: false,
+      outside_finland_sponsorship: true,
+      ambiguous_policy: 'ask_user',
+    },
     source: { value: 'LinkedIn' },
     narrative_evidence: syntheticEvidence,
   },
@@ -130,6 +139,143 @@ test('1–2. current location is canonical Example City while preferred location
   assert.equal(result.actions.find((row) => row.semantic === 'current_location').value, 'Example City, Finland');
   assert.equal(result.actions.some((row) => row.semantic === 'preferred_location'), false);
   assert.match(result.unresolvedFields.find((row) => row.semantic === 'preferred_location').reason, /application-specific/);
+});
+
+test('factually distinct salary, location, and availability labels use only matching profile facts', () => {
+  const cases = [
+    ['Expected salary', 'salary', profile.compensation.target_range],
+    ['Desired salary', 'salary', profile.compensation.target_range],
+    ['Compensation expectations', 'salary', profile.compensation.target_range],
+    ['What salary do you expect?', 'salary', profile.compensation.target_range],
+    ['Pay expectation', 'salary', profile.compensation.target_range],
+    ['Current salary', 'salary_details', null],
+    ['Salary history', 'salary_details', null],
+    ['Previous compensation', 'salary_details', null],
+    ['Current and expected salary', 'salary_details', null],
+    ['Salary', 'salary_details', null],
+    ['Country of residence', 'country', 'Finland'],
+    ['Current country', 'country', 'Finland'],
+    ['Country of citizenship', 'citizenship', null],
+    ['Country of nationality', 'citizenship', null],
+    ['Which country are you a citizen of?', 'citizenship', null],
+    ['Nationality', 'citizenship', null],
+    ['Country of birth', 'birth_place', null],
+    ['City of birth', 'birth_place', null],
+    ['Current city', 'city', 'Example City'],
+    ['City of residence', 'city', 'Example City'],
+    ['Which city would you like to work in?', 'preferred_location', null],
+    ['Which city do you prefer to work in?', 'preferred_location', null],
+    ['Preferred work location', 'preferred_location', null],
+    ['Desired city', 'preferred_location', null],
+    ['Earliest start date', 'availability', profile.currentStatus.availability.start],
+    ['Earliest join date', 'availability', profile.currentStatus.availability.start],
+    ['Notice period', 'availability', profile.currentStatus.availability.start],
+    ['When are you available to start?', 'availability', profile.currentStatus.availability.start],
+    ['Date available', 'availability', profile.currentStatus.availability.start],
+    ['Are you available for shift work?', 'schedule_availability', null],
+    ['Are you available on weekends?', 'schedule_availability', null],
+    ['Are you available for travel?', 'schedule_availability', null],
+    ['Are you available for on-call work?', 'schedule_availability', null],
+    ['Start date and weekend availability', 'schedule_availability', null],
+    ['Are you available?', 'schedule_availability', null],
+  ];
+  for (const [label, semantic, expected] of cases) {
+    const input = field({ id: 'distinct-question', label });
+    const semantics = classifyFieldSemantics(input);
+    assert.equal(semantics.semantic, semantic, label);
+    assert.equal(canonicalFieldValue(profile, semantics, { field: input, context: formContext }), expected, label);
+    const result = plan([input]);
+    if (expected === null) {
+      assert.deepEqual(result.actions, [], label);
+      assert.equal(result.unresolvedFields[0]?.semantic, semantic, label);
+    } else {
+      assert.equal(result.actions[0]?.value, expected, label);
+      assert.deepEqual(result.unresolvedFields, [], label);
+    }
+  }
+});
+
+test('citizenship uses explicit citizenship evidence without inferring birthplace from it', () => {
+  const citizenProfile = { ...profile, candidate: { ...profile.candidate, citizenship: 'Example Republic' } };
+  for (const [label, expected] of [
+    ['Country of citizenship', 'Example Republic'],
+    ['Nationality', 'Example Republic'],
+    ['Country of residence', 'Finland'],
+    ['Country of birth', null],
+    ['Are you a citizen of Finland?', null],
+  ]) {
+    const input = field({ id: 'citizenship', label });
+    const semantics = classifyFieldSemantics(input);
+    assert.equal(canonicalFieldValue(citizenProfile, semantics, { field: input }), expected, label);
+  }
+});
+
+test('authorization and sponsorship labels resolve from the corresponding configured profile keys', () => {
+  const cases = [
+    ['Do you require visa sponsorship?', 'Finland', 'sponsorship', 'No'],
+    ['Do you require visa sponsorship?', 'Germany', 'sponsorship', 'Yes'],
+    ['Are you legally authorized to work in Germany?', 'Germany', 'work_authorization', 'No'],
+    ['Are you legally authorized to work in Finland?', 'Finland', 'work_authorization', 'Yes'],
+    ['Are you eligible to work in Sweden?', 'Sweden', 'work_authorization', 'No'],
+    ['Do you require employer immigration support?', 'Germany', 'sponsorship', 'Yes'],
+    ['Are you legally authorized to work in Germany?', 'Finland', 'work_authorization', null],
+    ['Are you legally authorized to work in any EU/EEA country?', 'Germany', 'work_authorization', null],
+    ['Do you require visa sponsorship?', null, 'sponsorship', null],
+    ['Do you require visa sponsorship?', 'Finland or Germany', 'sponsorship', null],
+    ['Are you authorized to work in Finland or Germany?', 'Finland', 'work_authorization', null],
+    ['Are you legally authorized to work without sponsorship?', 'Finland', 'sponsorship', null],
+    ['Do you not require visa sponsorship?', 'Finland', 'sponsorship', null],
+  ];
+  for (const [label, jobCountry, semantic, expected] of cases) {
+    const input = field({ id: 'authorization-question', label, tag: 'select', type: 'select-one', options: [
+      { label: 'Yes', value: 'yes' }, { label: 'No', value: 'no' },
+    ] });
+    assert.equal(classifyFieldSemantics(input).semantic, semantic, label);
+    const result = plan([input], { ...formContext, jobCountry });
+    if (expected === null) {
+      assert.deepEqual(result.actions, [], label);
+      assert.equal(result.unresolvedFields[0]?.semantic, semantic, label);
+    } else {
+      assert.equal(result.actions[0]?.value, expected, label);
+      assert.deepEqual(result.unresolvedFields, [], label);
+    }
+  }
+});
+
+test('configured authorization values override country defaults and incomplete policies remain unresolved', () => {
+  const changed = { ...profile, formRules: { ...profile.formRules, work_authorization: {
+    home_country: 'Germany',
+    finland_authorized: 'No', finland_sponsorship: 'Yes',
+    outside_finland_local_authorized: 'Yes', outside_finland_sponsorship: 'No',
+    ambiguous_policy: 'ask_user',
+  } } };
+  for (const [country, semantic, expected] of [
+    ['Finland', 'work_authorization', 'No'], ['Finland', 'sponsorship', 'Yes'],
+    ['Germany', 'work_authorization', 'Yes'], ['Germany', 'sponsorship', 'No'],
+  ]) {
+    assert.equal(resolveAuthorizationAnswer(changed, semantic, { jobCountry: country }), expected);
+    assert.equal(groundedFieldValue(changed, semantic, { country }), expected);
+  }
+  for (const value of [undefined, null, '', 'ask_user', 'depends on the permit', 'Yes if approved']) {
+    const incomplete = { ...profile, formRules: { ...profile.formRules, work_authorization: {
+      home_country: 'Finland', finland_authorized: value, finland_sponsorship: value,
+      outside_finland_local_authorized: value, outside_finland_sponsorship: value, ambiguous_policy: 'ask_user',
+    } } };
+    for (const country of ['Finland', 'Germany']) {
+      for (const semantic of ['work_authorization', 'sponsorship']) {
+        assert.equal(resolveAuthorizationAnswer(incomplete, semantic, { jobCountry: country }), null);
+        assert.equal(groundedFieldValue(incomplete, semantic, { country }), null);
+      }
+    }
+  }
+  assert.equal(groundedFieldValue(profile, 'sponsorship'), null);
+  assert.equal(groundedFieldValue(profile, 'work_authorization'), null);
+  assert.equal(resolveAuthorizationAnswer(changed, 'sponsorship', {}), null);
+  assert.equal(resolveAuthorizationAnswer(changed, 'work_authorization', { canEmployFromHomeCountry: true }), 'Yes');
+  const explicitRemoteQuestion = field({ label: 'Are you legally authorized to work in Germany?' });
+  assert.equal(canonicalFieldValue(profile, classifyFieldSemantics(explicitRemoteQuestion), {
+    field: explicitRemoteQuestion, context: { jobCountry: 'Germany', canEmployFromFinland: true },
+  }), null);
 });
 
 test('education institution is derived from the synthetic profile rather than source literals', () => {

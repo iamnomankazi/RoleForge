@@ -116,7 +116,7 @@ export function classifyFieldSemantics(field = {}) {
   if (/how did you hear|where did you hear|application source|referral source|source detail/.test(text)) {
     return { category: 'source_how_heard', semantic: 'application_source' };
   }
-  if (/preferred (?:office |work )?location|location preference|which office|preferred city|office preference/.test(text)) {
+  if (/(?:preferred|desired) (?:office |work )?(?:location|city)|(?:location|city) preference|which office|office preference|which city.*work|city.*prefer|where.*(?:like|want|wish|prefer).*work/.test(text)) {
     return { category: 'preferred_location', semantic: 'preferred_location' };
   }
   if (/sponsor|employer support|support from (?:the )?employer|immigration support|visa support|require.*(?:visa|permit)/.test(text)) {
@@ -124,6 +124,12 @@ export function classifyFieldSemantics(field = {}) {
   }
   if (/work authori[sz]|authori[sz]ed to work|eligible to work|right to work|legally authori[sz]/.test(text)) {
     return { category: 'work_authorization', semantic: 'work_authorization' };
+  }
+  if (/\bbirth\b|\bborn\b/.test(text)) {
+    return { category: 'identity_contact', semantic: 'birth_place' };
+  }
+  if (/citizenship|nationality|\bcitizen\b/.test(text)) {
+    return { category: 'identity_contact', semantic: 'citizenship' };
   }
   if (/current location|where (?:are you|do you) (?:currently )?(?:live|located)|city and country|present location/.test(text)) {
     return { category: 'current_location', semantic: 'current_location' };
@@ -160,8 +166,19 @@ export function classifyFieldSemantics(field = {}) {
   if (/university|school|institution/.test(text)) return { category: 'education', semantic: 'university' };
   if (/degree|qualification/.test(text)) return { category: 'education', semantic: 'degree' };
   if (/graduat/.test(text)) return { category: 'education', semantic: 'graduation' };
-  if (/salary|compensation|pay expectation/.test(text)) return { category: 'salary', semantic: 'salary' };
-  if (/available|start date|notice period/.test(text)) return { category: 'availability', semantic: 'availability' };
+  if (/\b(?:salary|compensation|pay)\b/.test(text)) {
+    const target = /\b(?:expect|expected|expectations?|desired|target|requested|requirements?)\b/.test(text);
+    const history = /\b(?:current|present|previous|prior|last|history|historical)\b/.test(text);
+    return { category: 'salary', semantic: target && !history ? 'salary' : 'salary_details' };
+  }
+  if ((/\b(?:shift|shifts|weekends?|travel)\b|\bon call\b/.test(text))
+      && /\b(?:available|availability|willing|able)\b|(?:can|could|would|will) you|start date|notice period/.test(text)) {
+    return { category: 'availability', semantic: 'schedule_availability' };
+  }
+  if (/available|availability|start date|joining date|notice period|earliest (?:start|join)|(?:when|how soon).*(?:start|join)/.test(text)) {
+    const start = /start date|joining date|notice period|earliest (?:start|join)|date available|available from|(?:when|how soon|available|availability).*(?:start|join)/.test(text);
+    return { category: 'availability', semantic: start ? 'availability' : 'schedule_availability' };
+  }
   if (/relocat/.test(text)) return { category: 'relocation', semantic: 'relocation' };
   if (isNarrativeControl(field) && /cover letter|motivation letter/.test(text)) {
     return { category: 'custom_motivation_experience_narrative', semantic: 'cover_letter_text' };
@@ -449,9 +466,13 @@ function configuredUniversity(profile) {
 }
 
 export function resolveAuthorizationAnswer(profile, semantic, context = {}) {
+  if (!['work_authorization', 'sponsorship'].includes(semantic)) return null;
   const rules = formRules(profile);
+  const policy = profile?.formRules?.work_authorization || {};
   const arrangement = normalizeFormQuestion(context.hiringArrangement);
   const country = cleanFormText(context.jobCountry);
+  const normalizedCountry = normalizeFormQuestion(country);
+  const question = normalizeFormQuestion(context.question);
   const normalizedHomeCountry = normalizeFormQuestion(rules.homeCountry);
   const remoteFromHomeCountry = Boolean(normalizedHomeCountry) && (
     arrangement === `remote ${normalizedHomeCountry}`
@@ -459,12 +480,27 @@ export function resolveAuthorizationAnswer(profile, semantic, context = {}) {
     || context.canEmployFromHomeCountry === true
     || hasConfiguredCountryCapability(context, rules.homeCountry)
   );
-  const sameCountry = Boolean(country && normalizedHomeCountry)
-    && normalizeFormQuestion(country) === normalizedHomeCountry;
-  if (remoteFromHomeCountry || sameCountry) {
-    return semantic === 'work_authorization' ? 'Yes' : semantic === 'sponsorship' ? 'No' : null;
+  const explicitJurisdiction = /\b(?:work|employment|sponsorship|visa|permit) (?:in|for) (.+)/.exec(question)?.[1];
+  if (explicitJurisdiction && !/^(?:this country|the (?:country|job|role)|your country)\b/.test(explicitJurisdiction)) {
+    if (!normalizedCountry || !(explicitJurisdiction === normalizedCountry || explicitJurisdiction.startsWith(`${normalizedCountry} `))) return null;
   }
-  if (country) return semantic === 'work_authorization' ? 'No' : semantic === 'sponsorship' ? 'Yes' : null;
+  if (explicitJurisdiction && remoteFromHomeCountry && normalizedCountry !== normalizedHomeCountry) return null;
+  const jurisdiction = remoteFromHomeCountry ? normalizedHomeCountry : normalizedCountry;
+  // ambiguous_policy is a review directive, not a factual Yes/No answer.
+  if (!jurisdiction || /\b(?:eu|eea|europe|worldwide|anywhere|remote|unknown|and|or)\b/.test(jurisdiction)
+      || /[,/;&]/.test(country)
+      || /\b(?:eu|eea|permanent|unrestricted)\b|without restrictions|now or.*future/.test(question)) return null;
+  if (explicitJurisdiction && /\b(?:and|or)\b/.test(explicitJurisdiction)) return null;
+  if (semantic === 'sponsorship' && /authori[sz]|eligible to work|right to work|without|not require/.test(question)) return null;
+  const prefix = jurisdiction === 'finland' ? 'finland' : 'outside_finland';
+  // Profile key for local work authorization outside Finland is outside_finland_local_authorized.
+  const value = semantic === 'sponsorship'
+    ? policy[`${prefix}_sponsorship`]
+    : prefix === 'finland'
+      ? policy.finland_authorized
+      : policy.outside_finland_local_authorized ?? policy.outside_finland_authorized;
+  if (value === true || normalizeFormQuestion(value) === 'yes') return 'Yes';
+  if (value === false || normalizeFormQuestion(value) === 'no') return 'No';
   return null;
 }
 
@@ -486,10 +522,12 @@ export function canonicalFieldValue(profile, semantics, {
     phone: candidate.phone || null,
     phone_country: rules.homeCountry,
     phone_dial_code: rules.phoneDialCode || null,
+    citizenship: candidate.citizenship || null,
     linkedin: candidate.linkedin || null,
     github: candidate.github || null,
   };
   if (category === 'identity_contact') {
+    if (semantic === 'citizenship' && /^(?:are you|do you|is your)\b/.test(normalizeFormQuestion(field.questionText || field.label))) return null;
     if (semantic === 'website') {
       if (candidate.portfolio_url) return candidate.portfolio_url;
       const distinctGithub = (snapshot.fields || []).some((item) => classifyFieldSemantics(item).semantic === 'github');
@@ -508,7 +546,7 @@ export function canonicalFieldValue(profile, semantics, {
     return rules.currentLocation.combined;
   }
   if (category === 'work_authorization' || category === 'sponsorship_employer_support') {
-    return resolveAuthorizationAnswer(profile, semantic, context);
+    return resolveAuthorizationAnswer(profile, semantic, { ...context, question: field.questionText || field.groupLabel || field.label });
   }
   if (category === 'source_how_heard') return rules.source;
   if (category === 'education') {
@@ -516,8 +554,8 @@ export function canonicalFieldValue(profile, semantics, {
     if (semantic === 'graduation') return profile?.education?.expected_graduation_date || null;
     return null;
   }
-  if (category === 'salary') return profile?.compensation?.target_range || null;
-  if (category === 'availability') return profile?.currentStatus?.availability?.start || null;
+  if (category === 'salary') return semantic === 'salary' ? profile?.compensation?.target_range || null : null;
+  if (category === 'availability') return semantic === 'availability' ? profile?.currentStatus?.availability?.start || null : null;
   if (category === 'relocation') {
     return cleanFormText(profile?.formRules?.relocation?.value) || null;
   }

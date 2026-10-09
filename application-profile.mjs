@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import yaml from 'js-yaml';
 import { hashFile } from './application-integrity.mjs';
 import { APPLICATION_EVIDENCE_CLASSES } from './application-evidence.mjs';
+import { resolveAuthorizationAnswer } from './application-form-policy.mjs';
 
 function readRequired(path, label) {
   if (!existsSync(path)) throw new Error(`Missing canonical ${label}: ${path}`);
@@ -121,7 +122,6 @@ export function selectApprovedCv(profile, candidate, jdText) {
 
 export function groundedFieldValue(profile, semantic, { country = null } = {}) {
   const candidate = profile.candidate;
-  const currentCountry = country || profile.location.country || 'Finland';
   const fullName = String(candidate.full_name || '').trim();
   const parts = fullName.split(/\s+/);
   const values = {
@@ -140,10 +140,8 @@ export function groundedFieldValue(profile, semantic, { country = null } = {}) {
     graduation: profile.education.expected_graduation_date || null,
     availability: profile.currentStatus.availability?.start || null,
     salary: profile.compensation.target_range || null,
-    work_authorization: currentCountry.toLowerCase() === 'finland'
-      ? profile.location.work_authorization?.finland || null
-      : profile.location.work_authorization?.outside_finland || null,
-    sponsorship: currentCountry.toLowerCase() === 'finland' ? 'No' : 'Yes',
+    work_authorization: resolveAuthorizationAnswer(profile, 'work_authorization', { jobCountry: country }),
+    sponsorship: resolveAuthorizationAnswer(profile, 'sponsorship', { jobCountry: country }),
     relocation: profile.formRules?.relocation?.value || null,
   };
   return values[semantic] ?? null;
