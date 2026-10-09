@@ -223,7 +223,7 @@ career-ops/
 │   └── states.yml               # Канонічні статуси
 ├── batch/
 │   ├── batch-prompt.md          # Самодостатній промпт воркера
-│   └── batch-runner.sh          # Скрипт-оркестратор
+│   └── README.md                # Hybrid Workflow batch process (see modes/batch.md)
 ├── dashboard/                   # Go TUI для перегляду конвеєра
 ├── data/                        # Ваші дані відстеження (gitignored)
 ├── reports/                     # Звіти оцінок (gitignored)

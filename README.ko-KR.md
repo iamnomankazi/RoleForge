@@ -219,7 +219,7 @@ career-ops/
 │   └── states.yml               # 정규 상태값
 ├── batch/
 │   ├── batch-prompt.md          # 독립형 워커 프롬프트(Self-contained)
-│   └── batch-runner.sh          # 오케스트레이터 스크립트
+│   └── README.md                # Hybrid Workflow batch process (see modes/batch.md)
 ├── dashboard/                   # Go TUI 파이프라인 뷰어
 ├── data/                        # 트래킹 데이터 (gitignored)
 ├── reports/                     # 평가 리포트 (gitignored)

@@ -134,6 +134,8 @@ const SYSTEM_PATHS = [
   'GEMINI.md',
   'KIMI.md',
   'build-dashboard.mjs',
+  'backup.mjs',
+  'lib/operational-cli.mjs',
   'generate-pdf.mjs',
   'generate-latex.mjs',
   'archive-posting.mjs',

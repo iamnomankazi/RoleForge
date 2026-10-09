@@ -5334,12 +5334,11 @@ try {
     fail('modes/_custom.template.md is NOT in SYSTEM_PATHS — the seed never updates (#1198)');
   }
 
-  // CLAUDE.md MUST route custom rules to the file AND seed it on onboarding.
-  const claudeMd = readFileSync(join(ROOT, 'CLAUDE.md'), 'utf-8');
-  if (claudeMd.includes('modes/_custom.md') && claudeMd.includes('modes/_custom.template.md')) {
-    pass('CLAUDE.md routes custom rules to modes/_custom.md + seeds it from the template');
+  // AGENTS.md MUST route custom rules to the file AND seed it on onboarding.
+  if (agents.includes('modes/_custom.md') && agents.includes('modes/_custom.template.md')) {
+    pass('AGENTS.md routes custom rules to modes/_custom.md + seeds it from the template');
   } else {
-    fail('CLAUDE.md does not reference modes/_custom.md / its template — agents will not use it (#1198)');
+    fail('AGENTS.md does not reference modes/_custom.md / its template — agents will not use it (#1198)');
   }
 } catch (e) {
   fail(`custom instructions test crashed: ${e.message}`);

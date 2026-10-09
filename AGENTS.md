@@ -15,14 +15,17 @@ The portfolio that goes with this system is also open source: [cv-santiago](http
 There are two layers. Read `DATA_CONTRACT.md` for the full list.
 
 **User Layer (NEVER auto-updated, personalization goes HERE):**
-- `cv.md`, `config/profile.yml`, `modes/_profile.md`, `article-digest.md`, `portals.yml`
+- `cv.md`, `config/profile.yml`, `modes/_profile.md`, `modes/_custom.md`, `article-digest.md`, `portals.yml`
 - `data/*`, `reports/*`, `output/*`, `interview-prep/*`
 
 **System Layer (maintained locally with selective reviewed backports, DON'T put user data here):**
 - `modes/_shared.md`, `modes/oferta.md`, all other modes
 - `AGENTS.md`, `CLAUDE.md`, `CODEX.md`, `OPENCODE.md`, `*.mjs` scripts, `dashboard/*`, `templates/*`, `batch/*`
 
-**THE RULE: When the user asks to customize anything (archetypes, narrative, negotiation scripts, proof points, location policy, comp targets), ALWAYS write to `modes/_profile.md` or `config/profile.yml`. NEVER edit `modes/_shared.md` for user-specific content.** This ensures system updates don't overwrite their customizations.
+**THE RULE: When the user asks to customize anything, write to the USER layer, NEVER to a system file.** This keeps personalization separate from selective upstream backports.
+- **Profile / evaluation content** (archetypes, narrative, negotiation scripts, proof points, location policy, comp targets) → `modes/_profile.md` or `config/profile.yml`.
+- **Procedural rules** (house rules, custom workflows, output preferences, "always/never do X" automations) → `modes/_custom.md` (create it from `modes/_custom.template.md` if missing; `doctor.mjs` also auto-copies it and reports it in `autoCopied`).
+- **NEVER** edit `modes/_shared.md`, `AGENTS.md`, `CLAUDE.md`, or any other system file for user-specific content.
 
 ## Source-of-Truth Boundary (CRITICAL)
 
@@ -110,7 +113,7 @@ AI-powered, CLI-agnostic job search automation: pipeline tracking, offer evaluat
 | `scan.mjs` | Zero-token portal scanner — hits Greenhouse/Ashby/Lever APIs directly, zero LLM cost |
 | `check-liveness.mjs` | Job posting liveness checker |
 | `liveness-core.mjs` | Shared liveness logic (expired signals win over generic Apply text) |
-| `reports/` | Evaluation reports (format: `{###}-{company-slug}-{YYYY-MM-DD}.md`). Blocks A-F + G (Posting Legitimacy). Header includes `**Legitimacy:** {tier}`. |
+| `reports/` | Evaluation reports (format: `{###}-{company-slug}-{YYYY-MM-DD}.md`). Blocks A-F + G (Posting Legitimacy), plus `## Machine Summary` YAML for downstream scripts. Header includes `**Legitimacy:** {tier}`. |
 
 ### Plugins (optional)
 
@@ -273,11 +276,14 @@ Default modes are in `modes/` (English). Additional language-specific modes are 
 | Wants a formal application email | `email` — draft-only subject, body, attachment checklist, and contact block from a report or JD; never sends, submits, or clicks anything |
 | Asks for company research | `deep` — generates a structured 6-axis research prompt covering AI strategy, recent moves, engineering culture, likely challenges, competitors, and the candidate's angle given their profile |
 | Preps for interview at specific company | `interview-prep` |
+| Wants interactive profile/CV onboarding | `interview` |
 | Wants a time-blocked prep plan for an upcoming interview | `interview/plan` |
 | Wants to run practice interview questions with feedback | `interview/practice` |
 | Wants to debrief after a real interview and close gaps | `interview/debrief` |
 | Wants to check if a company is safe to join (red-flag analysis) | `interview-redflag` |
 | Wants to generate CV/PDF | `pdf` |
+| Wants to export a CV as LaTeX/Overleaf .tex | `latex` |
+| Wants a cover letter | `cover` |
 | Evaluates a course/cert | `training` |
 | Evaluates portfolio project | `project` |
 | Asks about application status | `tracker` |

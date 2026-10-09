@@ -250,7 +250,7 @@ career-ops/
 │   └── states.yml               # Kanoniczne statusy
 ├── batch/
 │   ├── batch-prompt.md          # Samodzielny prompt workera
-│   └── batch-runner.sh          # Skrypt orkiestratora
+│   └── README.md                # Hybrid Workflow batch process (see modes/batch.md)
 ├── dashboard/                   # Go TUI viewer pipeline'u
 ├── data/                        # Twoje dane śledzenia (gitignored)
 ├── reports/                     # Raporty ocen (gitignored)

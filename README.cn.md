@@ -263,7 +263,7 @@ career-ops/
 │   └── states.yml               # 规范状态列表
 ├── batch/
 │   ├── batch-prompt.md          # 自包含 worker 提示词
-│   └── batch-runner.sh          # 编排脚本
+│   └── README.md                # Hybrid Workflow batch process (see modes/batch.md)
 ├── dashboard/                   # Go TUI 管道查看器
 ├── data/                        # 你的追踪数据（已 gitignore）
 ├── reports/                     # 评估报告（已 gitignore）

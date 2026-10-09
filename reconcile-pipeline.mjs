@@ -3,7 +3,8 @@
  * reconcile-pipeline.mjs — Sync pipeline.md "Pendientes" with batch-state.tsv
  *
  * THE PROBLEM
- * batch-runner.sh records every evaluated offer in batch/batch-state.tsv, but
+ * The Hybrid Workflow coordinator can record evaluated offers in
+ * batch/batch-state.tsv (see batch/README.md and modes/batch.md), but
  * it never writes back to data/pipeline.md. Offers processed via batch mode
  * therefore stay in the "Pendientes" section forever — the next scan and the
  * next `/career-ops pipeline` run both re-surface them, and they get evaluated

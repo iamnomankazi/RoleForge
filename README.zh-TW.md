@@ -222,7 +222,7 @@ career-ops/
 │   └── states.yml               # 標準狀態清單
 ├── batch/
 │   ├── batch-prompt.md          # 自包含工作器提示
-│   └── batch-runner.sh          # 協調器腳本
+│   └── README.md                # Hybrid Workflow batch process (see modes/batch.md)
 ├── dashboard/                   # Go TUI 管道檢視器
 ├── data/                        # 你的追蹤資料（已 gitignore）
 ├── reports/                     # 評估報告（已 gitignore）

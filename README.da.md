@@ -225,7 +225,7 @@ career-ops/
 │   └── states.yml               # Kanoniske statusser
 ├── batch/
 │   ├── batch-prompt.md          # Selvstændig worker-prompt
-│   └── batch-runner.sh          # Orkestratorscript
+│   └── README.md                # Hybrid Workflow batch process (see modes/batch.md)
 ├── dashboard/                   # Go TUI-viewer til pipelinen
 ├── data/                        # Dine sporingsdata (gitignored)
 ├── reports/                     # Vurderingsrapporter (gitignored)

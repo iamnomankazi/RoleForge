@@ -209,7 +209,7 @@ cover_letter:
 # ── Auto-PDF threshold ──────────────────────────────────────────────────────
 #
 # Auto-PDF threshold during evaluation (used by `/career-ops pipeline` and
-# `bash batch/batch-runner.sh`).
+# Hybrid Workflow batch evaluations; see batch/README.md and modes/batch.md).
 #
 # An offer's tailored CV PDF is auto-generated only when its score is
 # >= this threshold. Generating a PDF costs ~30-60s per offer (Playwright

@@ -280,7 +280,7 @@ career-ops/
 │   └── states.yml               # Statuts canoniques
 ├── batch/
 │   ├── batch-prompt.md          # Consigne pour le traitement par lot
-│   └── batch-runner.sh          # Script d'orchestration
+│   └── README.md                # Hybrid Workflow batch process (see modes/batch.md)
 ├── dashboard/                   # Visualiseur de pipeline TUI en Go
 ├── data/                        # Vos données de suivi (gitignoré)
 ├── reports/                     # Rapports d'évaluation (gitignoré)

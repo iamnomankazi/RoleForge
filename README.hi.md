@@ -374,7 +374,7 @@ career-ops/
 │   └── states.yml               # Canonical statuses
 ├── batch/
 │   ├── batch-prompt.md          # Self-contained worker prompt
-│   └── batch-runner.sh          # Orchestrator script
+│   └── README.md                # Hybrid Workflow batch process (see modes/batch.md)
 ├── dashboard/                   # Go TUI pipeline viewer
 ├── data/                        # आपका tracking data (gitignored)
 ├── reports/                     # Evaluation reports (gitignored)

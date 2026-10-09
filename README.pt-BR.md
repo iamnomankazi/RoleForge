@@ -220,7 +220,7 @@ career-ops/
 │   └── states.yml               # Status canônicos
 ├── batch/
 │   ├── batch-prompt.md          # Prompt autocontido para workers
-│   └── batch-runner.sh          # Script orquestrador
+│   └── README.md                # Hybrid Workflow batch process (see modes/batch.md)
 ├── dashboard/                   # Visualizador de pipeline em Go TUI
 ├── data/                        # Seus dados de rastreamento (gitignored)
 ├── reports/                     # Relatórios de avaliação (gitignored)

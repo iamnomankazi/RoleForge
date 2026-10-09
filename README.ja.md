@@ -220,7 +220,7 @@ career-ops/
 │   └── states.yml               # 正規ステータス
 ├── batch/
 │   ├── batch-prompt.md          # 自己完結型ワーカープロンプト
-│   └── batch-runner.sh          # オーケストレータースクリプト
+│   └── README.md                # Hybrid Workflow batch process (see modes/batch.md)
 ├── dashboard/                   # Go製TUIパイプラインビューア
 ├── data/                        # 追跡データ（gitignore対象）
 ├── reports/                     # 評価レポート（gitignore対象）
