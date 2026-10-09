@@ -148,6 +148,13 @@ test('factually distinct salary, location, and availability labels use only matc
     ['Compensation expectations', 'salary', profile.compensation.target_range],
     ['What salary do you expect?', 'salary', profile.compensation.target_range],
     ['Pay expectation', 'salary', profile.compensation.target_range],
+    ['Pay expectations', 'salary', profile.compensation.target_range],
+    ['Expected pay', 'salary', profile.compensation.target_range],
+    ['Desired pay', 'salary', profile.compensation.target_range],
+    ['Remuneration expectations', 'salary', profile.compensation.target_range],
+    ['What do you expect us to pay for travel expenses?', 'unknown', null],
+    ['What relocation costs should we pay?', 'relocation', null],
+    ['What reimbursement do you expect us to pay?', 'unknown', null],
     ['Current salary', 'salary_details', null],
     ['Salary history', 'salary_details', null],
     ['Previous compensation', 'salary_details', null],
@@ -163,8 +170,13 @@ test('factually distinct salary, location, and availability labels use only matc
     ['City of birth', 'birth_place', null],
     ['Current city', 'city', 'Example City'],
     ['City of residence', 'city', 'Example City'],
+    ['Which city do you currently work in?', 'city', 'Example City'],
+    ['Which city do you currently live in?', 'city', 'Example City'],
+    ['Which city do you currently work/live in?', 'city', 'Example City'],
     ['Which city would you like to work in?', 'preferred_location', null],
     ['Which city do you prefer to work in?', 'preferred_location', null],
+    ['Which city are you willing to work in?', 'preferred_location', null],
+    ['Would you like to work in another city?', 'preferred_location', null],
     ['Preferred work location', 'preferred_location', null],
     ['Desired city', 'preferred_location', null],
     ['Earliest start date', 'availability', profile.currentStatus.availability.start],
@@ -218,7 +230,20 @@ test('authorization and sponsorship labels resolve from the corresponding config
     ['Are you legally authorized to work in Finland?', 'Finland', 'work_authorization', 'Yes'],
     ['Are you eligible to work in Sweden?', 'Sweden', 'work_authorization', 'No'],
     ['Do you require employer immigration support?', 'Germany', 'sponsorship', 'Yes'],
-    ['Are you legally authorized to work in Germany?', 'Finland', 'work_authorization', null],
+    ['Are you legally authorized to work in Germany?', 'Finland', 'work_authorization', 'No'],
+    ['Are you legally authorized in Germany?', 'Finland', 'work_authorization', 'No'],
+    ['Would you require sponsorship if hired in Germany?', 'Finland', 'sponsorship', 'Yes'],
+    ['Do you require sponsorship for employment visa status?', 'Germany', 'sponsorship', 'Yes'],
+    ['Are you legally authorized to work in the United States?', 'United States', 'work_authorization', 'No'],
+    ['Are you legally authorized to work in Finland?', 'Germany', 'work_authorization', 'Yes'],
+    ['Are you legally authorized to work in Finland?', null, 'work_authorization', 'Yes'],
+    ['Are you legally authorized to work in Germany?', null, 'work_authorization', 'No'],
+    ['Are you legally authorized to work in Finland/Sweden?', 'Finland', 'work_authorization', null],
+    ['Are you legally authorized to work in Finland, Sweden?', 'Finland', 'work_authorization', null],
+    ['Are you legally authorized to work in Finland & Sweden?', 'Finland', 'work_authorization', null],
+    ['Are you authorized to work in the EU?', 'Finland', 'work_authorization', null],
+    ['Will you currently or in the future require visa sponsorship?', 'Finland', 'sponsorship', null],
+    ['Are you eligible to work without any restrictions?', 'Finland', 'work_authorization', null],
     ['Are you legally authorized to work in any EU/EEA country?', 'Germany', 'work_authorization', null],
     ['Do you require visa sponsorship?', null, 'sponsorship', null],
     ['Do you require visa sponsorship?', 'Finland or Germany', 'sponsorship', null],
@@ -239,6 +264,71 @@ test('authorization and sponsorship labels resolve from the corresponding config
       assert.equal(result.actions[0]?.value, expected, label);
       assert.deepEqual(result.unresolvedFields, [], label);
     }
+  }
+});
+
+test('country names and aliases preserve distinct jurisdictions without requiring job context', () => {
+  for (const country of [
+    'Germany', 'Deutschland', 'Sweden', 'United States', 'United States of America', 'USA', 'US', 'U.S.',
+    'United Kingdom', 'UK', 'Holland', 'Turkey', 'Czech Republic', 'Ivory Coast',
+    'Equatorial Guinea', 'Papua New Guinea', 'South Sudan', '\u00c5land Islands',
+  ]) {
+    const question = `Are you legally authorized to work in ${country}?`;
+    assert.equal(resolveAuthorizationAnswer(profile, 'work_authorization', { question }), 'No', country);
+    assert.equal(groundedFieldValue(profile, 'work_authorization', { question }), 'No', country);
+    assert.equal(resolveAuthorizationAnswer(profile, 'sponsorship', { question: `Do you require visa sponsorship in ${country}?` }), 'Yes', country);
+  }
+  for (const country of ['Finland', 'Suomi', 'Finland/Suomi']) {
+    const question = `Are you legally authorized to work in ${country}?`;
+    assert.equal(resolveAuthorizationAnswer(profile, 'work_authorization', { question }), 'Yes', country);
+    assert.equal(groundedFieldValue(profile, 'work_authorization', { country: 'Germany', question }), 'Yes', country);
+  }
+  for (const separator of ['/', ', ', ' & ', '; ', ' and ', ' or ']) {
+    for (const question of [
+      `Are you legally authorized to work in Suomi${separator}Deutschland?`,
+      `Do you require sponsorship in U.S.${separator}UK?`,
+    ]) {
+      assert.equal(resolveAuthorizationAnswer(profile, classifyFieldSemantics(field({ label: question })).semantic, {
+        jobCountry: 'Finland', question,
+      }), null, question);
+    }
+  }
+  assert.equal(resolveAuthorizationAnswer(profile, 'sponsorship', {
+    jobCountry: 'Finland', question: 'Do you require us to sponsor your visa?',
+  }), 'No');
+});
+
+test('broad, future, and unrestricted scopes stay unresolved despite a known country or remote arrangement', () => {
+  for (const scope of [
+    'the EU', 'the EEA', 'Europe', 'the European Union', 'the European Economic Area', 'the Schengen area',
+    'any country', 'any European country', 'any countries', 'worldwide', 'anywhere',
+    'Finland in the future', 'Finland at any time', 'Finland now or later',
+    'Finland without restrictions', 'Finland without any restrictions', 'Finland unrestricted',
+    'Finland permanently', 'Finland for an indefinite period', 'Finland for any employer',
+  ]) {
+    for (const [semantic, question] of [
+      ['work_authorization', `Are you legally authorized to work in ${scope}?`],
+      ['sponsorship', `Do you require visa sponsorship in ${scope}?`],
+    ]) {
+      assert.equal(resolveAuthorizationAnswer(profile, semantic, {
+        jobCountry: 'Finland', canEmployFromFinland: true, question,
+      }), null, question);
+    }
+  }
+  assert.equal(resolveAuthorizationAnswer(profile, 'sponsorship', {
+    jobCountry: 'Finland', question: 'Will you ever require visa sponsorship?',
+  }), null);
+  assert.equal(resolveAuthorizationAnswer(profile, 'sponsorship', {
+    jobCountry: 'Finland', question: 'Are you eligible to work without sponsorship?',
+  }), null);
+  for (const jobCountry of [null, '', 'Unknown', 'Exampleland', 'EU', 'EEA', 'Europe', 'Schengen', 'Remote', 'Worldwide', 'Finland/Sweden', 'Finland, Sweden', 'Finland & Sweden']) {
+    for (const semantic of ['work_authorization', 'sponsorship']) {
+      assert.equal(resolveAuthorizationAnswer(profile, semantic, { jobCountry }), null, `${semantic}: ${jobCountry}`);
+    }
+  }
+  for (const context of [{ hiringArrangement: 'remote Finland' }, { canEmployFromFinland: true }, { canEmployFromHomeCountry: true }]) {
+    assert.equal(resolveAuthorizationAnswer(profile, 'work_authorization', context), 'Yes');
+    assert.equal(resolveAuthorizationAnswer(profile, 'sponsorship', context), 'No');
   }
 });
 
@@ -275,7 +365,7 @@ test('configured authorization values override country defaults and incomplete p
   const explicitRemoteQuestion = field({ label: 'Are you legally authorized to work in Germany?' });
   assert.equal(canonicalFieldValue(profile, classifyFieldSemantics(explicitRemoteQuestion), {
     field: explicitRemoteQuestion, context: { jobCountry: 'Germany', canEmployFromFinland: true },
-  }), null);
+  }), 'No');
 });
 
 test('education institution is derived from the synthetic profile rather than source literals', () => {

@@ -120,7 +120,10 @@ export function selectApprovedCv(profile, candidate, jdText) {
   };
 }
 
-export function groundedFieldValue(profile, semantic, { country = null } = {}) {
+export function groundedFieldValue(profile, semantic, { country = null, jobCountry = country, ...context } = {}) {
+  if (['work_authorization', 'sponsorship'].includes(semantic)) {
+    return resolveAuthorizationAnswer(profile, semantic, { ...context, jobCountry });
+  }
   const candidate = profile.candidate;
   const fullName = String(candidate.full_name || '').trim();
   const parts = fullName.split(/\s+/);
@@ -140,8 +143,6 @@ export function groundedFieldValue(profile, semantic, { country = null } = {}) {
     graduation: profile.education.expected_graduation_date || null,
     availability: profile.currentStatus.availability?.start || null,
     salary: profile.compensation.target_range || null,
-    work_authorization: resolveAuthorizationAnswer(profile, 'work_authorization', { jobCountry: country }),
-    sponsorship: resolveAuthorizationAnswer(profile, 'sponsorship', { jobCountry: country }),
     relocation: profile.formRules?.relocation?.value || null,
   };
   return values[semantic] ?? null;

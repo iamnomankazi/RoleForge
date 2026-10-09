@@ -116,7 +116,8 @@ export function classifyFieldSemantics(field = {}) {
   if (/how did you hear|where did you hear|application source|referral source|source detail/.test(text)) {
     return { category: 'source_how_heard', semantic: 'application_source' };
   }
-  if (/(?:preferred|desired) (?:office |work )?(?:location|city)|(?:location|city) preference|which office|office preference|which city.*work|city.*prefer|where.*(?:like|want|wish|prefer).*work/.test(text)) {
+  if (/\b(?:city|location|office|where)\b/.test(text)
+      && /\b(?:would (?:you )?like|want|wish|prefer|preferred|desired|preferences?|willing to work)\b/.test(text)) {
     return { category: 'preferred_location', semantic: 'preferred_location' };
   }
   if (/sponsor|employer support|support from (?:the )?employer|immigration support|visa support|require.*(?:visa|permit)/.test(text)) {
@@ -166,7 +167,7 @@ export function classifyFieldSemantics(field = {}) {
   if (/university|school|institution/.test(text)) return { category: 'education', semantic: 'university' };
   if (/degree|qualification/.test(text)) return { category: 'education', semantic: 'degree' };
   if (/graduat/.test(text)) return { category: 'education', semantic: 'graduation' };
-  if (/\b(?:salary|compensation|pay)\b/.test(text)) {
+  if (/\b(?:salary|compensation|remuneration)\b|\b(?:pay expectations?|expected pay|desired pay)\b/.test(text)) {
     const target = /\b(?:expect|expected|expectations?|desired|target|requested|requirements?)\b/.test(text);
     const history = /\b(?:current|present|previous|prior|last|history|historical)\b/.test(text);
     return { category: 'salary', semantic: target && !history ? 'salary' : 'salary_details' };
@@ -465,14 +466,47 @@ function configuredUniversity(profile) {
   return cleanFormText(match?.[1]) || null;
 }
 
+const COUNTRY_CODES = `AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ
+  CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR
+  GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP
+  KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ
+  NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ
+  TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW`.split(/\s+/);
+const REGION_NAMES = new Intl.DisplayNames(['en'], { type: 'region' });
+const COUNTRY_NAMES = new Map(COUNTRY_CODES.map((code) => [REGION_NAMES.of(code).toLowerCase(), code]));
+for (const [name, code] of [
+  ['USA', 'US'], ['US', 'US'], ['U.S.', 'US'], ['U.S', 'US'], ['United States of America', 'US'],
+  ['UK', 'GB'], ['Holland', 'NL'], ['Deutschland', 'DE'], ['Suomi', 'FI'],
+  ['Turkey', 'TR'], ['Czech Republic', 'CZ'], ['Ivory Coast', 'CI'],
+]) COUNTRY_NAMES.set(name.toLowerCase(), code);
+const COUNTRY_PATTERN = new RegExp(`(?<![\\p{L}\\p{N}_])(${[...COUNTRY_NAMES.keys()]
+  .sort((a, b) => b.length - a.length)
+  .map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  .join('|')})(?![\\p{L}\\p{N}_])`, 'giu');
+
+function namedCountries(text) {
+  return new Set([...cleanFormText(text).matchAll(COUNTRY_PATTERN)]
+    // Lowercase "us" is usually the employer's pronoun, not a jurisdiction.
+    .filter((match) => match[1].toLowerCase() !== 'us' || match[1] === 'US')
+    .map((match) => COUNTRY_NAMES.get(match[1].toLowerCase())));
+}
+
+function countryCode(text) {
+  const country = cleanFormText(text);
+  return COUNTRY_NAMES.get(country.toLowerCase()) || (COUNTRY_CODES.includes(country.toUpperCase()) ? country.toUpperCase() : null);
+}
+
 export function resolveAuthorizationAnswer(profile, semantic, context = {}) {
   if (!['work_authorization', 'sponsorship'].includes(semantic)) return null;
   const rules = formRules(profile);
   const policy = profile?.formRules?.work_authorization || {};
   const arrangement = normalizeFormQuestion(context.hiringArrangement);
-  const country = cleanFormText(context.jobCountry);
-  const normalizedCountry = normalizeFormQuestion(country);
   const question = normalizeFormQuestion(context.question);
+  const countries = namedCountries(context.question);
+  // Broad or lasting rights cannot be inferred from local, time-limited authorization.
+  if (countries.size > 1
+      || /\b(?:eu|eea|europe|european|schengen|any countr(?:y|ies)|worldwide|anywhere)\b/.test(question)
+      || /\b(?:future|ever|at any time|now or later|permanent(?:ly)?|indefinite(?:ly)?|unrestricted|any employers?)\b|\bwithout (?:any )?restrictions?\b/.test(question)) return null;
   const normalizedHomeCountry = normalizeFormQuestion(rules.homeCountry);
   const remoteFromHomeCountry = Boolean(normalizedHomeCountry) && (
     arrangement === `remote ${normalizedHomeCountry}`
@@ -480,19 +514,12 @@ export function resolveAuthorizationAnswer(profile, semantic, context = {}) {
     || context.canEmployFromHomeCountry === true
     || hasConfiguredCountryCapability(context, rules.homeCountry)
   );
-  const explicitJurisdiction = /\b(?:work|employment|sponsorship|visa|permit) (?:in|for) (.+)/.exec(question)?.[1];
-  if (explicitJurisdiction && !/^(?:this country|the (?:country|job|role)|your country)\b/.test(explicitJurisdiction)) {
-    if (!normalizedCountry || !(explicitJurisdiction === normalizedCountry || explicitJurisdiction.startsWith(`${normalizedCountry} `))) return null;
-  }
-  if (explicitJurisdiction && remoteFromHomeCountry && normalizedCountry !== normalizedHomeCountry) return null;
-  const jurisdiction = remoteFromHomeCountry ? normalizedHomeCountry : normalizedCountry;
+  const jurisdiction = countries.size === 1 ? [...countries][0]
+    : countryCode(remoteFromHomeCountry ? rules.homeCountry : context.jobCountry);
   // ambiguous_policy is a review directive, not a factual Yes/No answer.
-  if (!jurisdiction || /\b(?:eu|eea|europe|worldwide|anywhere|remote|unknown|and|or)\b/.test(jurisdiction)
-      || /[,/;&]/.test(country)
-      || /\b(?:eu|eea|permanent|unrestricted)\b|without restrictions|now or.*future/.test(question)) return null;
-  if (explicitJurisdiction && /\b(?:and|or)\b/.test(explicitJurisdiction)) return null;
+  if (!jurisdiction) return null;
   if (semantic === 'sponsorship' && /authori[sz]|eligible to work|right to work|without|not require/.test(question)) return null;
-  const prefix = jurisdiction === 'finland' ? 'finland' : 'outside_finland';
+  const prefix = jurisdiction === 'FI' ? 'finland' : 'outside_finland';
   // Profile key for local work authorization outside Finland is outside_finland_local_authorized.
   const value = semantic === 'sponsorship'
     ? policy[`${prefix}_sponsorship`]
@@ -546,7 +573,9 @@ export function canonicalFieldValue(profile, semantics, {
     return rules.currentLocation.combined;
   }
   if (category === 'work_authorization' || category === 'sponsorship_employer_support') {
-    return resolveAuthorizationAnswer(profile, semantic, { ...context, question: field.questionText || field.groupLabel || field.label });
+    return resolveAuthorizationAnswer(profile, semantic, {
+      ...context, question: [field.questionText, field.groupLabel, field.label].filter(Boolean).join(' '),
+    });
   }
   if (category === 'source_how_heard') return rules.source;
   if (category === 'education') {

@@ -129,6 +129,114 @@ test('localized progression requires a numbered remaining step and all final wor
   assert.equal(classifyApplicationControl({ ...workflow, label: 'Continue', stepIndicator: { current: 1.5, total: 3 } }), 'ambiguous');
 });
 
+test('legacy authorization uses the question jurisdiction and supplied job context without dropdown overrides', () => {
+  const profile = { ...syntheticProfile, formRules: { ...syntheticProfile.formRules, work_authorization: {
+    home_country: 'Finland', finland_authorized: 'Yes', finland_sponsorship: 'No',
+    outside_finland_local_authorized: 'No', outside_finland_sponsorship: 'Yes', ambiguous_policy: 'manual',
+  } } };
+  const cases = [
+    ['Are you legally authorized to work in Finland?', null, 'Yes'],
+    ['Are you legally authorized to work in Finland?', 'Finland', 'Yes'],
+    ['Are you legally authorized in Germany?', 'Finland', 'No'],
+    ['Are you legally authorized to work in the United States?', 'United States', 'No'],
+    ['Would you require sponsorship if hired in Germany?', 'Finland', 'Yes'],
+    ['Do you require sponsorship for employment visa status?', 'Germany', 'Yes'],
+    ['Do you require visa sponsorship?', 'Finland', 'No'],
+    ['Are you legally authorized to work?', 'Germany', 'No'],
+    ['Do you require visa sponsorship?', null, null],
+    ['Are you legally authorized to work?', null, null],
+    ['Are you legally authorized to work in Finland/Sweden?', 'Finland', null],
+    ['Are you legally authorized to work in Finland, Sweden?', 'Finland', null],
+    ['Are you authorized to work in the EU?', 'Finland', null],
+    ['Will you currently or in the future require visa sponsorship?', 'Finland', null],
+    ['Are you eligible to work without any restrictions?', 'Finland', null],
+    ['Are you eligible to work without sponsorship?', 'Finland', null],
+  ];
+  for (const [questionText, jobCountry, expected] of cases) {
+    for (const control of [
+      { tag: 'select', type: 'select-one', options: [{ label: 'Yes', value: 'yes' }, { label: 'No', value: 'no' }] },
+      { tag: 'input', type: 'text', role: 'combobox' },
+      { tag: 'input', type: 'text' },
+    ]) {
+      const snapshot = { fields: [{ ...control, fieldId: 'authorization', label: 'Answer', questionText, required: true }], controls: [] };
+      for (const options of [{ jobCountry }, { context: { jobCountry } }]) {
+        const plan = buildFormPlan(snapshot, profile, {}, options);
+        if (expected === null) {
+          assert.deepEqual(plan.actions, [], questionText);
+          assert.equal(plan.unresolvedFields.length, 1, questionText);
+        } else {
+          assert.equal(plan.actions[0]?.value, expected, questionText);
+          assert.deepEqual(plan.unresolvedFields, [], questionText);
+        }
+      }
+    }
+  }
+  const snapshot = { fields: [{ fieldId: 'authorization', label: 'Work authorization', groupLabel: 'In Finland/Sweden?', required: true }], controls: [] };
+  assert.deepEqual(buildFormPlan(snapshot, profile, {}, { jobCountry: 'Finland' }).actions, []);
+  for (const work_authorization of [
+    { home_country: 'Finland', finland_authorized: 'No' },
+    { home_country: 'Finland' },
+  ]) {
+    const changed = { ...profile, formRules: { ...profile.formRules, work_authorization } };
+    const result = buildFormPlan({ fields: [{
+      fieldId: 'authorization', label: 'Are you legally authorized to work in Finland?', tag: 'select', required: true,
+      options: [{ label: 'Yes', value: 'yes' }, { label: 'No', value: 'no' }],
+    }], controls: [] }, changed, {});
+    if (work_authorization.finland_authorized) assert.equal(result.actions[0]?.value, 'No');
+    else assert.deepEqual(result.actions, []);
+  }
+});
+
+test('legacy classification keeps current city, preferred city, and travel expenses distinct', () => {
+  for (const [label, semantic, value] of [
+    ['Which city do you currently work in?', 'city', 'Example City'],
+    ['Which city do you currently live in?', 'city', 'Example City'],
+    ['Which city would you like to work in?', 'preferred_location', null],
+    ['What do you expect us to pay for travel expenses?', 'free_text', null],
+    ['Expected pay', 'salary', syntheticProfile.compensation.target_range],
+    ['Desired pay', 'salary', syntheticProfile.compensation.target_range],
+    ['Remuneration expectations', 'salary', syntheticProfile.compensation.target_range],
+  ]) {
+    const field = { fieldId: 'distinct', tag: 'input', type: 'text', label, required: true };
+    assert.equal(classifyField(field), semantic, label);
+    const plan = buildFormPlan({ fields: [field], controls: [] }, syntheticProfile, {});
+    if (value === null) {
+      assert.deepEqual(plan.actions, [], label);
+      assert.equal(plan.unresolvedFields[0]?.semantic, semantic, label);
+    } else assert.equal(plan.actions[0]?.value, value, label);
+  }
+});
+
+test('legacy preparation and review retain the supplied job jurisdiction', async () => {
+  const profile = { ...syntheticProfile, formRules: { ...syntheticProfile.formRules, work_authorization: {
+    home_country: 'Finland', finland_authorized: 'Yes', finland_sponsorship: 'No',
+    outside_finland_local_authorized: 'No', outside_finland_sponsorship: 'Yes',
+  } } };
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<form id="application">
+      <label>Email <input name="email" type="email" required></label>
+      <label>Are you legally authorized to work?
+        <select id="authorization" required><option value="">Choose</option><option>Yes</option><option>No</option></select>
+      </label>
+      <label>Do you require sponsorship for employment visa status?
+        <select id="sponsorship" required><option value="">Choose</option><option>Yes</option><option>No</option></select>
+      </label>
+      <button type="submit">Submit application</button>
+    </form>`);
+    const result = await prepareApplicationForm(page, profile, {}, { context: { jobCountry: 'Germany' } });
+    assert.equal(await page.locator('#authorization').inputValue(), 'No');
+    assert.equal(await page.locator('#sponsorship').inputValue(), 'Yes');
+    assert.equal(result.plan.actions.find((action) => action.semantic === 'work_authorization')?.value, 'No');
+    assert.equal(result.plan.actions.find((action) => action.semantic === 'sponsorship')?.value, 'Yes');
+    assert.deepEqual(result.evidence.unresolvedFields, []);
+    assert.equal(result.evidence.finalAction.activated, false);
+  } finally {
+    await browser.close();
+  }
+});
+
 test('text-only cover fields receive the complete bound letter and one-document fields require an explicit combined artifact', () => {
   const profile = syntheticProfile;
   const fullLetter = profile.cvText;

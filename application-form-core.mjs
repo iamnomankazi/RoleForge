@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { groundedFieldValue } from './application-profile.mjs';
+import { classifyFieldSemantics } from './application-form-policy.mjs';
 import { validateNarrativeProvenanceRecord } from './application-evidence.mjs';
 
 export const FINAL_TOKEN = /(?:^|[^\p{L}\p{N}_])(?:apply|submit|send|complete|finish|finali[sz]e|confirm|absenden|senden|bewerben|abschicken|verzenden|versturen|solliciteren|indsend|ansøg|lähetä|hae|valmis|skicka|ansök|envoyer|postuler|soumettre|valider)(?=$|[^\p{L}\p{N}_])/iu;
@@ -162,7 +163,8 @@ export function applicationFormStateFingerprint(snapshot) {
 }
 
 export function classifyField(field) {
-  const label = clean(`${field.label || ''} ${field.name || ''} ${field.placeholder || ''}`).toLowerCase();
+  const label = clean([field.questionText, field.groupLabel, field.label, field.name, field.placeholder].filter(Boolean).join(' ')).toLowerCase();
+  const semantics = classifyFieldSemantics(field);
   if (field.type === 'file') {
     if (/cover|motivation|application letter|supporting statement/.test(label)) return 'cover_letter_upload';
     if (/resume|résumé|cv|curriculum/.test(label)) return 'cv_upload';
@@ -184,6 +186,7 @@ export function classifyField(field) {
   if (/how did you hear|where did you hear|application source|referral source/.test(label)) return 'application_source';
   if (/sponsor|employer support|support from (?:the )?employer|immigration support|visa support/.test(label)) return 'sponsorship';
   if (/work authori[sz](?:ation|ed)?|authori[sz]ed to work|eligible to work|right to work|legally authori[sz](?:ed)?/.test(label)) return 'work_authorization';
+  if (semantics.semantic === 'preferred_location') return 'preferred_location';
   if (/current location|\blocation\b/.test(label)) return 'current_location';
   if (/city|municipality/.test(label)) return 'city';
   if (/country/.test(label)) return 'country';
@@ -192,7 +195,7 @@ export function classifyField(field) {
   if (/graduat/.test(label)) return 'graduation';
   if (/available|start date|notice period/.test(label)) return 'availability';
   if (/relocat/.test(label)) return 'relocation';
-  if (/salary|compensation|pay expectation/.test(label)) return 'salary';
+  if (semantics.category === 'salary') return semantics.semantic;
   if (/cover letter|motivation letter|supporting statement/.test(label) && field.tag === 'textarea') return 'cover_letter_text';
   if (field.type === 'checkbox' || field.type === 'radio') return LEGAL_WORDS.test(label) ? 'legal_consent' : 'choice';
   if (['textarea', 'text'].includes(field.type) || field.tag === 'textarea') return 'free_text';
@@ -234,14 +237,14 @@ function selectArtifact(artifacts, semantic) {
   return null;
 }
 
-function dropdownValue(semantic, profile) {
+function dropdownValue(semantic, profile, context) {
   if (semantic === 'phone_country') return 'Finland';
   if (semantic === 'country') return profile.location.country || 'Finland';
-  if (semantic === 'sponsorship') return groundedFieldValue(profile, semantic, { country: profile.location.country });
-  return groundedFieldValue(profile, semantic);
+  return groundedFieldValue(profile, semantic, context);
 }
 
-export function buildFormPlan(snapshot, profile, artifacts, { candidateId = null } = {}) {
+export function buildFormPlan(snapshot, profile, artifacts, { candidateId = null, context = {}, ...options } = {}) {
+  const formContext = { ...context, ...options };
   const actions = [];
   const unresolvedFields = [];
   const hasVerifiedFormKey = Object.prototype.hasOwnProperty.call(snapshot || {}, 'applicationFormId');
@@ -273,6 +276,9 @@ export function buildFormPlan(snapshot, profile, artifacts, { candidateId = null
     }
     let value;
     let unresolvedReason = null;
+    const fieldContext = {
+      ...formContext, question: [field.questionText, field.groupLabel, field.label].filter(Boolean).join(' '),
+    };
     if (semantic === 'cover_letter_text' && artifacts.coverLetterTextContent && artifacts.coverLetterTextProvenance) {
       const exactCandidateId = clean(candidateId);
       if (!exactCandidateId) {
@@ -290,8 +296,8 @@ export function buildFormPlan(snapshot, profile, artifacts, { candidateId = null
         }
       }
     } else if (semantic === 'free_text') value = null;
-    else if (['phone_country', 'country', 'sponsorship', 'work_authorization', 'relocation'].includes(semantic)) value = dropdownValue(semantic, profile);
-    else value = groundedFieldValue(profile, semantic);
+    else if (['phone_country', 'country', 'sponsorship', 'work_authorization', 'relocation'].includes(semantic)) value = dropdownValue(semantic, profile, fieldContext);
+    else value = groundedFieldValue(profile, semantic, fieldContext);
 
     if (!value) {
       if (field.required) unresolvedFields.push({
@@ -304,14 +310,6 @@ export function buildFormPlan(snapshot, profile, artifacts, { candidateId = null
     }
     if (semantic === 'phone' && applicationFields.some((item) => classifyField(item) === 'phone_country')) {
       value = clean(value).replace(/^\+?358[\s-]*/, '');
-    }
-    const optionLabels = (field.options || []).flatMap((option) => [option.label, option.value]).map((item) => clean(item).toLowerCase());
-    if (semantic === 'work_authorization' && (
-      optionLabels.some((item) => /^(yes|no)$/.test(item))
-      || field.role === 'combobox'
-      || field.autocomplete === 'list'
-    )) {
-      value = String(profile.location.country || '').toLowerCase() === 'finland' ? 'Yes' : 'No';
     }
     const control = field.tag === 'select' ? 'select'
       : (field.role === 'combobox' || field.autocomplete === 'list') ? 'autocomplete'
@@ -795,9 +793,9 @@ export async function executeFormPlan(page, plan) {
   return { completed, uploadedArtifacts, committedSelections, unresolvedFields };
 }
 
-export async function reviewApplicationForm(page, profile, artifacts, execution, { candidateId = null } = {}) {
+export async function reviewApplicationForm(page, profile, artifacts, execution, options = {}) {
   const snapshot = await inspectApplicationForm(page);
-  const plan = buildFormPlan(snapshot, profile, artifacts, { candidateId });
+  const plan = buildFormPlan(snapshot, profile, artifacts, options);
   const applicationFields = snapshot.fields.filter((field) => snapshot.applicationFormId
     && field.formId === snapshot.applicationFormId && field.applicationFormOwned !== false);
   const requiredMissing = applicationFields.filter((field) => field.visible !== false && field.required && !field.disabled
@@ -833,14 +831,14 @@ export async function reviewApplicationForm(page, profile, artifacts, execution,
   return { snapshot, plan, evidence };
 }
 
-async function prepareApplicationFormGuarded(page, profile, artifacts, { maxPasses = 4, candidateId = null } = {}) {
+async function prepareApplicationFormGuarded(page, profile, artifacts, { maxPasses = 4, ...options } = {}) {
   const aggregate = { completed: [], uploadedArtifacts: [], committedSelections: [], unresolvedFields: [] };
   const completedIds = new Set();
   for (let pass = 0; pass < maxPasses; pass += 1) {
     const snapshot = await inspectApplicationForm(page);
     const gate = classifyUserGate(snapshot);
-    if (gate) return { gate, ...(await reviewApplicationForm(page, profile, artifacts, aggregate, { candidateId })) };
-    const plan = buildFormPlan(snapshot, profile, artifacts, { candidateId });
+    if (gate) return { gate, ...(await reviewApplicationForm(page, profile, artifacts, aggregate, options)) };
+    const plan = buildFormPlan(snapshot, profile, artifacts, options);
     const pending = { ...plan, actions: plan.actions.filter((action) => !completedIds.has(action.fieldId)) };
     if (!pending.actions.length) break;
     const result = await executeFormPlan(page, pending);
@@ -853,7 +851,7 @@ async function prepareApplicationFormGuarded(page, profile, artifacts, { maxPass
     aggregate.committedSelections.push(...result.committedSelections);
     aggregate.unresolvedFields.push(...result.unresolvedFields);
   }
-  const reviewed = await reviewApplicationForm(page, profile, artifacts, aggregate, { candidateId });
+  const reviewed = await reviewApplicationForm(page, profile, artifacts, aggregate, options);
   if (reviewed.evidence.captcha.manualActionRequired) {
     return {
       ...reviewed,
