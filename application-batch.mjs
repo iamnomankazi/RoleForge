@@ -12,6 +12,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   statSync,
@@ -33,6 +34,7 @@ import {
   validateArtifactRecord,
 } from './application-integrity.mjs';
 import { GENERIC_APPLICATION_CLASSIFICATION_SEMANTICS } from './application-reasoning.mjs';
+import { normalizeTextKey, parseTrackerRow, resolveColumns } from './tracker-parse.mjs';
 
 export const ROOT = dirname(fileURLToPath(import.meta.url));
 export const APPLICATION_BATCH_MANIFEST_SCHEMA_VERSION = 2;
@@ -370,6 +372,43 @@ function selectSourceCandidates(context, selectedCandidateIds, selectedUrls) {
   return selected;
 }
 
+function assertNoDuplicateApplications(root, selected) {
+  const matches = (candidate, row) => normalizeTextKey(candidate.company) === normalizeTextKey(row.company)
+    && normalizeTextKey(candidate.title) === normalizeTextKey(row.role ?? row.title);
+  const refuse = (candidate, conflict) => {
+    throw new Error(`Duplicate application for ${candidate.company} — ${candidate.title}: ${conflict}. To override, pass --allow-duplicate "<reason>" with an explicit reason.`);
+  };
+  const trackerPath = join(resolve(root), 'data', 'applications.md');
+  if (existsSync(trackerPath)) {
+    const lines = readFileSync(trackerPath, 'utf8').split('\n');
+    const columns = resolveColumns(lines);
+    for (const line of lines) {
+      const row = parseTrackerRow(line, columns);
+      if (!row) continue;
+      for (const candidate of selected) {
+        if (matches(candidate, row)) refuse(candidate, `tracker row #${row.num} (${row.status}) in ${trackerPath}`);
+      }
+    }
+  }
+  const batchesRoot = applicationBatchRoot(root);
+  if (!existsSync(batchesRoot)) return;
+  for (const entry of readdirSync(batchesRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+    const manifestPath = join(batchesRoot, entry.name, 'manifest.json');
+    if (!existsSync(manifestPath)) continue;
+    const { manifest, statePath } = loadManifest(manifestPath, { root });
+    const conflicts = selected.filter((candidate) => manifest.candidates.some((row) => matches(candidate, row)));
+    if (!conflicts.length) continue;
+    const state = existsSync(statePath) ? loadBatchState(manifestPath, { root }).state : null;
+    for (const candidate of conflicts) {
+      if (manifest.candidates.some((row, index) => matches(candidate, row)
+          && state?.candidates[index]?.state !== 'abandoned')) {
+        refuse(candidate, `application batch ${manifest.batchId}`);
+      }
+    }
+  }
+}
+
 export function createApplicationBatch({
   root = ROOT,
   sourceRunId,
@@ -377,12 +416,19 @@ export function createApplicationBatch({
   selectedUrls = [],
   batchId = null,
   legacyImport = null,
+  allowDuplicateReason = null,
   now = new Date(),
 } = {}) {
+  const duplicateReason = allowDuplicateReason == null ? null : inline(allowDuplicateReason);
+  if (duplicateReason !== null && !duplicateReason) throw new Error('--allow-duplicate requires a non-empty reason');
   const runId = requireSafeId(sourceRunId, 'source run ID');
   const source = sourceContext(root, runId);
   const selected = selectSourceCandidates(source, selectedCandidateIds, selectedUrls);
   const id = requireSafeId(batchId || generateBatchId(runId), 'batch ID');
+  const batchesRoot = applicationBatchRoot(root);
+  const batchDir = join(batchesRoot, id);
+  if (existsSync(batchDir)) throw new Error(`EEXIST: Application-batch directory already exists: ${batchDir}`);
+  if (duplicateReason === null) assertNoDuplicateApplications(root, selected);
   const manifest = {
     schemaVersion: APPLICATION_BATCH_MANIFEST_SCHEMA_VERSION,
     batchId: id,
@@ -391,14 +437,13 @@ export function createApplicationBatch({
     expectedCandidateCount: selected.length,
     sourceIntegrity: source.integrity,
     ...(legacyImport ? { legacyImport } : {}),
+    ...(duplicateReason !== null ? { duplicateOverride: { reason: duplicateReason } } : {}),
     candidates: selected.map((candidate, index) => manifestCandidate(candidate, index + 1)),
   };
   manifest.scopeHash = manifestScopeHash(manifest);
   validateManifest(manifest);
 
-  const batchesRoot = applicationBatchRoot(root);
   mkdirSync(batchesRoot, { recursive: true });
-  const batchDir = join(batchesRoot, id);
   mkdirSync(batchDir);
   const manifestPath = join(batchDir, 'manifest.json');
   const statePath = join(batchDir, 'state.json');
@@ -443,8 +488,14 @@ function validateManifestCandidate(candidate, index, manifest) {
 function validateManifestV2(manifest) {
   assertKnownFields(manifest, new Set([
     'schemaVersion', 'batchId', 'sourceRunId', 'createdAt', 'expectedCandidateCount',
-    'sourceIntegrity', 'legacyImport', 'candidates', 'scopeHash',
+    'sourceIntegrity', 'legacyImport', 'duplicateOverride', 'candidates', 'scopeHash',
   ]), 'application-batch manifest');
+  if (manifest.duplicateOverride != null) {
+    assertKnownFields(manifest.duplicateOverride, new Set(['reason']), 'duplicate override');
+    if (typeof manifest.duplicateOverride.reason !== 'string' || !inline(manifest.duplicateOverride.reason)) {
+      throw new Error('Duplicate override requires a non-empty reason');
+    }
+  }
   requireSafeId(manifest.batchId, 'manifest batch ID');
   requireSafeId(manifest.sourceRunId, 'manifest source run ID');
   if (!Array.isArray(manifest.candidates) || !manifest.candidates.length) throw new Error('Manifest must contain at least one candidate');
@@ -1858,6 +1909,7 @@ function usage() {
     'Usage:',
     '  node application-batch.mjs create --source-run <run-id> [--batch-id <batch-id>] --candidate-id <exact-id> [--candidate-id <exact-id> ...]',
     '  node application-batch.mjs create --source-run <run-id> [--batch-id <batch-id>] --url <exact-url> [--url <exact-url> ...]',
+    '  Creation refuses company+role duplicates in the tracker or non-abandoned batches; use --allow-duplicate "<reason>" to override.',
     '  node application-batch.mjs bind-artifact --manifest <manifest.json> (--candidate-id <id>|--candidate-url <url>) --type <cv|cover_letter|cover_letter_text|combined_document> --file <output/path> [--source-cv-variant <variant>] [--created-at <ISO>] [--replace]',
     '  node application-batch.mjs preflight --manifest <manifest.json> [--confirm-batch <exact-batch-id>]',
     '  Progress states are written only by the locked canonical browser executor; operators may not attest form_prepared.',
@@ -1873,13 +1925,14 @@ async function main() {
   if (command === 'create') {
     const options = parseOptions(argv, {
       repeated: ['candidate-id', 'url'],
-      allowed: ['source-run', 'batch-id', 'candidate-id', 'url'],
+      allowed: ['source-run', 'batch-id', 'candidate-id', 'url', 'allow-duplicate'],
     });
     const result = createApplicationBatch({
       sourceRunId: options['source-run'],
       batchId: options['batch-id'] || null,
       selectedCandidateIds: options['candidate-id'],
       selectedUrls: options.url,
+      allowDuplicateReason: options['allow-duplicate'] ?? null,
     });
     console.log(JSON.stringify({
       batchId: result.manifest.batchId,

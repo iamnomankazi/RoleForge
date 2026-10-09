@@ -167,6 +167,7 @@ test('controlled local Phase 4 scan-to-form acceptance stops safely at form_prep
     const candidateId = run.candidates[0].candidate_id;
     const batch = createApplicationBatch({
       root, sourceRunId: run.manifest.run_id, batchId: 'phase4-acceptance-batch', selectedCandidateIds: [candidateId],
+      allowDuplicateReason: 'Prepare the fictional application already evaluated in the acceptance tracker.',
     });
     assert.deepEqual(batch.manifest.candidates.map((row) => row.candidate_id), [candidateId]);
     const plan = createDocumentPlan({ manifestPath: batch.manifestPath, candidateId, root });

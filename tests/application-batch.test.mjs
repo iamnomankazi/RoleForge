@@ -102,7 +102,7 @@ function withFixture(callback) {
   }
 }
 
-function createOne(fixture, batchId = 'phase-two-one') {
+function createOne(fixture, batchId = 'phase-two-one', options = {}) {
   const candidate = fixture.candidates[1];
   return createApplicationBatch({
     root: fixture.root,
@@ -110,6 +110,7 @@ function createOne(fixture, batchId = 'phase-two-one') {
     batchId,
     selectedCandidateIds: [candidate.candidate_id],
     now: new Date('2026-07-01T08:00:00.000Z'),
+    ...options,
   });
 }
 
@@ -165,6 +166,7 @@ test('exact ID is preferred while URL aliases remain backward compatible', () =>
   });
   const byUrl = createApplicationBatch({
     root: fixture.root, sourceRunId: RUN_ID, batchId: 'by-url', selectedUrls: [selected.url],
+    allowDuplicateReason: 'Compare URL selection with the existing ID-selected fixture batch.',
   });
   assert.equal(byId.manifest.candidates[0].candidate_id, selected.candidate_id);
   assert.equal(byUrl.manifest.candidates[0].candidate_id, selected.candidate_id);
@@ -253,7 +255,9 @@ test('execution lock heartbeat and process-start identity protect against PID re
 
 test('persistent candidate claim blocks cross-batch hijacking until explicit close', () => withFixture((fixture) => {
   const firstBatch = createOne(fixture, 'candidate-claim-one');
-  const secondBatch = createOne(fixture, 'candidate-claim-two');
+  const secondBatch = createOne(fixture, 'candidate-claim-two', {
+    allowDuplicateReason: 'Exercise execution claim protection across intentionally duplicate fixture batches.',
+  });
   const candidateId = bindCvAndConfirm(fixture, firstBatch);
   bindCvAndConfirm(fixture, secondBatch);
   const first = acquireBatchExecutionLock(firstBatch.manifestPath, {
@@ -410,7 +414,9 @@ test('missing CV binding and post-confirmation artifact replacement fail executi
     /no bound CV artifact/,
   );
 
-  const bound = createOne(fixture, 'artifact-file-tamper');
+  const bound = createOne(fixture, 'artifact-file-tamper', {
+    allowDuplicateReason: 'Exercise artifact tampering independently of the missing-CV fixture batch.',
+  });
   const candidateId = bindCvAndConfirm(fixture, bound);
   writeFileSync(fixture.cv, 'unapproved replacement bytes');
   assert.throws(
@@ -557,7 +563,9 @@ test('unsupported future manifest and state major versions are rejected', () => 
   writeFileSync(created.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   assert.throws(() => loadBatchState(created.manifestPath, { root: fixture.root }), /Unsupported future application-batch manifest/);
 
-  const stateCreated = createOne(fixture, 'future-state-schema');
+  const stateCreated = createOne(fixture, 'future-state-schema', {
+    allowDuplicateReason: 'Exercise future state schemas independently of the future manifest fixture batch.',
+  });
   const statePath = join(dirname(stateCreated.manifestPath), 'state.json');
   const state = JSON.parse(readFileSync(statePath, 'utf8'));
   state.schemaVersion = 99;

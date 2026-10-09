@@ -60,12 +60,13 @@ function withFixture(callback) {
   }
 }
 
-function createConfirmed(fixture, batchId = 'confirmed-batch') {
+function createConfirmed(fixture, batchId = 'confirmed-batch', options = {}) {
   const created = createApplicationBatch({
     root: fixture.root,
     sourceRunId: RUN_ID,
     batchId,
     selectedCandidateIds: [fixture.candidate.candidate_id],
+    ...options,
   });
   bindCandidateArtifact(created.manifestPath, fixture.candidate.candidate_id, {
     root: fixture.root, artifactType: 'cv', filePath: fixture.cv,
@@ -99,7 +100,9 @@ test('executor fails before browser work when preflight, source, or artifacts dr
     /has not passed explicit preflight confirmation/,
   );
 
-  const confirmed = createConfirmed(fixture, 'source-drift');
+  const confirmed = createConfirmed(fixture, 'source-drift', {
+    allowDuplicateReason: 'Exercise source drift independently of the unconfirmed fixture batch.',
+  });
   const sourceCandidates = join(fixture.root, 'output', 'scan-runs', RUN_ID, 'candidates.json');
   writeFileSync(sourceCandidates, `${readFileSync(sourceCandidates, 'utf8')} `);
   assert.throws(
