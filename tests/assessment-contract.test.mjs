@@ -118,9 +118,103 @@ test('legacy free-text blockers stay legacy without invented codes', () => {
   }
 });
 
+test('a nested literal fence does not close the fenced summary before typed blockers', () => {
+  const markdown = `## Machine Summary
+
+\`\`\`yaml
+company: Example
+role: Developer
+fit_score: 4.5
+blockers: []
+flags: []
+liveness: confirmed
+location_country: FI
+top_strengths:
+  - |
+    \`\`\`
+    synthetic literal content
+    \`\`\`
+prescreen:
+  blockers:
+    - code: language_required
+      evidence: German required
+  flags: []
+\`\`\`
+## A) Role
+`;
+  const parsed = parseReportMachineSummary(markdown);
+  assert.equal(parsed.legacy, false);
+  assert.equal(parsed.prescreen.blockers[0].code, 'language_required');
+  assert.equal(validateMachineSummary(parsed).action, 'skip');
+});
+
+test('headings in YAML block evidence do not end the fenced summary', () => {
+  const markdown = `## Machine Summary
+
+\`\`\`yaml
+company: Example
+role: Developer
+fit_score: 4.5
+blockers: []
+flags: []
+liveness: confirmed
+location_country: FI
+evidence: |
+  ## Qualifications
+  Synthetic qualifications evidence.
+\`\`\`
+## A) Role
+`;
+  const parsed = parseReportMachineSummary(markdown);
+  assert.equal(parsed.legacy, false);
+  assert.match(parsed.evidence, /## Qualifications/);
+  assert.equal(validateMachineSummary(parsed).action, 'apply');
+});
+
+test('plain string blocker and flag arrays remain legacy and preserve their text', () => {
+  const markdown = `## Machine Summary
+
+\`\`\`yaml
+company: Example
+role: Developer
+score: 4.5
+blockers:
+  - German required
+flags:
+  - Check sponsorship
+location_country: FI
+\`\`\`
+`;
+  const parsed = parseReportMachineSummary(markdown);
+  assert.equal(parsed.legacy, true);
+  assert.deepEqual(parsed.blockers, ['German required']);
+  assert.deepEqual(parsed.flags, ['Check sponsorship']);
+});
+
+test('nested fence in an indented legacy summary remains part of its YAML evidence', () => {
+  const markdown = `## Machine Summary
+
+    company: Example
+    role: Developer
+    score: 4.5
+    evidence: |
+        \`\`\`
+        ## Qualifications
+        \`\`\`
+    blockers:
+      - German required
+
+## A) Role
+`;
+  const parsed = parseReportMachineSummary(markdown);
+  assert.equal(parsed.legacy, true);
+  assert.match(parsed.evidence, /## Qualifications/);
+  assert.deepEqual(parsed.blockers, ['German required']);
+});
+
 test('missing, malformed, duplicate-key, and partial new summaries fail validation', () => {
   assert.equal(parseReportMachineSummary('# No summary'), null);
-  for (const markdown of ['## Machine Summary\n\`\`\`yaml\ncompany: Example', '## Machine Summary\n\`\`\`yaml\nfoo: [\n\`\`\`', '## Machine Summary\n\`\`\`yaml\ncompany: One\ncompany: Two\n\`\`\`', '## Machine Summary\n\`\`\`yaml\nflags: []\n\`\`\`']) {
+  for (const markdown of ['## Machine Summary\n\`\`\`yaml\ncompany: Example', '## Machine Summary\n\`\`\`yaml\nfoo: [\n\`\`\`', '## Machine Summary\n\`\`\`yaml\ncompany: One\ncompany: Two\n\`\`\`', '## Machine Summary\n\`\`\`yaml\nfit_score: 4.5\nflags: []\n\`\`\`']) {
     const parsed = parseReportMachineSummary(markdown);
     assert.equal(parsed.legacy, false);
     assert.equal(validateMachineSummary(parsed).valid, false);

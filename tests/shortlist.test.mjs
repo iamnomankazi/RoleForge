@@ -56,6 +56,52 @@ test('sections derive actions, skip is count only, legacy reports are separate',
   assert.ok(markdown.includes('legacy.md'));
 });
 
+test('nested YAML fence layout retains blockers and free-text arrays route as legacy', (t) => {
+  const { reports } = fixture(t);
+  writeFileSync(join(reports, 'blocked.md'), `## Machine Summary
+
+\`\`\`yaml
+company: Synthetic
+role: Developer
+fit_score: 4.5
+blockers: []
+flags: []
+liveness: confirmed
+location_country: FI
+top_strengths:
+  - |
+    \`\`\`
+    Synthetic literal content
+    \`\`\`
+prescreen:
+  blockers:
+    - code: language_required
+      evidence: German required
+  flags: []
+\`\`\`
+## A) Role
+`);
+  writeFileSync(join(reports, 'old-text.md'), `## Machine Summary
+
+\`\`\`yaml
+company: Legacy
+role: Developer
+score: 4.5
+blockers:
+  - German required
+flags:
+  - Check sponsorship
+location_country: FI
+\`\`\`
+`);
+  const result = collectReports({ reports });
+  assert.equal(result.apply.length, 0);
+  assert.equal(result.review.length, 0);
+  assert.deepEqual(result.skip.map((entry) => entry.report.split(/[\\/]/).at(-1)), ['blocked.md']);
+  assert.deepEqual(result.legacy.map((entry) => entry.report.split(/[\\/]/).at(-1)), ['old-text.md']);
+  assert.equal(result.invalid.length, 0);
+});
+
 test('invalid and contradictory reports never enter Apply or Review', (t) => {
   const { reports, add, out } = fixture(t);
   add('bad-action.md', { action: 'skip' });

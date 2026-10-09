@@ -100,18 +100,39 @@ export function validateMachineSummary(obj) {
 export function parseReportMachineSummary(markdown) {
   if (typeof markdown !== 'string') return null;
   const lines = markdown.replace(/^\uFEFF/, '').split(/\r?\n/);
-  const start = lines.findIndex((line) => /^\s*#{2,6}\s+Machine Summary\s*$/i.test(line));
+  const isHeading = (line) => /^ {0,3}#{1,6}\s+/.test(line);
+  const start = lines.findIndex((line) => /^ {0,3}#{2,6}\s+Machine Summary\s*$/i.test(line));
   if (start < 0) return null;
-  let end = lines.findIndex((line, index) => index > start && /^\s*#{1,6}\s+/.test(line));
-  if (end < 0) end = lines.length;
-  const section = lines.slice(start + 1, end);
-  const fence = section.findIndex((line) => /^\s*(`{3,}|~{3,})(?:ya?ml)?\s*$/i.test(line));
+  let end = lines.length;
+  let fenceIndex = -1;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (isHeading(lines[index])) { end = index; break; }
+    if (/^ {0,3}(?:`{3,}|~{3,})(?:ya?ml)?[ \t]*$/i.test(lines[index])) {
+      fenceIndex = index;
+      break;
+    }
+  }
+  let section = lines.slice(start + 1, end);
   let body = section;
-  if (fence >= 0) {
-    const marker = section[fence].trim().match(/^(`+|~+)/)[0];
-    const close = section.findIndex((line, index) => index > fence && line.trim() === marker);
+  if (fenceIndex >= 0) {
+    const opener = lines[fenceIndex].match(/^( *)(`{3,}|~{3,})(?:ya?ml)?[ \t]*$/i);
+    const openingIndent = opener[1].length;
+    const marker = opener[2];
+    const closingFence = /^ *(\`+|~+)[ \t]*$/;
+    let close = -1;
+    for (let index = fenceIndex + 1; index < lines.length; index += 1) {
+      const candidate = lines[index].match(closingFence);
+      if (candidate && candidate[1][0] === marker[0] && candidate[1].length >= marker.length
+        && lines[index].match(/^ */)[0].length <= openingIndent) {
+        close = index;
+        break;
+      }
+    }
     if (close < 0) return { legacy: false, errors: ['Machine Summary YAML fence is not closed'] };
-    body = section.slice(fence + 1, close);
+    end = lines.findIndex((line, index) => index > close && isHeading(line));
+    if (end < 0) end = lines.length;
+    section = lines.slice(start + 1, end);
+    body = lines.slice(fenceIndex + 1, close);
   } else {
     // Older reports also use Markdown's four-space indented YAML blocks.
     while (body.length && !body[0].trim()) body.shift();
@@ -128,8 +149,8 @@ export function parseReportMachineSummary(markdown) {
   try {
     const summary = yaml.load(body.map((line) => line.slice(indent)).join('\n'), { schema: yaml.JSON_SCHEMA });
     if (!object(summary)) return { legacy: false, errors: ['Machine Summary must contain a YAML object'] };
-    const modern = ['fit_score', 'fit_band', 'action', 'flags', 'review_reason', 'liveness', 'prescreen'].some((key) => own(summary, key))
-      || (Array.isArray(summary.blockers) && summary.blockers.some(object));
+    const modern = ['fit_score', 'action', 'fit_band', 'review_reason', 'liveness', 'prescreen'].some((key) => own(summary, key))
+      || ['blockers', 'flags'].some((key) => Array.isArray(summary[key]) && summary[key].some(object));
     return { ...summary, legacy: !modern };
   } catch (error) {
     return { legacy: false, errors: [`Invalid Machine Summary YAML: ${error.message}`] };
