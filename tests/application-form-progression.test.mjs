@@ -185,11 +185,11 @@ test('untyped option and Add another buttons keep their handlers under the guard
   }
 });
 
-test('capture guards recheck every early activation event against the live final label and step', async () => {
+test('capture guards recheck every activation event against the live final label and step', async () => {
   const browser = await chromium.launch({ headless: true });
   try {
-    for (const activation of ['pointerdown', 'mousedown', 'touchstart', 'click', 'auxclick', 'Enter', ' ']) {
-      const type = ['Enter', ' '].includes(activation) ? 'keydown' : activation;
+    for (const activation of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'click', 'auxclick', 'dblclick', 'keydown:Enter', 'keydown: ', 'keyup:Enter', 'keyup: ']) {
+      const [type, key] = activation.split(':');
       for (const mutation of ['label', 'last-step']) {
         const page = await browser.newPage();
         await page.setContent(`
@@ -209,22 +209,161 @@ test('capture guards recheck every early activation event against the live final
         assert.equal(await grantProgressionPermit(page, control, {
           applicationIdentity: 'fixture', stateFingerprint: applicationFormStateFingerprint(snapshot),
         }), true);
-        const dispatched = await page.evaluate(({ type, mutation, activation }) => {
+        const dispatched = await page.evaluate(({ type, mutation, key }) => {
           const control = document.getElementById('continue');
           if (mutation === 'label') control.textContent = 'Absenden';
           else { step.dataset.careerOpsStep = '2'; step.textContent = 'Step 2 of 2'; }
           control.focus();
-          const event = type === 'keydown'
-            ? new KeyboardEvent(type, { key: activation, bubbles: true, cancelable: true })
+          const event = ['keydown', 'keyup'].includes(type)
+            ? new KeyboardEvent(type, { key, bubbles: true, cancelable: true })
             : new Event(type, { bubbles: true, cancelable: true });
           return control.dispatchEvent(event);
-        }, { type, mutation, activation });
+        }, { type, mutation, key });
         assert.equal(dispatched, false, `${activation}: ${mutation}`);
         assert.equal(await page.evaluate(() => window.handlerCalls || 0), 0, `${activation}: ${mutation}`);
         assert.equal(await page.evaluate(() => window.submits || 0), 0, `${activation}: ${mutation}`);
         await removeOperationalSubmissionGuard(page);
         await page.close();
       }
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a permitted gesture relabelled to Submit blocks release and double-click handlers', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    for (const [start, release, key] of [
+      ['mousedown', 'mouseup'], ['pointerdown', 'pointerup'], ['touchstart', 'touchend'],
+      ['keydown', 'keyup', 'Enter'], ['keydown', 'keyup', ' '], ['mousedown', 'dblclick'],
+    ]) {
+      const page = await browser.newPage();
+      await page.setContent(`
+        <div data-career-ops-wizard><p data-career-ops-step="1" data-career-ops-total-steps="2">Step 1 of 2</p>
+        <form id="application"><label>Email<input name="email"></label>
+          <button id="continue" type="submit" aria-label="Continue application">Continue</button>
+        </form></div><script>
+          const control = document.getElementById('continue');
+          control.addEventListener('${start}', () => { window.started=true; control.textContent='Submit application'; });
+          control.addEventListener('${release}', () => { window.sent=true; });
+        </script>
+      `);
+      const snapshot = await inspectOperationalApplicationForm(page);
+      assert.equal(await grantProgressionPermit(page, snapshot.controls.find((row) => row.text === 'Continue'), {
+        applicationIdentity: 'fixture', stateFingerprint: applicationFormStateFingerprint(snapshot),
+      }), true);
+      const dispatched = await page.evaluate(({ start, release, key }) => {
+        const control = document.getElementById('continue');
+        control.focus();
+        const event = (type) => key
+          ? new KeyboardEvent(type, { key, bubbles: true, cancelable: true })
+          : new Event(type, { bubbles: true, cancelable: true });
+        control.dispatchEvent(event(start));
+        return control.dispatchEvent(event(release));
+      }, { start, release, key });
+      assert.equal(await page.evaluate(() => window.started || false), true, release);
+      assert.equal(dispatched, false, release);
+      assert.equal(await page.evaluate(() => window.sent || false), false, release);
+      await removeOperationalSubmissionGuard(page);
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a permitted control losing its form during mousedown still blocks its final click', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    for (const mutation of ['move-control', 'remove-form']) {
+      const page = await browser.newPage();
+      const button = `<button id="continue" type="submit" aria-label="Continue application"${mutation === 'remove-form' ? ' form="application"' : ''}>Continue</button>`;
+      await page.setContent(`
+        <div data-career-ops-wizard><p data-career-ops-step="1" data-career-ops-total-steps="2">Step 1 of 2</p>
+        <form id="application"><label>Email<input name="email"></label>
+          ${button}
+        </form></div><script>
+          const control = document.getElementById('continue');
+          control.addEventListener('mousedown', () => {
+            window.started=true;
+            if ('${mutation}' === 'move-control') document.body.append(control);
+            else application.remove();
+            control.innerHTML='<span>Submit application</span>';
+          });
+          control.addEventListener('click', () => { window.sent=true; });
+        </script>
+      `);
+      const snapshot = await inspectOperationalApplicationForm(page);
+      assert.equal(await grantProgressionPermit(page, snapshot.controls.find((row) => row.text === 'Continue'), {
+        applicationIdentity: 'fixture', stateFingerprint: applicationFormStateFingerprint(snapshot),
+      }), true);
+      const dispatched = await page.evaluate((mutation) => {
+        const control = document.getElementById('continue');
+        if (mutation === 'remove-form') document.body.append(control);
+        control.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        return control.querySelector('span').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      }, mutation);
+      assert.equal(await page.evaluate(() => window.started || false), true, mutation);
+      assert.equal(await page.locator('#continue').evaluate((control) => control.form), null, mutation);
+      assert.equal(dispatched, false, mutation);
+      assert.equal(await page.evaluate(() => window.sent || false), false, mutation);
+      await removeOperationalSubmissionGuard(page);
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test('shadow controls use their composed path and final labels outside forms remain activatable', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    for (const placement of ['shadow-form', 'outer-form', 'outside-form']) {
+      const page = await browser.newPage();
+      await page.setContent(`
+        <div data-career-ops-wizard><p data-career-ops-step="1" data-career-ops-total-steps="2">Step 1 of 2</p>
+        <form id="application"><label>Email<input name="email"></label>
+          <button id="continue" type="submit" aria-label="Continue application">Continue</button>
+          ${placement === 'outer-form' ? '<div id="host" role="button">Open</div>' : ''}
+        </form></div>${placement !== 'outer-form' ? '<div id="host" role="button">Open</div>' : ''}
+        <button id="entry" type="button">Apply</button>
+      `);
+      const snapshot = await inspectOperationalApplicationForm(page);
+      assert.equal(await grantProgressionPermit(page, snapshot.controls.find((row) => row.text === 'Continue'), {
+        applicationIdentity: 'fixture', stateFingerprint: applicationFormStateFingerprint(snapshot),
+      }), true);
+      const results = await page.evaluate((placement) => {
+        const root = document.getElementById('host').attachShadow({ mode: 'open' });
+        const button = '<button type="button"><span>Submit application</span></button>';
+        root.innerHTML = placement === 'shadow-form' ? `<form>${button}</form>` : button;
+        const control = root.querySelector('button');
+        control.focus();
+        const results = [];
+        for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'click', 'auxclick', 'dblclick', 'keydown', 'keyup']) {
+          let calls = 0;
+          let entries = 0;
+          control.addEventListener(type, () => { calls += 1; }, { once: true });
+          entry.addEventListener(type, () => { entries += 1; }, { once: true });
+          const event = () => ['keydown', 'keyup'].includes(type)
+            ? new KeyboardEvent(type, { key: 'Enter', bubbles: true, cancelable: true, composed: true })
+            : new Event(type, { bubbles: true, cancelable: true, composed: true });
+          const dispatched = (type.startsWith('key') ? control : control.querySelector('span')).dispatchEvent(event());
+          const entryDispatched = entry.dispatchEvent(event());
+          results.push({ type, dispatched, calls, entryDispatched, entries });
+        }
+        const otherKey = control.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowDown', bubbles: true, cancelable: true, composed: true }));
+        return { results, otherKey };
+      }, placement);
+      for (const { type, dispatched, calls, entryDispatched, entries } of results.results) {
+        assert.equal(dispatched, placement === 'outside-form', `${placement}: ${type}`);
+        assert.equal(calls, placement === 'outside-form' ? 1 : 0, `${placement}: ${type}`);
+        assert.equal(entryDispatched, true, type);
+        assert.equal(entries, 1, type);
+      }
+      assert.equal(results.otherKey, true, placement);
+      await removeOperationalSubmissionGuard(page);
+      await page.close();
     }
   } finally {
     await browser.close();

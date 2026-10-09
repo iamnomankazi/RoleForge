@@ -778,16 +778,20 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
       event?.stopImmediatePropagation?.();
       throw new Error('Career-Ops blocked a final form submission attempt');
     };
-    const activationEvents = ['pointerdown', 'mousedown', 'touchstart', 'click', 'auxclick', 'keydown'];
+    const activationEvents = ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend', 'click', 'auxclick', 'dblclick', 'keydown', 'keyup'];
+    const gestureFormControls = new WeakSet();
     const guardActivation = (event) => {
-      if (event.type === 'keydown' && !['Enter', ' ', 'Spacebar'].includes(event.key)) return;
-      const target = event.type === 'keydown' ? document.activeElement : event.target;
-      const control = target?.closest?.('button, input[type="submit"], input[type="button"], input[type="image"], input[type="reset"], a, [role="button"], [role="link"]');
+      if (['keydown', 'keyup'].includes(event.type) && !['Enter', ' ', 'Spacebar'].includes(event.key)) return;
+      const path = event.composedPath?.() || [];
+      const selector = 'button, input[type="submit"], input[type="button"], input[type="image"], input[type="reset"], a, [role="button"], [role="link"]';
+      const control = path.find((element) => element.matches?.(selector)) || event.target?.closest?.(selector);
       if (!control || ['textbox', 'checkbox', 'radio', 'combobox', 'listbox'].includes(control.getAttribute('role'))
           || (control.tagName === 'INPUT' && !['submit', 'button', 'image', 'reset'].includes(control.type))
           || ['TEXTAREA', 'SELECT'].includes(control.tagName)) return;
-      const form = control && (control.form || control.closest('form'));
-      if (!form) return;
+      const form = control.form || control.closest('form') || path.find((element) => element.tagName === 'FORM');
+      // Keep the gesture guarded if a handler moves the control or removes its form.
+      if (form && ['pointerdown', 'mousedown', 'touchstart', 'keydown'].includes(event.type)) gestureFormControls.add(control);
+      if (!form && !gestureFormControls.has(control)) return;
       const labels = controlLabels(control);
       if (finalToken.test(labels.join(' '))) return block(event);
       if (!labels.some((label) => progressionLabel.test(label))) return;
