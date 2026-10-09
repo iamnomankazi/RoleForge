@@ -176,7 +176,7 @@ test('codex_exec propagates a single nonzero transport failure without retrying'
 test('low-level codex child runner reports nonzero exit and terminates on abort', async () => {
   await assert.rejects(runCodexExecChild({
     executable: process.execPath,
-    args: ['-e', 'process.exit(7)'],
+    args: ['-e', 'process.exitCode = 7'],
     cwd: process.cwd(),
     env: process.env,
     input: '',
