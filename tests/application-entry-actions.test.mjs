@@ -65,12 +65,12 @@ test('listing-page anchor navigates to the verified form without dispatching its
   });
 });
 
-test('metadata-only Apply button advertising a known ATS hands off without executing saved-application JS', async () => {
+test('Easy Apply button advertising a known ATS hands off without executing saved-application JS', async () => {
   const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
   const formUrl = 'https://jobs.lever.co/acme/data-engineer';
   await withFixture({
     [listingUrl]: `<h1>Acme Data Engineer</h1><p>Role description</p>
-      <button data-apply-url="${formUrl}" type="button" onclick="window.applyClicks=(window.applyClicks||0)+1; fetch('/saved-application', {method:'POST'})">Apply</button>`,
+      <button data-apply-url="${formUrl}" type="button" onclick="window.applyClicks=(window.applyClicks||0)+1; fetch('/saved-application', {method:'POST'})">Easy Apply</button>`,
     [formUrl]: FORM_HTML,
   }, async ({ context, page }) => {
     let posts = 0;
@@ -85,10 +85,82 @@ test('metadata-only Apply button advertising a known ATS hands off without execu
     assert.equal(result.hops.length, 0);
     assert.equal(result.page.url(), listingUrl);
     assert.equal(result.manualReviewRequired, true);
-    assert.match(result.reason, /anchor with a verified href.*metadata.*manual/);
+    assert.match(result.reason, /one-click or saved-profile.*submit immediately.*manual/);
     assert.equal(await page.evaluate(() => window.applyClicks || 0), 0);
     assert.equal(posts, 0);
   });
+});
+
+test('listing-page JS entry buttons click once to reveal an application modal', async () => {
+  const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
+  for (const control of [
+    '<button type="button">Apply now</button>',
+    '<div role="button" tabindex="0">Apply now</div>',
+    '<input type="button" value="Apply now">',
+  ]) {
+    await withFixture({
+      [listingUrl]: `<h1>Acme Data Engineer</h1>${control}
+        <section role="dialog" aria-modal="true" hidden>${FORM_HTML}</section>
+        <script>document.querySelector('button, [role="button"], input[type="button"]').onclick = () => {
+          window.applyClicks = (window.applyClicks || 0) + 1;
+          document.querySelector('section').hidden = false;
+        };</script>`,
+    }, async ({ context, page }) => {
+      await page.goto(listingUrl);
+      const result = await followSafeApplicationEntryFlow(
+        context, page, await collectPageSnapshot(page), CANDIDATE, { listingUrl },
+      );
+      assert.equal(result.form.actualForm, true);
+      assert.equal(result.compatible, true);
+      assert.equal(result.snapshot.applicationSurface.visibleDialogCount, 1);
+      assert.equal(result.hops[0].activationMethod, 'playwright_click');
+      assert.equal(await page.evaluate(() => window.applyClicks), 1);
+      assert.equal(await page.locator('#final-apply').isVisible(), true);
+    });
+  }
+});
+
+test('listing-page JS Apply redirects to a known ATS regardless of destination metadata', async () => {
+  const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
+  const formUrl = 'https://jobs.lever.co/acme/data-engineer';
+  await withFixture({
+    [listingUrl]: `<h1>Acme Data Engineer</h1>
+      <button type="button" data-apply-url="https://unrelated.test/submit" onclick="sessionStorage.applyClicks=Number(sessionStorage.applyClicks||0)+1; location.href='${formUrl}'">Apply</button>`,
+    [formUrl]: FORM_HTML,
+  }, async ({ context, page }) => {
+    await page.goto(listingUrl);
+    const result = await followSafeApplicationEntryFlow(
+      context, page, await collectPageSnapshot(page), CANDIDATE, { listingUrl },
+    );
+    assert.equal(result.form.actualForm, true);
+    assert.equal(result.compatible, true);
+    assert.equal(result.page.url(), formUrl);
+    assert.equal(result.hops.length, 1);
+    assert.equal(result.hops[0].activationMethod, 'playwright_click');
+    assert.equal(result.page.__careerOpsEntryInteractionEvidence.attempts.length, 1);
+  });
+});
+
+test('JS Apply with no application outcome fails after a single click despite known ATS metadata', async () => {
+  const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
+  for (const destination of ['', 'https://unrelated.test/landing']) {
+    await withFixture({
+      [listingUrl]: `<h1>Acme Data Engineer</h1>
+        <button type="button" data-apply-url="https://jobs.lever.co/acme/data-engineer" onclick="sessionStorage.applyClicks=Number(sessionStorage.applyClicks||0)+1; ${destination ? `location.href='${destination}'` : ''}">Apply</button>`,
+      [destination]: '<h1>Unrelated landing page</h1>',
+    }, async ({ context, page }) => {
+      await page.goto(listingUrl);
+      const result = await followSafeApplicationEntryFlow(
+        context, page, await collectPageSnapshot(page), CANDIDATE, { listingUrl, observationWindowMs: 100 },
+      );
+      assert.equal(result.form.actualForm, false);
+      assert.equal(result.hops.length, 0);
+      assert.equal(result.manualReviewRequired, true);
+      assert.match(result.reason, /could not reach the application surface/);
+      assert.deepEqual(result.diagnostics.candidates[0].attempts.map((row) => row.method), ['playwright_click']);
+      if (!destination) assert.equal(await page.evaluate(() => Number(sessionStorage.applyClicks)), 1);
+    });
+  }
 });
 
 test('exact inspected entry identity survives duplicate Apply controls and DOM reordering', async () => {
@@ -118,14 +190,13 @@ test('exact inspected entry identity survives duplicate Apply controls and DOM r
   });
 });
 
-test('bare Apply buttons and form-associated entry controls hand off without a click', async () => {
+test('form-associated entry controls and href-less anchors hand off without a click', async () => {
   const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
   for (const fixture of [
-    { html: '<button id="apply" type="button" onclick="window.applyClicks=(window.applyClicks||0)+1">Apply</button>', reason: /anchor with a verified href/ },
-    { html: '<button id="apply" type="button" onclick="window.applyClicks=(window.applyClicks||0)+1; location.href=\'/application\'">Apply</button>', reason: /anchor with a verified href/ },
-    { html: '<button id="apply" type="button" formaction="/application" onclick="window.applyClicks=(window.applyClicks||0)+1">Apply</button>', reason: /anchor with a verified href/ },
+    { html: '<button id="apply" type="button" formaction="/application" onclick="window.applyClicks=(window.applyClicks||0)+1">Apply</button>', reason: /formAction/ },
     { html: '<a id="apply" data-apply-url="/application" onclick="window.applyClicks=(window.applyClicks||0)+1">Apply</a>', reason: /no verifiable href.*metadata/ },
     { html: '<form method="get" action="/application"><button id="apply" type="button" data-apply-url="/application" onclick="window.applyClicks=(window.applyClicks||0)+1">Apply</button></form>', reason: /form-associated/ },
+    { html: '<form id="application" method="get"></form><button form="application" type="button" onclick="window.applyClicks=(window.applyClicks||0)+1">Apply</button>', reason: /form-associated/ },
     { html: '<form method="post" action="/application"><button id="apply" type="button" onclick="window.applyClicks=(window.applyClicks||0)+1">Apply</button></form>', reason: /POST-associated/ },
     { html: '<button id="apply" type="submit" data-apply-url="/application" onclick="window.applyClicks=(window.applyClicks||0)+1">Apply</button>', reason: /submit controls/ },
   ]) {
@@ -311,7 +382,7 @@ test('delayed StepStone authentication page is observed as a genuine post-entry 
   });
 });
 
-test('StepStone harmonised entry label requires an anchor href', () => {
+test('StepStone harmonised entry label accepts listing buttons but rejects submit controls', () => {
   const listingUrl = 'https://www.stepstone.de/stellenangebote--role--14207605-inline.html';
   const control = { tag: 'a', text: 'Ich bin interessiert', visible: true, href: listingUrl };
   assert.equal(classifyApplicationEntryAction(control, {
@@ -322,7 +393,7 @@ test('StepStone harmonised entry label requires an anchor href', () => {
   }).safe, false);
   assert.equal(classifyApplicationEntryAction({ ...control, tag: 'button', type: 'button', dataDestination: listingUrl }, {
     listingUrl, currentState: 'listing_verified',
-  }).safe, false);
+  }).safe, true);
 });
 
 test('entry allowlist remains exact while semantic final actions stay forbidden', () => {
@@ -332,9 +403,25 @@ test('entry allowlist remains exact while semantic final actions stay forbidden'
   }, {
     listingUrl, currentState: 'listing_verified', actualFormReached: false, candidateFieldSignals: 0,
   }).safe;
-  for (const safe of ['Apply', 'Apply now', 'Apply here!', 'Apply for this job', 'Jetzt bewerben']) assert.equal(classify(safe), true, safe);
-  for (const unsafe of ['Submit application', 'Apply and submit', 'Apply here and submit', 'Review and apply']) assert.equal(classify(unsafe), false, unsafe);
+  for (const safe of ['Apply', 'Apply now', 'Apply here!', 'Apply for this job', 'Jetzt bewerben', 'Hae paikkaa', 'Hae nyt', 'Hae työpaikkaa', 'Ansök', 'Ansök nu', 'Solliciteer', 'Solliciteer nu', 'Ansøg', 'Ansøg nu']) assert.equal(classify(safe), true, safe);
+  for (const unsafe of ['Submit application', 'Apply and submit', 'Apply here and submit', 'Review and apply', 'Easy Apply', 'Quick Apply', '1-click apply', 'one-click apply', 'Instant apply', 'Apply with LinkedIn', 'Apply with Indeed', 'Apply with profile', 'Apply with resume', 'Apply with CV', 'Send application', 'Lähetä', 'Skicka']) assert.equal(classify(unsafe), false, unsafe);
   assert.equal(classify('Apply', 'submit'), false);
+});
+
+test('listing entry clicks are unavailable as soon as any candidate fields are present', async () => {
+  const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
+  await withFixture({
+    [listingUrl]: '<h1>Acme Data Engineer</h1><label>Email <input name="email"></label><button type="button" onclick="window.applyClicks=1">Apply now</button>',
+  }, async ({ context, page }) => {
+    await page.goto(listingUrl);
+    const result = await followSafeApplicationEntryFlow(
+      context, page, await collectPageSnapshot(page), CANDIDATE, { listingUrl },
+    );
+    assert.equal(result.form.actualForm, false);
+    assert.equal(result.manualReviewRequired, true);
+    assert.match(result.reason, /candidate application fields are already present/);
+    assert.equal(await page.evaluate(() => window.applyClicks || 0), 0);
+  });
 });
 
 function navigationFailureFixture({ reachesForm = false } = {}) {
@@ -429,8 +516,8 @@ test('unsafe final action never enters interaction retry handling', async () => 
   );
   assert.equal(fixture.getClicks(), 0);
   assert.equal(fixture.getNavigations(), 0);
-  assert.equal(result.manualReviewRequired, undefined);
-  assert.match(result.reason, /No safe listing-page/);
+  assert.equal(result.manualReviewRequired, true);
+  assert.match(result.reason, /final application actions require manual submission/);
 });
 
 test('company listing may use one verified known-ATS intermediate before the actual form', async () => {

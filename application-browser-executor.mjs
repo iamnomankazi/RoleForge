@@ -332,8 +332,9 @@ export function classifyFormSnapshot(snapshot) {
   };
 }
 
-const ENTRY_ACTION_LABEL = /^(?:apply|apply now|apply here!?|apply for (?:this|the) (?:job|role|position)|start (?:an? |your )?application|begin (?:an? |your )?application|continue to (?:the )?application|go to (?:the )?application|bewerben|jetzt bewerben|ich bin interessiert|postuler)$/i;
-const FINAL_ACTION_LABEL = /\b(?:submit|send|complete|finish|confirm|finali[sz]e|review and apply|apply and submit)\b/i;
+const ENTRY_ACTION_LABEL = /^(?:apply|apply now|apply here!?|apply for (?:this|the) (?:job|role|position)|start (?:an? |your )?application|begin (?:an? |your )?application|continue to (?:the )?application|go to (?:the )?application|bewerben|jetzt bewerben|ich bin interessiert|postuler|hae paikkaa|hae nyt|hae työpaikkaa|ansök(?: nu)?|solliciteer(?: nu)?|ansøg(?: nu)?)$/i;
+const FINAL_ACTION_LABEL = /(?:^|[^\p{L}\p{N}_])(?:submit|send|complete|finish|confirm|finali[sz]e|review and apply|apply and submit|absenden|senden|abschicken|verzenden|versturen|indsend|lähetä|valmis|skicka|envoyer|soumettre|valider)(?=$|[^\p{L}\p{N}_])/iu;
+const ONE_CLICK_ENTRY_LABEL = /\b(?:(?:easy|quick|instant)\s+apply|(?:1|one)[- ]?click(?:[- ]apply)?|apply\s+with\s+(?:(?:your|my|a|saved)\s+)?(?:linkedin|indeed|profile|resume|cv))\b/i;
 const DANGEROUS_ACTION_PATH = /\b(?:submit|send|complete|finish|confirm|finali[sz]e)[-_ ]?(?:application)?\b/i;
 
 export function isKnownApplicationHost(value) {
@@ -379,12 +380,16 @@ export function classifyApplicationEntryAction(control, {
   }
   if (!control?.visible) return reject('control is not visible');
   const tag = normalized(control?.tag);
-  if (!['a', 'button'].includes(tag)) return reject('control type is not an entry link or button');
+  const type = normalized(control?.type);
+  if (!['a', 'button'].includes(tag) && normalized(control?.role) !== 'button' && !(tag === 'input' && type === 'button')) {
+    return reject('control type is not an entry link or button');
+  }
   const text = inline(control?.text);
-  if (!ENTRY_ACTION_LABEL.test(text) || FINAL_ACTION_LABEL.test(text)) {
+  if (ONE_CLICK_ENTRY_LABEL.test(text)) return reject('one-click or saved-profile application controls may submit immediately; continue manually');
+  if (FINAL_ACTION_LABEL.test(text)) return reject('final application actions require manual submission');
+  if (!ENTRY_ACTION_LABEL.test(text)) {
     return reject('control label is not an unambiguous application-entry action');
   }
-  const type = normalized(control?.type);
   if (type === 'submit') return reject('submit controls are never listing continuations');
   const target = inline(control?.target).toLowerCase();
   if (target && !['_self', '_blank'].includes(target)) return reject('named browsing targets are not candidate-tab isolated');
@@ -393,7 +398,8 @@ export function classifyApplicationEntryAction(control, {
   if (control?.formHasCandidateFields) return reject('associated form contains candidate data');
   if (formMethod === 'post') return reject('POST-associated controls may submit candidate data');
   if (associatedForm) return reject('form-associated controls are never application-entry actions');
-  if (tag !== 'a') return reject('application entry requires an anchor with a verified href; button and metadata destinations require manual continuation');
+  if (control?.formAction) return reject('controls with a formAction may submit candidate data');
+  if (tag !== 'a') return { safe: true, reason: 'listing-page application-entry button', destination: null };
   const destination = predictedEntryDestination(control);
   if (!destination) return reject('application-entry anchor has no verifiable href; metadata destinations require manual continuation');
   if (!safePredictedEntryDestination(destination, { listingUrl })) {
@@ -548,7 +554,7 @@ export async function collectPageSnapshot(page) {
       ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
     };
     globalThis.__careerOpsEntryControlCounter = Number(globalThis.__careerOpsEntryControlCounter || 0);
-    const controls = Array.from(document.querySelectorAll('a, button, input[type="submit"], input[type="image"]')).map((element, index) => {
+    const controls = Array.from(document.querySelectorAll('a, button, [role="button"], input[type="button"], input[type="submit"], input[type="image"]')).map((element, index) => {
       let controlId = element.getAttribute('data-career-ops-entry-id');
       if (!controlId) {
         controlId = `entry-${++globalThis.__careerOpsEntryControlCounter}`;
@@ -574,6 +580,7 @@ export async function collectPageSnapshot(page) {
         index,
         controlId,
         tag: element.tagName.toLowerCase(),
+        role: element.getAttribute('role') || '',
         type: element instanceof HTMLButtonElement || element instanceof HTMLInputElement ? element.type : element.getAttribute('type') || '',
         text: [element.innerText, element.getAttribute('value'), element.getAttribute('aria-label'), element.getAttribute('title')]
           .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim(),
@@ -586,7 +593,7 @@ export async function collectPageSnapshot(page) {
         inForm: Boolean(element.closest('form')),
         associatedForm: Boolean(associatedForm),
         formMethod: associatedForm?.method || '',
-        formAction: associatedForm?.action || '',
+        formAction: element.getAttribute('formaction') || associatedForm?.action || '',
         formHasCandidateFields,
         visible: visible(element),
         enabled: !element.disabled && element.getAttribute('aria-disabled') !== 'true',
@@ -674,6 +681,7 @@ async function inspectEntryControl(locator) {
       return {
         controlId: element.getAttribute('data-career-ops-entry-id') || '',
         tag: element.tagName.toLowerCase(),
+        role: element.getAttribute('role') || '',
         type: element instanceof HTMLButtonElement || element instanceof HTMLInputElement ? element.type : element.getAttribute('type') || '',
         text: [element.innerText, element.getAttribute('value'), element.getAttribute('aria-label'), element.getAttribute('title')]
           .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim(),
@@ -686,7 +694,7 @@ async function inspectEntryControl(locator) {
         inForm: Boolean(element.closest('form')),
         associatedForm: Boolean(associatedForm),
         formMethod: associatedForm?.method || '',
-        formAction: associatedForm?.action || '',
+        formAction: element.getAttribute('formaction') || associatedForm?.action || '',
         formHasCandidateFields,
         visible,
         enabled: !element.disabled && element.getAttribute('aria-disabled') !== 'true',
@@ -743,7 +751,8 @@ export async function rankSafeApplyContinuations(page, controls, scope = {}) {
       let acquired = await reacquireSafeContinuation(page, expected, scope);
       await acquired.locator.scrollIntoViewIfNeeded({ timeout: 1_500 }).catch(() => {});
       acquired = await reacquireSafeContinuation(page, expected, scope);
-      const navigationReady = acquired.control.attached && acquired.control.enabled && acquired.control.visible;
+      const navigationReady = acquired.control.attached && acquired.control.enabled && acquired.control.visible
+        && (normalized(acquired.control.tag) === 'a' || acquired.control.topmostMatches);
       ranked.push({ ...acquired.control, index: expected.index, navigationReady });
     } catch (error) {
       ranked.push({ ...expected, navigationReady: false, rankingError: inline(error.message).slice(0, 300) });
@@ -905,11 +914,12 @@ async function inspectContinuationAttempt(context, page, before, beforeUrl, expe
       const applicationSurfaceChanged = Number(currentSurface.visibleDialogCount || 0) > Number(baselineSurface.visibleDialogCount || 0)
         && currentSurface.candidateFieldFingerprint
         && currentSurface.candidateFieldFingerprint !== baselineSurface.candidateFieldFingerprint;
+      const verifiedNavigation = safePredictedEntryDestination(snapshot.currentUrl, { listingUrl: beforeUrl });
       return form.actualForm
-        || form.loginRequired
+        || (verifiedNavigation && form.loginRequired)
         || applicationSurfaceChanged
-        || (meaningfulSnapshot(snapshot) && candidatePage !== page && snapshot.currentUrl !== 'about:blank')
-        || (meaningfulSnapshot(snapshot) && !sameUrlIgnoringHash(snapshot.currentUrl, beforeUrl));
+        || (verifiedNavigation && meaningfulSnapshot(snapshot) && candidatePage !== page && snapshot.currentUrl !== 'about:blank')
+        || (verifiedNavigation && meaningfulSnapshot(snapshot) && !sameUrlIgnoringHash(snapshot.currentUrl, beforeUrl));
     });
     const outcome = exactDestination || consequential;
     if (outcome) {
@@ -988,16 +998,33 @@ export async function followSafeContinuation(context, page, control, scope, {
   const beforeUrl = page.url();
   const baselineSnapshot = await collectPageSnapshot(page);
   const expectedDestination = predictedEntryDestination(control);
-  const method = 'verified_href_navigation';
+  const method = normalized(control.tag) === 'a' ? 'verified_href_navigation' : 'playwright_click';
   let acquired = null;
   let methodError = null;
   const before = new Set(context.pages());
   try {
-    acquired = await reacquireSafeContinuation(page, control, scope);
+    const baselineForm = classifyFormSnapshot(baselineSnapshot);
+    const freshScope = {
+      ...scope,
+      actualFormReached: scope.actualFormReached || baselineForm.actualForm,
+      candidateFieldSignals: Math.max(Number(scope.candidateFieldSignals || 0), baselineForm.candidateFieldSignals),
+    };
+    acquired = await reacquireSafeContinuation(page, control, freshScope);
     if (!acquired.control.attached || !acquired.control.enabled) {
       throw new Error('Verified entry link is detached or disabled; refusing to navigate');
     }
-    await page.goto(predictedEntryDestination(acquired.control), { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    if (method === 'verified_href_navigation') {
+      await page.goto(predictedEntryDestination(acquired.control), { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    } else {
+      await acquired.locator.scrollIntoViewIfNeeded({ timeout: 3_000 }).catch(() => {});
+      const activationForm = classifyFormSnapshot(await collectPageSnapshot(page));
+      acquired = await reacquireSafeContinuation(page, control, {
+        ...freshScope,
+        actualFormReached: freshScope.actualFormReached || activationForm.actualForm,
+        candidateFieldSignals: Math.max(freshScope.candidateFieldSignals, activationForm.candidateFieldSignals),
+      });
+      await acquired.locator.click({ timeout: 7_000 });
+    }
   } catch (error) {
     methodError = error;
   }
@@ -1022,7 +1049,7 @@ export async function followSafeContinuation(context, page, control, scope, {
     return outcome.destination;
   }
   for (const extra of outcome.created) await extra.close().catch(() => {});
-  const error = new Error('Verified application-entry href navigation did not reach the application surface');
+  const error = new Error('Application-entry activation did not reach the application surface');
   error.code = 'application_entry_interaction_failed';
   error.entryDiagnostics = {
     controlId: control.controlId,
@@ -1119,7 +1146,9 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
     };
     const rankedContinuations = await rankSafeApplyContinuations(page, snapshot.controls, scope);
     if (!rankedContinuations.length) {
-      const rejectedEntry = snapshot.controls.find((control) => control.visible && ENTRY_ACTION_LABEL.test(inline(control.text)));
+      const rejectedEntry = snapshot.controls.find((control) => control.visible && (
+        ENTRY_ACTION_LABEL.test(inline(control.text)) || ONE_CLICK_ENTRY_LABEL.test(inline(control.text)) || FINAL_ACTION_LABEL.test(inline(control.text))
+      ));
       const rejection = rejectedEntry ? classifyApplicationEntryAction(rejectedEntry, scope) : null;
       return {
         page,

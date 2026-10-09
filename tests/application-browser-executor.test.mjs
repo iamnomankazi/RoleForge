@@ -317,7 +317,7 @@ test('fresh executor DOM may confirm a delayed safe entry without changing scann
   assert.equal(listingSnapshotConfirmsSafeEntry(snapshot, candidate, { listingUrl }), true);
   assert.equal(listingSnapshotConfirmsSafeEntry({ ...snapshot, controls: [{
     tag: 'button', type: 'button', text: 'Apply', visible: true, dataDestination: listingUrl,
-  }] }, candidate, { listingUrl }), false);
+  }] }, candidate, { listingUrl }), true);
   assert.equal(listingSnapshotConfirmsSafeEntry({ ...snapshot, bodyText: 'Other company', documentTitle: 'Other company' }, candidate, { listingUrl }), false);
 });
 
@@ -355,7 +355,7 @@ test('opaque HRworks apply form is recognized by its bounded POST terminal struc
   }).actualForm, true);
 });
 
-test('only safe listing anchors are eligible and final controls remain unavailable', () => {
+test('safe listing entries are eligible and final controls remain unavailable', () => {
   const safe = {
     index: 0, tag: 'a', type: '', text: 'Apply now', href: 'https://jobs.lever.co/acme/application', inForm: false, visible: true,
   };
