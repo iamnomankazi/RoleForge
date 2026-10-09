@@ -141,6 +141,7 @@ export function buildHtml(payload) {
   const problemsBlock = letter.problems_section ? `<p>${escapeHtml(letter.problems_section)}</p>` : "";
 
   const replacements = {
+    "{{LANG}}": escapeHtml(letter.language || payload.language || "en"),
     "{{NAME}}": escapeHtml(candidate.name),
     "{{CONTACT_LINE}}": buildContactLine(candidate),
     "{{CREDENTIALS_BLOCK}}": buildCredentialsBlock(candidate),

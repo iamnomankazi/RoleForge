@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="{{LANG}}">
+<head>
+  <meta charset="utf-8">
+  <title>{{COMPANY}} - {{ROLE}}</title>
+  <style>
+    @page { size: A4; margin: 17mm 20mm; }
+    * { box-sizing: border-box; }
+    body { color: #1a1a1a; font: 11pt/1.34 "Times New Roman", Times, serif; }
+    h1 { font-size: 14pt; margin: 0 0 3pt; }
+    .company { color: #555; font-size: 10pt; margin-bottom: 15pt; }
+    p { margin: 0 0 9pt; white-space: pre-wrap; }
+    .greeting { margin-bottom: 10pt; }
+    .signature { margin-top: 15pt; }
+  </style>
+</head>
+<body>
+  <h1>{{ROLE}}</h1>
+  <div class="company">{{COMPANY}}</div>
+  {{GREETING}}
+  {{PARAGRAPHS}}
+  {{CLOSING}}
+  {{SIGNATURE}}
+</body>
+</html>

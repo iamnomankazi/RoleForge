@@ -172,6 +172,7 @@ const SYSTEM_PATHS = [
   'scripts/mark-applied.mjs',
   'scripts/open-apply-batch.mjs',
   'generate-cover-letter.mjs',
+  'cover-letter-v2.mjs',
   'merge-tracker.mjs',
   'tracker-links.mjs',
   'tracker.mjs',
