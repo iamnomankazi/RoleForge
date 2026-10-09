@@ -17,9 +17,10 @@
  * useful for fresh postings, and stale results would flood the pipeline.
  *
  * Usage:
- *   node scan-ats-full.mjs                      # scan all ATS directories, last 3 days
+ *   node scan-ats-full.mjs                      # scan default ATS directories, last 3 days
  *   node scan-ats-full.mjs --since 7            # postings from the last 7 days
  *   node scan-ats-full.mjs --ats greenhouse,workday  # subset of sources
+ *   node scan-ats-full.mjs --ats icims          # opt in to iCIMS (disabled by default)
  *   node scan-ats-full.mjs --limit 200          # max companies per ATS (default: all)
  *   node scan-ats-full.mjs --dry-run            # preview without writing files
  *   node scan-ats-full.mjs --liveness           # Playwright-verify matches before writing
@@ -114,6 +115,20 @@ export function icimsHostCandidates(value) {
   }).filter(Boolean);
 }
 
+// The catalog does not identify Lever's region. Retry a missing global board
+// once on the EU host, keeping this discovery behavior out of tracked scans.
+async function fetchLeverBoard(entry, ctx) {
+  try {
+    return await lever.fetch(entry, ctx);
+  } catch (error) {
+    if (error?.status !== 404) throw error;
+    const url = new URL(entry.careers_url);
+    if (url.hostname !== 'jobs.lever.co') throw error;
+    url.hostname = 'jobs.eu.lever.co';
+    return lever.fetch({ ...entry, careers_url: url.href }, ctx);
+  }
+}
+
 export const SOURCES = {
   greenhouse: {
     provider: greenhouse,
@@ -123,7 +138,7 @@ export const SOURCES = {
       : null,
   },
   lever: {
-    provider: lever,
+    provider: { ...lever, fetch: fetchLeverBoard },
     dataset: `${DATASET_BASE}/lever_companies.json`,
     toEntry: (slug) => SLUG_RE.test(String(slug))
       ? entryOnHost(String(slug), `https://jobs.lever.co/${slug}`, h => h === 'jobs.lever.co')
@@ -195,9 +210,10 @@ const KNOWN_FLAGS = [
 const VALUE_FLAGS = ['--run-id', '--since', '--limit', '--ats', '--seeds', '--md-out'];
 
 const USAGE = `Usage:
-  node scan-ats-full.mjs --run-id <id>        # scan all ATS directories, last 3 days
+  node scan-ats-full.mjs --run-id <id>        # scan default ATS directories, last 3 days
   node scan-ats-full.mjs --since 7            # postings from the last 7 days
   node scan-ats-full.mjs --ats greenhouse,workday  # subset of sources
+  node scan-ats-full.mjs --ats icims          # opt in to iCIMS (disabled by default)
   node scan-ats-full.mjs --limit 200          # max companies per ATS (default: all)
   node scan-ats-full.mjs --dry-run            # preview without writing files
   node scan-ats-full.mjs --liveness           # Playwright-verify matches before writing
@@ -205,7 +221,7 @@ const USAGE = `Usage:
   node scan-ats-full.mjs --md-out <dir>       # also write a dated markdown digest to <dir>
   node scan-ats-full.mjs --help               # print this usage block and exit`;
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const args = argv.slice(2);
 
   if (args.includes('--help') || args.includes('-h')) {
@@ -260,7 +276,7 @@ function parseArgs(argv) {
   // so we don't also walk the full ATS directories unintentionally.
   const ats = atsArg
     ? atsArg.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
-    : (seeds.length > 0 ? [] : Object.keys(SOURCES));
+    : (seeds.length > 0 ? [] : Object.keys(SOURCES).filter(name => name !== 'icims'));
   const unknown = ats.filter(a => !SOURCES[a]);
   if (unknown.length) {
     console.error(`Error: unknown ATS source(s): ${unknown.join(', ')}. Valid: ${Object.keys(SOURCES).join(', ')}`);
@@ -492,6 +508,7 @@ export async function runSeedScan(seedId, opts, ctx, seenUrls, label) {
     // Try each ATS provider's detect() — first hit wins.
     let provider = null;
     for (const p of SEED_PROVIDERS) {
+      if (p.id === 'icims' && !opts.ats?.includes('icims')) continue;
       try {
         if (p.detect?.(entry)) { provider = p; break; }
       } catch { /* no-op */ }
