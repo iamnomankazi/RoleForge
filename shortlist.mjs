@@ -49,8 +49,70 @@ function reportDate(summary, markdown, filename) {
   return [date, header, suffix].find((value) => value && validDate(value)) || null;
 }
 
+function normalizeIdentityPart(value) {
+  return String(value ?? '')
+    .normalize('NFKD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function postingIdentity(entry) {
+  const parts = [entry.company, entry.title, entry.location].map(normalizeIdentityPart);
+  return parts.every(Boolean) ? parts.join('\u0000') : null;
+}
+
+function hasJdText(summary) {
+  if (summary.has_jd_text === true || summary.jd_available === true) return true;
+  if (typeof summary.description_chars === 'number' && summary.description_chars > 0) return true;
+  return ['description', 'job_description', 'jobDescription', 'jd_text', 'jdText', 'job_description_text', 'jd']
+    .some((key) => typeof summary[key] === 'string' && summary[key].trim().length > 0);
+}
+
+function candidateId(summary) {
+  const value = summary.candidate_id ?? summary.candidateId;
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function compareRepresentative(a, b) {
+  return Number(b.liveness === 'confirmed') - Number(a.liveness === 'confirmed')
+    || Number(b.has_jd_text) - Number(a.has_jd_text)
+    || String(b.date ?? '').localeCompare(String(a.date ?? ''), 'en')
+    || String(a.candidate_id ?? a.report).localeCompare(String(b.candidate_id ?? b.report), 'en')
+    || a.report.localeCompare(b.report, 'en');
+}
+
+function auditId(entry) {
+  return entry.candidate_id ?? entry.report.split(/[\\/]/).at(-1);
+}
+
+function deduplicateCandidates(candidates) {
+  const groups = new Map();
+  const unique = [];
+  for (const candidate of candidates) {
+    const key = postingIdentity(candidate);
+    if (!key) {
+      unique.push(candidate);
+      continue;
+    }
+    const group = groups.get(key) ?? [];
+    group.push(candidate);
+    groups.set(key, group);
+  }
+  for (const group of groups.values()) {
+    group.sort(compareRepresentative);
+    const [representative, ...dropped] = group;
+    representative.duplicates = dropped.map(auditId);
+    unique.push(representative);
+  }
+  return unique;
+}
+
 export function collectReports({ reports = 'reports', since = null } = {}) {
   const result = { apply: [], review: [], skip: [], legacy: [], invalid: [], excluded: 0 };
+  const candidates = [];
   const root = resolve(reports);
   for (const file of readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isFile() && /\.md$/i.test(entry.name)).sort((a, b) => a.name.localeCompare(b.name, 'en'))) {
     const report = join(root, file.name);
@@ -65,13 +127,16 @@ export function collectReports({ reports = 'reports', since = null } = {}) {
     }
     const assessment = validateMachineSummary(summary);
     if (!assessment.valid) { result.invalid.push({ report, errors: assessment.errors }); continue; }
-    const { company, role, location_country, fit_score, review_reason } = summary;
-    result[assessment.action].push({
-      report, company, role, date, location: summary.location || location_country, location_country,
+    const { company, role, title, location_country, fit_score, review_reason } = summary;
+    candidates.push({
+      report, candidate_id: candidateId(summary), company, role, title: title || role,
+      date, location: summary.location || location_country, location_country,
       fit_score, action: assessment.action, fit_band: assessment.fit_band, bucket: assessment.bucket,
+      liveness: summary.liveness, has_jd_text: hasJdText(summary), duplicates: [],
       flags: [...summary.flags, ...(summary.prescreen?.flags ?? [])], review_reason: review_reason ?? '',
     });
   }
+  for (const candidate of deduplicateCandidates(candidates)) result[candidate.action].push(candidate);
   for (const action of ['apply', 'review', 'skip']) result[action].sort(compare);
   return result;
 }
@@ -91,9 +156,9 @@ export function renderShortlist(result, out = 'data/shortlist.md') {
     const entries = result[action];
     lines.push(`## ${action === 'apply' ? 'Apply' : 'Review'} (${entries.length})`, '');
     if (!entries.length) { lines.push('None.', ''); continue; }
-    lines.push('| Report | Company | Role | Location | Fit score | Action | Flags | Review reason |', '|---|---|---|---|---|---|---|---|');
+    lines.push('| Report | Company | Role | Location | Fit score | Action | Flags | Review reason | Duplicate candidates |', '|---|---|---|---|---|---|---|---|---|');
     for (const entry of entries) {
-      lines.push(`| ${reportLink(entry.report, out)} | ${cell(entry.company)} | ${cell(entry.role)} | ${cell(entry.location)} | ${entry.fit_score.toFixed(1)} | ${entry.action} | ${cell(entry.flags.map((flag) => flag.code).join(', '))} | ${cell(entry.review_reason)} |`);
+      lines.push(`| ${reportLink(entry.report, out)} | ${cell(entry.company)} | ${cell(entry.role)} | ${cell(entry.location)} | ${entry.fit_score.toFixed(1)} | ${entry.action} | ${cell(entry.flags.map((flag) => flag.code).join(', '))} | ${cell(entry.review_reason)} | ${cell(entry.duplicates.join(', '))} |`);
     }
     lines.push('');
   }

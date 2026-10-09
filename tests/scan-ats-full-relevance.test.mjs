@@ -123,7 +123,9 @@ test('pre-screen annotates eligible jobs without rejecting and deduplicates bloc
   assert.ok(!job.prescreen.flags.some(flag => flag.code === 'sponsorship_unknown'));
   assert.deepEqual(job.languageRequirements, expected.language_requirements);
   assert.equal(job.hardBlockers.filter(value => value === duplicateBlocker).length, 1);
-  assert.ok(job.hardBlockers.includes(job.experienceMetadata.hard_blocker_reason));
+  // One experience entry: the coded prescreen line replaces the uncoded experience reason.
+  assert.ok(!job.hardBlockers.includes(job.experienceMetadata.hard_blocker_reason));
+  assert.equal(job.hardBlockers.filter(value => value.startsWith('experience_outside:')).length, 1);
   assert.ok(job.hardBlockers.includes(`experience_outside: ${job.prescreen.blockers.find(item => item.code === 'experience_outside').evidence}`));
 });
 

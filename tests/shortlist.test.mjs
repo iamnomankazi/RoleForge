@@ -32,7 +32,7 @@ test('shortlist puts Finland first, other target countries next, remote next, th
   assert.deepEqual(result.apply.map((entry) => entry.company), ['Finland high', 'Finland low', 'Germany', 'Netherlands', 'Denmark', 'Remote', 'Other']);
   const markdown = renderShortlist(result, out);
   assert.match(markdown, /## Apply \(7\)/);
-  assert.match(markdown, /\| Report \| Company \| Role \| Location \| Fit score \| Action \| Flags \| Review reason \|/);
+  assert.match(markdown, /\| Report \| Company \| Role \| Location \| Fit score \| Action \| Flags \| Review reason \| Duplicate candidates \|/);
   assert.match(markdown, /\]\(<\.\.\/reports\/finland-high.md>\)/);
 });
 
@@ -117,14 +117,75 @@ test('invalid and contradictory reports never enter Apply or Review', (t) => {
 
 test('since filters inclusively by summary date, Date/Fecha header, or filename', (t) => {
   const { reports, add } = fixture(t);
-  add('older-2026-10-01.md', {});
-  add('same-2026-10-05.md', {});
-  add('header.md', {}, '**Fecha:** 2026-10-06');
-  add('summary.md', { date: '2026-10-07' });
-  add('unknown.md', {});
+  add('older-2026-10-01.md', { company: 'Older' });
+  add('same-2026-10-05.md', { company: 'Same' });
+  add('header.md', { company: 'Header' }, '**Fecha:** 2026-10-06');
+  add('summary.md', { company: 'Summary', date: '2026-10-07' });
+  add('unknown.md', { company: 'Unknown' });
   const result = collectReports({ reports, since: '2026-10-05' });
   assert.equal(result.apply.length, 3);
   assert.equal(result.excluded, 2);
+});
+
+test('shortlist collapses normalized posting duplicates and records dropped candidate ids', (t) => {
+  const { reports, add, out } = fixture(t);
+  add('live-confirmed.md', {
+    candidate_id: 'z-live', company: 'Café Co.', role: 'Data—Engineer', location: 'Espoo, Finland',
+    date: '2026-10-01',
+  });
+  add('live-with-jd.md', {
+    candidate_id: 'a-live', company: 'CAFE co', role: ' data engineer ', location: 'Espoo Finland',
+    liveness: 'unconfirmed', jd_text: 'Full synthetic JD', date: '2026-10-09',
+    review_reason: 'Confirm the posting is active.',
+  });
+
+  add('jd-winner.md', {
+    candidate_id: 'z-jd', company: 'SumUp', role: 'Backend Engineer', location: 'Helsinki, Finland',
+    description: 'Synthetic job description', date: '2026-10-01',
+  });
+  add('without-jd.md', {
+    candidate_id: 'a-jd', company: 'SumUp', role: 'Backend Engineer', location: 'Helsinki Finland',
+    date: '2026-10-09',
+  });
+
+  add('recent-winner.md', {
+    candidate_id: 'z-recent', company: 'Stripe', role: 'ML Engineer', location: 'Remote, EU',
+    jd_text: 'Synthetic JD', date: '2026-10-09',
+  });
+  add('old-report.md', {
+    candidate_id: 'a-recent', company: 'Stripe', role: 'ML Engineer', location: 'Remote EU',
+    jd_text: 'Synthetic JD', date: '2026-10-01',
+  });
+
+  add('lowest-id.md', {
+    candidate_id: 'a-id', company: 'Resend', role: 'Data Analyst', location: 'Tampere, Finland',
+    jd_text: 'Synthetic JD', date: '2026-10-09',
+  });
+  add('higher-id.md', {
+    candidate_id: 'z-id', company: 'Resend', role: 'Data Analyst', location: 'Tampere Finland',
+    jd_text: 'Synthetic JD', date: '2026-10-09',
+  });
+
+  // Exact identity requires both title and location: these remain separate.
+  add('different-title.md', {
+    candidate_id: 'other-title', company: 'Resend', role: 'Data Scientist', location: 'Tampere Finland',
+    jd_text: 'Synthetic JD', date: '2026-10-09',
+  });
+  add('different-location.md', {
+    candidate_id: 'other-location', company: 'Resend', role: 'Data Analyst', location: 'Turku Finland',
+    jd_text: 'Synthetic JD', date: '2026-10-09',
+  });
+
+  const result = collectReports({ reports });
+  assert.equal(result.apply.length, 6);
+  const byId = Object.fromEntries(result.apply.map((entry) => [entry.candidate_id, entry]));
+  assert.deepEqual(byId['z-live'].duplicates, ['a-live'], 'confirmed liveness outranks JD text and recency');
+  assert.deepEqual(byId['z-jd'].duplicates, ['a-jd'], 'JD text outranks recency after liveness ties');
+  assert.deepEqual(byId['z-recent'].duplicates, ['a-recent'], 'newer report wins after liveness and JD ties');
+  assert.deepEqual(byId['a-id'].duplicates, ['z-id'], 'lowest candidate_id wins the final tie');
+  assert.ok(byId['other-title']);
+  assert.ok(byId['other-location']);
+  assert.match(renderShortlist(result, out), /a-live/);
 });
 
 test('CLI writes Markdown and emits JSON counts; unknown flags and missing values fail', (t) => {

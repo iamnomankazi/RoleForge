@@ -766,6 +766,10 @@ export function buildScanRelevanceEvaluator(config = {}, { classifyTier = null, 
         : (existingBlockers == null ? [] : [existingBlockers]);
       const uniqueBlockers = new Set(blockers);
       for (const blocker of prescreen.blockers || []) {
+        // The coded prescreen entry replaces the uncoded experience reason added above.
+        if (blocker.code === 'experience_outside' && experienceMetadata?.numeric_hard_blocker) {
+          uniqueBlockers.delete(experienceMetadata.hard_blocker_reason);
+        }
         const value = `${blocker.code}: ${blocker.evidence ?? ''}`;
         uniqueBlockers.add(value);
       }
