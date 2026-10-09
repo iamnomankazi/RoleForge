@@ -46,6 +46,7 @@
  * The script exits with code 0 on success, non-zero on fatal error.
  */
 
+import './lib/operational-cli.mjs';
 import { readdirSync, writeFileSync, unlinkSync, statSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -226,9 +227,6 @@ if (cmd === '--count') {
     process.exit(1);
   }
 }
-// Any other/unknown cmd falls through to a single reserve — unchanged
-// legacy behavior.
-
 mkdirSync(REPORTS_DIR, { recursive: true });
 
 const nums = reserveRange(count);

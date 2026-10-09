@@ -10,6 +10,7 @@
  * Run: node career-ops/dedup-tracker.mjs [--dry-run]
  */
 
+import './lib/operational-cli.mjs';
 import { readFileSync, copyFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';

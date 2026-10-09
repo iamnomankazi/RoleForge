@@ -15,6 +15,7 @@
  * Run: node career-ops/merge-tracker.mjs [--dry-run] [--verify]
  */
 
+import './lib/operational-cli.mjs';
 import { readFileSync, readdirSync, mkdirSync, renameSync, existsSync } from 'fs';
 import { join, basename, dirname } from 'path';
 import { fileURLToPath } from 'url';

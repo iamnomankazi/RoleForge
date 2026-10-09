@@ -30,6 +30,7 @@
  *   node scan.mjs --verify --throttle=8000     # custom base gap in ms (waits base..2*base)
  */
 
+import './lib/operational-cli.mjs';
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'fs';
 import { pathToFileURL, fileURLToPath } from 'url';
 import path from 'path';
@@ -1314,7 +1315,6 @@ function guardStatusFor(code) {
 }
 
 async function main() {
-  await loadOptionalDotenv();
   const args = process.argv.slice(2);
   const dryRun = args.includes('--dry-run');
   const sinceDays = parseSinceDays(args);
@@ -1343,6 +1343,8 @@ async function main() {
   const rediscover = args.includes('--rediscover-404');
   const companyFlag = args.indexOf('--company');
   const filterCompany = companyFlag !== -1 ? args[companyFlag + 1]?.toLowerCase() : null;
+
+  await loadOptionalDotenv();
 
   // 1. Load providers
   const providersDir = resolveProvidersDir();
