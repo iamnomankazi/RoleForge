@@ -51,11 +51,23 @@ export function derivePrescreenCountry(location, explicitCountry) {
     return countryCode(explicitCountry);
   }
   const text = String(location ?? '');
-  const names = countryPatterns.filter(([, pattern]) => pattern.test(text)).map(([code]) => code);
-  const locationCodes = Object.keys(COUNTRY_TERMS).filter(code => new RegExp(`(?<![\\p{L}])${code.toUpperCase()}(?![\\p{L}])`, 'u').test(text));
-  const codes = names.length ? names : locationCodes.length ? locationCodes
-    : cityPatterns.filter(([, pattern]) => pattern.test(text)).map(([code]) => code);
-  return codes.length === 1 ? codes[0] : null;
+  // A city followed by a US state is location syntax, not an ISO country code.
+  const states = 'AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC'.split(' ').join('|');
+  const statePattern = new RegExp(`(?:^|[;/|])\\s*[\\p{L} .'-]+,\\s*(?:${states})(?=\\s*(?:\\d{5}\\b|$|[;/|]))`, 'gu');
+  const isStateLocation = match => {
+    const suffix = match.match(/,\s*([A-Z]{2})/)?.[1].toLowerCase();
+    return !COUNTRY_TERMS[suffix] || !cityPatterns.some(([, pattern]) => pattern.test(match));
+  };
+  const stateLocations = [...text.matchAll(statePattern)].filter(match => isStateLocation(match[0]));
+  const countryText = text.replace(statePattern, match => isStateLocation(match) ? ' '.repeat(match.length) : match);
+  const codes = new Set(stateLocations.length ? ['us'] : []);
+  for (const [code, pattern] of [...countryPatterns, ...cityPatterns]) {
+    if (pattern.test(countryText)) codes.add(code);
+  }
+  for (const code of Object.keys(COUNTRY_TERMS)) {
+    if (new RegExp(`(?<![\\p{L}])${code.toUpperCase()}(?![\\p{L}])`, 'u').test(countryText)) codes.add(code);
+  }
+  return codes.size === 1 ? [...codes][0] : null;
 }
 
 const LEVEL_RANK = { none: 0, basic: 1, A1: 1, A2: 2, B1: 3, B2: 4, C1: 5, C2: 6, unspecified: 1 };
@@ -64,7 +76,7 @@ function languageLevel(value) {
   const cefr = text.match(/\b[ABC][12]\b/i)?.[0].toUpperCase();
   if (cefr) return cefr;
   if (/native|mother tongue|muttersprach|äidinkiel|modersmål/i.test(text)) return 'C2';
-  if (/fluent|fluency|fließend|fliessend|verhandlungssicher|sujuva|flytande|vloeiend|flydende|courant|proficient/i.test(text)) return 'C1';
+  if (/excellent|fluent|fluency|fließend|fliessend|verhandlungssicher|sujuva|flytande|vloeiend|flydende|courant|proficient/i.test(text)) return 'C1';
   if (/very good|good|gute|hyvä|god|intermediate|professional/i.test(text)) return 'B2';
   if (/basic|beginner|grundkennt|perus/i.test(text)) return 'basic';
   if (/none|no proficiency/i.test(text)) return 'none';
@@ -132,9 +144,22 @@ const LANGUAGE_TERMS = {
   french: 'French|français|francais|française',
 };
 const SKILL = String.raw`(?:[ABC][12](?:[-\s]*(?:Niveau|level))?|native(?:[-\s]+level)?|fluent|fluency|proficien(?:t|cy)|business[-\s]+fluent|very\s+good|good|excellent|basic|fließend(?:e[nsr]?)?|fliessend(?:e[nsr]?)?|verhandlungssicher(?:e[nsr]?)?|gute(?:n)?|sujuva(?:a)?|hyvä|flytande|vloeiend|flydende|courant(?:e)?)`;
-const BRIDGE = String.raw`(?:\s|[-,:()])*(?:(?:in|of|at|least|minimum|a|the|language|skills?|knowledge|proficiency|fluency|level|auf|Niveau|kielen|taito|Sprachkenntnisse)\b(?:\s|[-,:()])*){0,6}`;
+const BRIDGE = String.raw`(?:\s|[-,:()])*(?:(?:in|of|at|least|minimum|mindestens|a|the|language|skills?|knowledge|proficiency|fluency|level|auf|Niveau|kielen|taito|Sprachkenntnisse)\b(?:\s|[-,:()])*){0,6}`;
 const PREFERRED = /\b(?:preferred|preferably|ideally|a plus|bonus|nice[ -]+to[ -]+have|desirable|von Vorteil|wünschenswert|eduksi|meriterande|préféré|pluspunt)\b/iu;
-const NEGATED_LANGUAGE = /\b(?:not required|not necessary|no (?:\w+\s+){0,3}(?:required|necessary)|nicht erforderlich|ei vaadita)\b/iu;
+const NEGATED_REQUIREMENT = /\b(?:not (?:required|necessary|mandatory)|(?:do not|don't|does not)\s+(?:require|need|have to)|no need|no (?:\w+\s+){0,3}(?:required|necessary)|nicht erforderlich|ei vaadita)\b/iu;
+
+// Split independent assertions while preserving coordinated language lists.
+function assertionParts(clause) {
+  const separator = /\s+(?:but|however|aber)\s+|,\s*(?=[^,]{0,45}\b(?:preferred|required|not necessary)\b)|(?<=\b(?:required|necessary|mandatory|preferred|desirable|plus))\s+(?:and|und)\s+|\s+(?:and|und)\s+(?=(?:you|we|applicants?|candidates?|no need)\b)/giu;
+  const parts = [];
+  let start = 0;
+  for (const match of clause.text.matchAll(separator)) {
+    parts.push({ ...clause, text: clause.text.slice(start, match.index), offset: clause.offset + start });
+    start = match.index + match[0].length;
+  }
+  parts.push({ ...clause, text: clause.text.slice(start), offset: clause.offset + start });
+  return parts;
+}
 
 function languagePreference(text, start, end, sectionPreferred) {
   const before = text.slice(Math.max(0, start - 65), start);
@@ -144,7 +169,7 @@ function languagePreference(text, start, end, sectionPreferred) {
   return { preferred: sectionPreferred || Boolean(prefix || suffix), start: prefix ? start - (before.length - prefix.index) : start, end: suffix ? end + suffix[0].length : end };
 }
 
-function languageAlternatives(items, item, text) {
+function coordinatedLanguages(items, item, text, alternativesOnly = false) {
   const group = new Set([item]);
   let changed = true;
   while (changed) {
@@ -155,12 +180,14 @@ function languageAlternatives(items, item, text) {
         const first = member.match.index < other.match.index ? member : other;
         const second = first === member ? other : member;
         const gap = text.slice(first.match.index + first.match[0].length, second.match.index);
-        return /^[\s,()]*\b(?:or|oder|tai|eller|of)\b\s*$/i.test(gap);
+        if (!alternativesOnly && /^[\s(),]*,[\s(),]*$/u.test(gap)) return true;
+        const connector = alternativesOnly ? 'or|oder|tai|eller|of' : 'and|und|ja|och|en|or|oder|tai|eller|of';
+        return new RegExp(`^[\\s,()/\\-]*\\b(?:${connector})\\b[\\s\\-]*$`, 'i').test(gap);
       });
       if (connected) { group.add(other); changed = true; }
     }
   }
-  return group.size > 1 ? [...group].map(member => member.language) : [];
+  return [...group];
 }
 
 // Keep indices in the original text, including HTML, for verbatim evidence.
@@ -192,12 +219,11 @@ function languageRequirements(raw) {
   const requirements = [];
   for (const clause of clauses(raw)) {
     // Concessions are separate so a preferred language cannot soften a required one.
-    const parts = clause.text.split(/\s+(?:but|however|aber)\s+/i);
-    let partOffset = 0;
-    for (const part of parts) {
-      const local = { ...clause, text: part, offset: clause.offset + clause.text.indexOf(part, partOffset) };
-      partOffset = local.offset - clause.offset + part.length;
-      if (NEGATED_LANGUAGE.test(part)) continue;
+    for (const local of assertionParts(clause)) {
+      const part = local.text;
+      if (NEGATED_REQUIREMENT.test(part)) continue;
+      // Proficiency fragments in qualification lists are assertions; prose about
+      // an existing team or company is not a candidate requirement.
       const matches = [];
       for (const [language, terms] of Object.entries(LANGUAGE_TERMS)) {
         const name = `(?<![\\p{L}])(?:${terms})(?![\\p{L}])`;
@@ -224,20 +250,27 @@ function languageRequirements(raw) {
           if (item.language === language || item.level === 'unspecified') return false;
           const left = Math.min(bare.index + bare[0].length, item.match.index + item.match[0].length);
           const right = Math.max(bare.index, item.match.index);
-          return /^(?:\s*[,/]?\s*(?:and|or|oder|und|tai|ja|eller|och|en|of)\s*)+$/i.test(part.slice(left, right));
+          const gap = part.slice(left, right);
+          return /^[\s(),]*,[\s(),]*$/u.test(gap)
+            || /^(?:[\s,/-]*(?:and|or|oder|und|tai|ja|eller|och|en|of)[\s-]*)+$/i.test(gap);
         });
         if (shared && existing) existing.level = shared.level;
         else if (shared) matches.push({ language, level: shared.level, match: bare });
       }
       for (const item of matches) {
+        const before = part.slice(0, item.match.index);
+        const descriptive = /\b(?:(?:our|the|this)\s+(?:team|company|colleagues|employees|office|customers|clients)|we\s+(?:speak|use|work))\b(?:(?!\b(?:you|your|applicants?|candidates?|must|requires?)\b)[\s\S])*$/iu;
+        if (descriptive.test(before)) continue;
         const preference = languagePreference(part, item.match.index, item.match.index + item.match[0].length, local.preferred);
+        const groupPreferred = coordinatedLanguages(matches, item, part).some(member => PREFERRED.test(member.match[0])
+          || languagePreference(part, member.match.index, member.match.index + member.match[0].length, local.preferred).preferred);
         requirements.push({
           language: item.language, level: item.level,
-          required: !(preference.preferred || PREFERRED.test(item.match[0])),
+          required: !(groupPreferred || PREFERRED.test(item.match[0])),
           evidence: evidenceFor(raw, local, preference.start, preference.end),
           group: local.offset,
           // Alternatives are handled as a group, so English OR German is satisfiable.
-          alternatives: languageAlternatives(matches, item, part),
+          alternatives: coordinatedLanguages(matches, item, part, true).filter(member => member !== item).map(member => member.language),
         });
       }
     }
@@ -259,6 +292,110 @@ function authorizedIn(profile, country) {
     if (profile.outside_home_authorized === false || profile.sponsorship_outside_home === true) return false;
   }
   return null;
+}
+
+function softRequirement(clause, match) {
+  return NEGATED_REQUIREMENT.test(clause.text)
+    || PREFERRED.test(match[0])
+    || languagePreference(clause.text, match.index, match.index + match[0].length, clause.preferred).preferred;
+}
+
+function alternativeWorkTargets(text, end) {
+  const targets = [];
+  const pattern = new RegExp(`^\\s+(?:or|oder)\\s+(?:(?:must\\s+)?(?:be\\s+(?:based|resident|located)\\s+in|have\\s+(?:the\\s+)?right\\s+to\\s+work\\s+in)\\s+)?(${COUNTRY_CAPTURE}|(?:the\\s+)?EU|(?:the\\s+)?EEA)\\b`, 'i');
+  let rest = text.slice(end);
+  for (let match; (match = pattern.exec(rest)); rest = rest.slice(match[0].length)) targets.push(match[1]);
+  return targets;
+}
+
+function meetsResidence(profile, target) {
+  const normalized = target.replace(/^the\s+/i, '').toLowerCase();
+  const region = normalized === 'eu' ? EU : normalized === 'eea' ? EEA : null;
+  const country = countryCode(normalized);
+  if (!profile.residence_country || (!region && !country)) return null;
+  return region ? region.has(profile.residence_country) : country === profile.residence_country;
+}
+
+const CALENDAR_MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+const CALENDAR_TERM = `(?:${CALENDAR_MONTHS.join('|')}|spring|summer|fall|autumn|winter)`;
+function cohortBoundary(year, term, end) {
+  let month = end ? 12 : 1;
+  if (term) {
+    const index = CALENDAR_MONTHS.indexOf(term.toLowerCase());
+    if (index >= 0) month = index + 1;
+    else {
+      // Winter straddles calendar years; retain the broad year when ambiguous.
+      const seasons = { spring: [3, 5], summer: [6, 8], fall: [9, 11], autumn: [9, 11], winter: [1, 12] };
+      month = seasons[term.toLowerCase()][end ? 1 : 0];
+    }
+  }
+  const day = end ? new Date(Date.UTC(Number(year), month, 0)).getUTCDate() : 1;
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+function graduationRequirements(raw, candidateDate) {
+  const result = [];
+  const between = new RegExp(`\\b(?:graduated|graduate|graduating|graduation)\\s+(?:date\\s+)?(?:must\\s+be\\s+)?between\\s+(?:(${CALENDAR_TERM})\\s+)?(20\\d{2})\\s+(?:and|to|[-–])\\s+(?:(${CALENDAR_TERM})\\s+)?(20\\d{2})\\b`, 'gi');
+  const during = new RegExp(`\\b(?:graduated|graduate|graduating|graduation)\\s+(?:during|in)\\s+(?:(${CALENDAR_TERM})\\s+)?(20\\d{2})\\b`, 'gi');
+  for (const clause of clauses(raw).flatMap(assertionParts)) {
+    if (clause.preferred || NEGATED_REQUIREMENT.test(clause.text) || /\bour (?:team|colleagues)\b/i.test(clause.text)) continue;
+    const windows = [
+      ...[...clause.text.matchAll(between)].map(match => ({ match,
+        start: cohortBoundary(match[2], match[1], false), end: cohortBoundary(match[4], match[3], true) })),
+      ...[...clause.text.matchAll(during)].map(match => ({ match,
+        start: cohortBoundary(match[2], match[1], false), end: cohortBoundary(match[2], match[1], true) })),
+    ].sort((a, b) => a.match.index - b.match.index);
+    const required = windows.filter(window => window.start <= window.end
+      && !PREFERRED.test(clause.text.slice(window.match.index + window.match[0].length).split(/\bor\b/i)[0])
+      && !PREFERRED.test(clause.text.slice(0, window.match.index)));
+    const groups = [];
+    for (const window of required) {
+      const previous = groups.at(-1)?.at(-1);
+      const gap = previous && clause.text.slice(previous.match.index + previous.match[0].length, window.match.index);
+      if (previous && /^\s+or\s+(?:to\s+)?$/i.test(gap)) groups.at(-1).push(window);
+      else groups.push([window]);
+    }
+    for (const group of groups) {
+      const satisfied = candidateDate && group.find(window => candidateDate >= window.start && candidateDate <= window.end);
+      const selected = satisfied || group[0];
+      result.push({ start: selected.start, end: selected.end, candidate_date: candidateDate,
+        eligible: candidateDate ? Boolean(satisfied) : null,
+        evidence: evidenceFor(raw, clause, group[0].match.index, group.at(-1).match.index + group.at(-1).match[0].length) });
+    }
+  }
+  return result;
+}
+
+// Decode with an index map so classifier-normalized text can be traced back to
+// verbatim HTML, including numeric entities representing digits.
+function experienceSource(raw) {
+  const named = { nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", ndash: '–', mdash: '—' };
+  let text = '';
+  const spans = [];
+  for (const match of raw.matchAll(/<[^>]*>|&(?:#x[\da-f]+|#\d+|[a-z]+);|[\s\S]/gi)) {
+    const source = match[0];
+    let value = source;
+    if (source.startsWith('<')) value = ' ';
+    else if (source.startsWith('&')) {
+      const key = source.slice(1, -1);
+      if (key.startsWith('#')) {
+        const number = /^#x/i.test(key) ? parseInt(key.slice(2), 16) : parseInt(key.slice(1), 10);
+        if (number <= 0x10ffff && !(number >= 0xd800 && number <= 0xdfff)) value = String.fromCodePoint(number);
+      } else value = named[key.toLowerCase()] ?? source;
+    }
+    for (const char of value) {
+      if (/\s/u.test(char)) {
+        if (!text || text.endsWith(' ')) {
+          if (text) spans.at(-1).end = match.index + source.length;
+          continue;
+        }
+        value = ' ';
+      } else value = char;
+      text += value;
+      for (let index = 0; index < value.length; index++) spans.push({ start: match.index, end: match.index + source.length });
+    }
+  }
+  return { text, spans };
 }
 
 /** Pure deterministic check. options.experiencePolicy follows experience-policy.mjs. */
@@ -290,12 +427,13 @@ export function prescreenJob({ title = '', description = '', location = '', coun
     work.status = 'restricted';
     if (!work.evidence) work.evidence = evidence;
   };
-  for (const clause of clauses(raw)) {
+  for (const clause of clauses(raw).flatMap(assertionParts)) {
     const noSponsorship = [...clause.text.matchAll(NO_SPONSORSHIP)];
     if (noSponsorship.length || SPONSORSHIP_AVAILABLE.test(clause.text)) sponsorshipMentioned = true;
     // A conditional exclusion with an explicit exception needs human review.
-    const conditional = /\b(?:if|unless|except|or|for\s+(?:EU|EEA)|only for)\b/i.test(clause.text);
+    const conditional = /\b(?:if|unless|except|for\s+(?:EU|EEA)|only for)\b|\bor\s+(?:be\s+)?eligible\s+for\s+(?:visa\s+)?sponsorship\b/i.test(clause.text);
     for (const match of noSponsorship) {
+      if (languagePreference(clause.text, match.index, match.index + match[0].length, clause.preferred).preferred) continue;
       const evidence = evidenceFor(raw, clause, match.index, match.index + match[0].length);
       if (!conditional && !SPONSORSHIP_AVAILABLE.test(clause.text.replace(match[0], ''))) {
         work.evidence ||= evidence;
@@ -303,50 +441,42 @@ export function prescreenJob({ title = '', description = '', location = '', coun
       }
     }
     for (const match of clause.text.matchAll(EXISTING_RIGHT)) {
+      if (softRequirement(clause, match)) continue;
       const requiredCountry = countryCode(match[1] ?? match[2]) ?? jobCountry;
+      const alternatives = alternativeWorkTargets(clause.text, match.index + match[0].length);
       const evidence = evidenceFor(raw, clause, match.index, match.index + match[0].length);
-      if (!conditional && authorizedIn(candidate, requiredCountry) === false) restrict(evidence, `Existing work authorization in ${requiredCountry} is required`);
+      if (!conditional && authorizedIn(candidate, requiredCountry) === false
+        && alternatives.every(target => authorizedIn(candidate, countryCode(target)) === false)) restrict(evidence, `Existing work authorization in ${requiredCountry} is required`);
       else if (authorizedIn(candidate, requiredCountry) === true) work.evidence ||= evidence;
     }
     for (const match of clause.text.matchAll(BASED)) {
-      const target = match[1].replace(/^the\s+/i, '').toLowerCase();
-      const region = target === 'eu' ? EU : target === 'eea' ? EEA : null;
-      const targetCountry = countryCode(target);
-      if (!conditional && candidate.residence_country && (region ? !region.has(candidate.residence_country)
-        : targetCountry && targetCountry !== candidate.residence_country)) {
+      if (softRequirement(clause, match)) continue;
+      const targets = [match[1], ...alternativeWorkTargets(clause.text, match.index + match[0].length)];
+      if (!conditional && targets.every(target => meetsResidence(candidate, target) === false)) {
         restrict(evidenceFor(raw, clause, match.index, match.index + match[0].length), 'Current residence does not meet the explicit location restriction');
       }
     }
     for (const match of clause.text.matchAll(CITIZENSHIP)) {
+      if (softRequirement(clause, match)) continue;
       const region = /EEA|European Economic Area/i.test(match[1] ?? match[2]) ? EEA : EU;
       if (!conditional && candidate.citizenship_countries.length && !candidate.citizenship_countries.some(code => region.has(code))) {
         restrict(evidenceFor(raw, clause, match.index, match.index + match[0].length), 'The profile citizenship does not meet the explicit citizenship restriction');
       }
     }
   }
-  if (!sponsorshipMentioned) flags.push({ code: 'sponsorship_unknown', evidence: '' });
+  if (!sponsorshipMentioned && auth === false) flags.push({ code: 'sponsorship_unknown', evidence: '' });
 
   let graduation = null;
-  for (const clause of clauses(raw)) {
-    if (clause.preferred || PREFERRED.test(clause.text) || /\b(?:our team|our colleagues|not required)\b/i.test(clause.text)) continue;
-    const match = /\b(?:graduated|graduate|graduating|graduation)\s+(?:date\s+)?(?:must\s+be\s+)?between\s+(20\d{2})\s+(?:and|to|[-–])\s+(20\d{2})\b/i.exec(clause.text);
-    if (!match || Number(match[1]) > Number(match[2])) continue;
-    const evidence = evidenceFor(raw, clause, match.index, match.index + match[0].length);
-    const start = `${match[1]}-01-01`;
-    const end = `${match[2]}-12-31`;
-    const eligible = candidate.graduation_date ? candidate.graduation_date >= start && candidate.graduation_date <= end : null;
-    graduation ??= { start, end, candidate_date: candidate.graduation_date, eligible, evidence };
-    if (eligible === false) addBlocker('graduation_window', evidence, `Profile graduation ${candidate.graduation_date} is outside ${start} through ${end}`);
+  for (const window of graduationRequirements(raw, candidate.graduation_date)) {
+    graduation ??= window;
+    if (window.eligible === false) addBlocker('graduation_window', window.evidence, `Profile graduation ${candidate.graduation_date} is outside ${window.start} through ${window.end}`);
   }
 
   const experience = classifyExperienceRequirements(raw, options.experiencePolicy ?? { normal_max_years: 2, outside_min_years: 4 });
+  const source = experience?.requirements.length ? experienceSource(raw) : null;
   for (const requirement of experience?.requirements ?? []) {
-    // The shared parser normalizes whitespace/HTML. Find a verbatim span instead.
-    const escaped = requirement.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      .replace(/\s+/g, '(?:\\s|<[^>]*>|&nbsp;|&#(?:160|32);|&#x(?:a0|20);)+')
-      .replace(/–/g, '(?:–|&ndash;|&#8211;|&#x2013;)')
-      .replace(/—/g, '(?:—|&mdash;|&#8212;|&#x2014;)');
-    const evidence = raw.match(new RegExp(escaped, 'iu'))?.[0];
+    const index = source.text.toLowerCase().indexOf(requirement.text.toLowerCase());
+    const evidence = index < 0 ? null : raw.slice(source.spans[index].start, source.spans[index + requirement.text.length - 1].end);
     if (!evidence || evidence.length > 200) continue;
     if (requirement.hard_blocker) addBlocker('experience_outside', evidence, experience.hard_blocker_reason);
     else if (requirement.strength === 'required' && requirement.interpretation === 'stretch') flags.push({ code: 'experience_stretch', evidence });

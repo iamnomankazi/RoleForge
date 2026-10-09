@@ -138,13 +138,123 @@ test('Finland authorization is met, and sponsorship exclusions there do not bloc
     assert.equal(result.work_authorization.country, 'fi');
   }
 });
-test('sponsorship silence only produces a flag, also in Finland', () => {
+test('sponsorship silence only produces a flag when sponsorship is needed', () => {
   for (const location of ['Berlin', 'Helsinki', 'Remote - EU']) {
     const result = screen('Build backend services with Python.', location);
     assert.deepEqual(result.blockers, []);
-    assert.ok(hasFlag(result, 'sponsorship_unknown'));
-    assert.equal(result.flags.find(item => item.code === 'sponsorship_unknown').evidence, '');
+    assert.equal(hasFlag(result, 'sponsorship_unknown'), location === 'Berlin');
+    if (location === 'Berlin') assert.equal(result.flags.find(item => item.code === 'sponsorship_unknown').evidence, '');
   }
+});
+
+test('finding 1: language negation governs only its own assertion', () => {
+  assert.deepEqual(screen('We do not require fluent German').blockers, []);
+  const result = screen('Fluent German required and French not required');
+  assert.deepEqual(result.blockers.map(item => item.code), ['language_required']);
+  assert.equal(result.language_requirements[0].language, 'german');
+});
+test('finding 2: negated authorization and residence assertions do not restrict', () => {
+  for (const text of ['You do not need to have the right to work in Germany', 'You do not have to be based in Germany']) {
+    assert.deepEqual(screen(text).blockers, [], text);
+  }
+});
+test('finding 3: unrelated alternatives do not suppress authorization restrictions', () => {
+  for (const text of ['We cannot sponsor visas or work permits', 'EU/EEA citizens only, Python or Java required']) {
+    assert.deepEqual(screen(text).blockers.map(item => item.code), ['work_auth_restricted'], text);
+  }
+});
+test('finding 4: preference governs the entire coordinated language list', () => {
+  const result = screen('Fluent German and French are a plus');
+  assert.deepEqual(result.blockers, []);
+  assert.deepEqual(result.language_requirements.map(({ language, required }) => ({ language, required })), [
+    { language: 'german', required: false }, { language: 'french', required: false },
+  ]);
+});
+test('finding 5: German hyphenated language alternatives share proficiency', () => {
+  const result = screen('Fließende Deutsch- oder Englischkenntnisse');
+  assert.deepEqual(result.blockers, []);
+  assert.deepEqual(result.language_requirements.map(item => item.language).sort(), ['english', 'german']);
+});
+test('finding 6: explicit German minimum CEFR is required', () => {
+  const result = screen('Deutschkenntnisse auf mindestens B2-Niveau erforderlich');
+  assert.deepEqual(result.blockers.map(item => item.code), ['language_required']);
+  assert.equal(result.language_requirements[0].level, 'B2');
+});
+test('finding 7: excellent proficiency exceeds basic', () => {
+  const result = screen('Excellent German required');
+  assert.deepEqual(result.blockers.map(item => item.code), ['language_required']);
+  assert.equal(result.language_requirements[0].level, 'C1');
+});
+test('finding 8: team language descriptions do not require candidate proficiency', () => {
+  assert.deepEqual(screen('Our team speaks fluent German').blockers, []);
+});
+test('finding 9: all country names, codes and cities contribute to ambiguity', () => {
+  const result = screen('No visa sponsorship', 'Helsinki, FI / Berlin, Germany');
+  assert.equal(result.work_authorization.country, null);
+  assert.deepEqual(result.blockers, []);
+  assert.equal(derivePrescreenCountry('Helsinki, Finland / Berlin'), null);
+});
+test('finding 10: graduation windows accept seasons and months', () => {
+  for (const text of ['You will graduate between fall 2027 and summer 2028 with a degree in Computer Science',
+    'Applicants must graduate between June 2025 and June 2026']) {
+    assert.deepEqual(screen(text).blockers.map(item => item.code), ['graduation_window'], text);
+  }
+});
+test('finding 11: graduation preference, negation and alternatives have assertion scope', () => {
+  assert.deepEqual(screen('Graduating between 2023 and 2025 required, Python preferred').blockers.map(item => item.code), ['graduation_window']);
+  assert.deepEqual(screen('Graduating between 2023 and 2025 is not necessary').blockers, []);
+  const alternative = screen('Applicants must have graduated between 2023 and 2025 or graduate during 2026');
+  assert.deepEqual(alternative.blockers, []);
+  assert.equal(alternative.graduation_window.eligible, true);
+});
+test('finding 12: decoded experience digits preserve verbatim source evidence', () => {
+  for (const evidence of ['&#52; years', '4 years']) {
+    const result = screen(`${evidence} of experience required`);
+    assert.equal(result.experience.numeric_hard_blocker, true);
+    assert.deepEqual(result.blockers.map(item => item.code), ['experience_outside']);
+    assert.equal(result.blockers[0].evidence, evidence);
+  }
+});
+test('finding 13: authorized Finland roles need no sponsorship uncertainty flag', () => {
+  const result = screen('Build backend services.', 'Helsinki, Finland');
+  assert.deepEqual(result.blockers, []);
+  assert.deepEqual(result.flags, []);
+  assert.equal(result.work_authorization.status, 'authorized');
+});
+test('finding 14: US city/state locations do not interpret states as country codes', () => {
+  assert.equal(derivePrescreenCountry('Wilmington, DE'), 'us');
+  assert.equal(screen('Build backend services.', 'Wilmington, DE').work_authorization.country, 'us');
+});
+test('candidate language assertions survive compacted descriptive text', () => {
+  const text = 'You possess excellent German and English skills (minimum C1 level)You can work in our office';
+  assert.ok(hasBlock(screen(text), 'language_required'));
+  assert.deepEqual(screen('Our customers speak fluent German and Python required').blockers, []);
+  assert.ok(hasBlock(screen('Fluent German required and no need for French'), 'language_required'));
+});
+test('coordinated language preferences preserve independent assertions', () => {
+  assert.deepEqual(screen('Fluent German, French are a plus').blockers, []);
+  const result = screen('Fluent German preferred and Fluent French required');
+  assert.equal(result.language_requirements.find(item => item.language === 'german').required, false);
+  assert.equal(result.language_requirements.find(item => item.language === 'french').required, true);
+  assert.ok(hasBlock(result, 'language_required'));
+});
+test('work restrictions accept satisfied country alternatives and direct preferences', () => {
+  for (const text of ['Must be based in Germany or Finland', 'Must have the right to work in Germany or Finland',
+    'EU citizenship preferred', 'EU/EEA citizens only preferred', 'Must be based in Germany preferred']) {
+    assert.deepEqual(screen(text).blockers, [], text);
+  }
+  assert.ok(hasBlock(screen('Must be based in Germany or France'), 'work_auth_restricted'));
+  assert.equal(derivePrescreenCountry('Berlin, DE'), 'de');
+  assert.equal(derivePrescreenCountry('Wilmington, DE / Helsinki, Finland'), null);
+});
+test('graduation calendar boundaries are inclusive and experience hex digits retain evidence', () => {
+  const text = 'Applicants must graduate between June 2025 and June 2026';
+  const result = screen(text);
+  assert.equal(result.graduation_window.start, '2025-06-01');
+  assert.equal(result.graduation_window.end, '2026-06-30');
+  assert.deepEqual(screen(text, 'Berlin', { ...profile, graduation_date: '2026-06-30' }).blockers, []);
+  assert.ok(hasBlock(screen(text, 'Berlin', { ...profile, graduation_date: '2026-07-01' }), 'graduation_window'));
+  assert.equal(screen('&#x34; years of experience required').blockers[0].evidence, '&#x34; years');
 });
 for (const text of ['We sponsor visas', 'Visa sponsorship available',
   'No sponsorship needed for EU citizens; we sponsor others',
