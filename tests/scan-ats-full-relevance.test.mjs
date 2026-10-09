@@ -119,7 +119,8 @@ test('pre-screen annotates eligible jobs without rejecting and deduplicates bloc
   assert.equal(matches.length, 1);
   assert.deepEqual(job.prescreen, expected);
   assert.ok(job.prescreen.blockers.length > 0);
-  assert.ok(job.prescreen.flags.some(flag => flag.code === 'sponsorship_unknown'));
+  // Finland role for a Finland-authorized candidate: sponsorship is irrelevant, so no flag.
+  assert.ok(!job.prescreen.flags.some(flag => flag.code === 'sponsorship_unknown'));
   assert.deepEqual(job.languageRequirements, expected.language_requirements);
   assert.equal(job.hardBlockers.filter(value => value === duplicateBlocker).length, 1);
   assert.ok(job.hardBlockers.includes(job.experienceMetadata.hard_blocker_reason));
