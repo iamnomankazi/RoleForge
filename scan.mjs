@@ -97,17 +97,42 @@ const CONCURRENCY = 10;
 
 // ── Title filter ────────────────────────────────────────────────────
 
-// Compile a lowercased keyword into a matcher. Short all-letter acronyms
-// (2-3 chars: cfo, coo, sdr, bdr, gsi…) match on WORD BOUNDARIES so "COO" no
-// longer matches "Coordinator", "SDR" no longer matches anything mid-word, etc.
-// Multi-word phrases and keywords containing non-letters (".NET", "SAP ",
-// "L&D") keep fast, permissive substring matching.
+// Fold accents and match whole words/phrases at Unicode-aware boundaries.
+// A trailing `*` on a token matches any continuation of that token, which
+// covers inflections such as Entwickler* and Werkstudent* without matching
+// the keyword in the middle of another word.
+const FILTER_WORD_CHAR = String.raw`[\p{L}\p{N}\p{M}_]`;
+
+function normalizeFilterText(value) {
+  return String(value ?? '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+}
+
+function escapeFilterRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export function compileKeyword(kw) {
-  if (/^[a-z]{2,3}$/.test(kw)) {
-    const re = new RegExp(`\\b${kw}\\b`);
-    return (lower) => re.test(lower);
-  }
-  return (lower) => lower.includes(kw);
+  const keyword = normalizeFilterText(kw).trim();
+  if (!keyword) return () => false;
+
+  const pieces = keyword.split(/(\s+)/u);
+  let wildcardAtEnd = false;
+  const pattern = pieces.map((piece, index) => {
+    if (/^\s+$/u.test(piece)) return String.raw`\s+`;
+    if (piece.endsWith('*')) {
+      const prefix = piece.slice(0, -1);
+      if (!prefix) return escapeFilterRegex(piece);
+      wildcardAtEnd = index === pieces.length - 1;
+      return `${escapeFilterRegex(prefix)}${FILTER_WORD_CHAR}*`;
+    }
+    return escapeFilterRegex(piece);
+  }).join('');
+
+  // A keyword ending in a letter also matches its plural ("api" -> "APIs").
+  const plural = !wildcardAtEnd && /\p{L}$/u.test(keyword) ? '(?:e?s)?' : '';
+  const source = `(?<!${FILTER_WORD_CHAR})${pattern}${wildcardAtEnd ? '' : `${plural}(?!${FILTER_WORD_CHAR})`}`;
+  const re = new RegExp(source, 'u');
+  return (text) => re.test(normalizeFilterText(text));
 }
 
 export function buildTitleFilter(titleFilter) {
@@ -115,14 +140,14 @@ export function buildTitleFilter(titleFilter) {
   // non-string entry in the YAML) must not crash the scan via k.toLowerCase().
   const normalize = (arr) => (Array.isArray(arr) ? arr : [])
     .filter(k => typeof k === 'string')
-    .map(k => k.trim().toLowerCase())
+    .map(k => k.trim())
     .filter(k => k.length > 0)
     .map(compileKeyword);
   const positive = normalize(titleFilter?.positive);
   const negative = normalize(titleFilter?.negative);
 
   return (title) => {
-    const lower = (title || '').toLowerCase();
+    const lower = normalizeFilterText(title || '');
     const hasPositive = positive.length === 0 || positive.some(m => m(lower));
     const hasNegative = negative.some(m => m(lower));
     return hasPositive && !hasNegative;
@@ -149,7 +174,7 @@ function compiledPositiveMatchers(positiveList) {
 // overrides to only the categories that opted into a stricter content check.
 export function matchedTitleKeywords(title, titleFilter) {
   const raw = Array.isArray(titleFilter?.positive) ? titleFilter.positive : [];
-  const lower = (title || '').toLowerCase();
+  const lower = normalizeFilterText(title || '');
   return compiledPositiveMatchers(raw)
     .filter(({ match }) => match(lower))
     .map(({ raw: kw }) => kw);
@@ -425,43 +450,45 @@ export function extractHttpUrlsFromMarkdown(text) {
 
 export function buildContentFilter(contentFilter, { experiencePolicy = null } = {}) {
   if (!contentFilter) return () => true;
-  const positive = normalizeKeywordList(contentFilter.positive);
+  const positive = normalizeKeywordList(contentFilter.positive).map(compileKeyword);
   const preserveNumericExperience = Boolean(experiencePolicy);
   const negative = normalizeKeywordList(contentFilter.negative)
-    .filter(keyword => !(preserveNumericExperience && isNumericExperienceKeyword(keyword)));
+    .filter(keyword => !(preserveNumericExperience && isNumericExperienceKeyword(keyword)))
+    .map(compileKeyword);
 
   const byTitleKeyword = new Map();
   if (contentFilter.by_title_keyword && typeof contentFilter.by_title_keyword === 'object' && !Array.isArray(contentFilter.by_title_keyword)) {
     for (const [kw, rule] of Object.entries(contentFilter.by_title_keyword)) {
       if (typeof kw !== 'string' || !kw.trim()) continue;
-      byTitleKeyword.set(kw.trim().toLowerCase(), {
-        positive: normalizeKeywordList(rule?.positive),
+      byTitleKeyword.set(normalizeFilterText(kw.trim()), {
+        positive: normalizeKeywordList(rule?.positive).map(compileKeyword),
         negative: normalizeKeywordList(rule?.negative)
-          .filter(keyword => !(preserveNumericExperience && isNumericExperienceKeyword(keyword))),
+          .filter(keyword => !(preserveNumericExperience && isNumericExperienceKeyword(keyword)))
+          .map(compileKeyword),
       });
     }
   }
 
   return (description, matchedKeywords = []) => {
     if (typeof description !== 'string' || description.trim() === '') return true;
-    const lower = description.toLowerCase();
+    const lower = normalizeFilterText(description);
 
     const overrides = matchedKeywords
       .filter(k => typeof k === 'string')
-      .map(k => byTitleKeyword.get(k.trim().toLowerCase()))
+      .map(k => byTitleKeyword.get(normalizeFilterText(k.trim())))
       .filter(Boolean);
 
     if (overrides.length > 0) {
       return overrides.some(rule => {
-        if (rule.negative.length > 0 && rule.negative.some(k => lower.includes(k))) return false;
+        if (rule.negative.length > 0 && rule.negative.some(match => match(lower))) return false;
         if (rule.positive.length === 0) return true;
-        return rule.positive.some(k => lower.includes(k));
+        return rule.positive.some(match => match(lower));
       });
     }
 
-    if (negative.length > 0 && negative.some(k => lower.includes(k))) return false;
+    if (negative.length > 0 && negative.some(match => match(lower))) return false;
     if (positive.length === 0) return true;
-    return positive.some(k => lower.includes(k));
+    return positive.some(match => match(lower));
   };
 }
 
