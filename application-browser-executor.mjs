@@ -9,6 +9,8 @@
  * and manual submission remain required. It never reads or writes the tracker.
  */
 
+import { createInterface } from 'node:readline';
+import { applicationFormStateFingerprint, classifyHumanGate, inspectApplicationForm, sanitizeHumanGateUrl } from './application-form-core.mjs';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'path';
@@ -21,6 +23,7 @@ import {
   recordStaleLockRecovery,
 } from './application-batch.mjs';
 import { checkLivenessViaApi } from './liveness-api.mjs';
+import { classifyLiveness } from './liveness-core.mjs';
 import {
   checkUrlLiveness,
   LIVENESS_CONTEXT_OPTIONS,
@@ -194,6 +197,12 @@ export function parseExecutorArgs(argv) {
       keepOpenExplicit = true;
       continue;
     }
+    if (arg === '--human-wait-ms') {
+      const value = Number(argv[++index]);
+      if (!Number.isFinite(value) || value <= 0 || options.humanWaitMs != null) throw new Error('Invalid or duplicate --human-wait-ms');
+      options.humanWaitMs = value;
+      continue;
+    }
     if (!['--manifest', '--candidate-id'].includes(arg)) {
       throw new Error(`Unknown or forbidden option: ${arg}`);
     }
@@ -219,27 +228,27 @@ export function parseExecutorArgs(argv) {
 }
 
 export function assertExecutorState(options, contract) {
-  const expected = options.resumeLogin ? ['login_required']
-    : options.resumePreparation ? ['actual_form_reached', 'review_required', 'blocked'] : ['not_opened'];
+  const expected = options.resumeLogin ? ['login_required', 'human_action_required']
+    : options.resumePreparation ? ['actual_form_reached', 'review_required', 'blocked', 'login_required', 'human_action_required'] : ['not_opened'];
   if (!expected.includes(contract.candidateState.state)) {
     throw new Error(options.resumeLogin
-      ? `Login resume requires login_required state for this exact candidate, found ${contract.candidateState.state}`
+      ? `Login resume requires login_required (or human_action_required) state for this exact candidate, found ${contract.candidateState.state}`
       : options.resumePreparation
-        ? `Preparation resume requires actual_form_reached, review_required, or blocked state, found ${contract.candidateState.state}`
+        ? `Preparation resume requires actual_form_reached, review_required, or blocked (also login_required or human_action_required) state, found ${contract.candidateState.state}`
         : `Candidate is already ${contract.candidateState.state}; use the explicit same-candidate resume mode when applicable`);
   }
   return contract.candidateState.state;
 }
 
 export function preparationGateState(preparation) {
-  return ['login_required', 'review_required', 'blocked'].includes(preparation?.gate?.state)
+  return ['human_action_required', 'login_required', 'review_required', 'blocked'].includes(preparation?.gate?.state)
     ? preparation.gate.state
     : 'review_required';
 }
 
 export function shouldKeepBrowserOpen(candidateState) {
   if (!candidateState) return false;
-  if (['actual_form_reached', 'form_prepared', 'review_required', 'login_required'].includes(candidateState.state)) return true;
+  if (['actual_form_reached', 'form_prepared', 'review_required', 'login_required', 'human_action_required'].includes(candidateState.state)) return true;
   return candidateState.state === 'blocked'
     && Boolean(candidateState.formPreparation?.captcha?.manualActionRequired);
 }
@@ -319,7 +328,9 @@ export function classifyFormSnapshot(snapshot) {
     && normalized(control.formMethod) === 'post'
     && /\b(?:submit application|send application|complete application|apply now)\b/.test(normalized(control.text))
   ));
-  const actualForm = !loginRequired && (
+  const humanGate = Object.hasOwn(snapshot || {}, 'humanGate')
+    ? snapshot.humanGate : classifyHumanGate(snapshot).gate;
+  const actualForm = !loginRequired && !humanGate && (
     (signalIndexes.size >= 2 && (formCount > 0 || fields.length >= 3))
     || (hasEmail && hasResume)
     || (pathLooksLikeApplication && signalIndexes.size >= 1 && formCount > 0)
@@ -328,6 +339,7 @@ export function classifyFormSnapshot(snapshot) {
 
   return {
     loginRequired,
+    humanGate,
     actualForm,
     candidateFieldSignals: signalIndexes.size,
     reason: loginRequired
@@ -649,7 +661,10 @@ export async function collectPageSnapshot(page) {
       },
     };
   });
-  return { ...snapshot, currentUrl: page.url() };
+  const gateSnapshot = await inspectApplicationForm(page, { gateOnly: true });
+  return { ...snapshot, currentUrl: page.url(), humanGate: classifyHumanGate(gateSnapshot).gate,
+    applicationFormId: gateSnapshot.applicationFormId,
+    formFingerprint: applicationFormStateFingerprint(gateSnapshot) };
 }
 
 async function inspectEntryControl(locator) {
@@ -849,7 +864,7 @@ async function activateSiteChromeAction(page, expected) {
 export async function clearBenignListingSiteChrome(page) {
   const before = await collectPageSnapshot(page);
   const form = classifyFormSnapshot(before);
-  if (form.actualForm || form.candidateFieldSignals > 0) {
+  if (form.actualForm || form.humanGate || form.candidateFieldSignals > 0) {
     return { cleared: false, detected: false, actions: [], reason: 'Application form is already present.' };
   }
   let actions = await inspectBenignSiteChromeActions(page);
@@ -922,6 +937,7 @@ async function inspectContinuationAttempt(context, page, before, beforeUrl, expe
         && currentSurface.candidateFieldFingerprint !== baselineSurface.candidateFieldFingerprint;
       const verifiedNavigation = safePredictedEntryDestination(snapshot.currentUrl, { listingUrl: beforeUrl });
       return form.actualForm
+        || form.humanGate
         || (verifiedNavigation && form.loginRequired)
         || applicationSurfaceChanged
         || (verifiedNavigation && meaningfulSnapshot(snapshot) && candidatePage !== page && snapshot.currentUrl !== 'about:blank')
@@ -1003,6 +1019,7 @@ export async function followSafeContinuation(context, page, control, scope, {
 } = {}) {
   const beforeUrl = page.url();
   const baselineSnapshot = await collectPageSnapshot(page);
+  if (classifyFormSnapshot(baselineSnapshot).humanGate) return page;
   const expectedDestination = predictedEntryDestination(control);
   const method = normalized(control.tag) === 'a' ? 'verified_href_navigation' : 'playwright_click';
   let acquired = null;
@@ -1024,6 +1041,7 @@ export async function followSafeContinuation(context, page, control, scope, {
     } else {
       await acquired.locator.scrollIntoViewIfNeeded({ timeout: 3_000 }).catch(() => {});
       const activationForm = classifyFormSnapshot(await collectPageSnapshot(page));
+      if (activationForm.humanGate) return page;
       acquired = await reacquireSafeContinuation(page, control, {
         ...freshScope,
         actualFormReached: freshScope.actualFormReached || activationForm.actualForm,
@@ -1102,7 +1120,7 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
   let siteChromeRecoveries = 0;
   let hopLimit = 1;
 
-  while (!form.actualForm && !form.loginRequired && hops.length < hopLimit) {
+  while (!form.actualForm && !form.loginRequired && !form.humanGate && hops.length < hopLimit) {
     const embeddedFrame = await verifiedEmbeddedApplicationFrame(page, snapshot);
     if (embeddedFrame) {
       const sourceUrl = snapshot.currentUrl;
@@ -1211,7 +1229,7 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
                 actualFormReached: form.actualForm,
                 candidateFieldSignals: form.candidateFieldSignals,
               };
-              if (form.actualForm || form.loginRequired || selectSafeApplyContinuation(snapshot.controls, refreshedScope)) break;
+              if (form.actualForm || form.loginRequired || form.humanGate || selectSafeApplyContinuation(snapshot.controls, refreshedScope)) break;
               await page.waitForTimeout(200);
             } while (Date.now() < entryResnapshotDeadline);
             identity = verifyVisibleIdentity(snapshot, candidate);
@@ -1274,7 +1292,7 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
         reason: `Application-entry destination is incompatible: ${identity.reason}`,
       };
     }
-    if (form.actualForm || form.loginRequired) break;
+    if (form.actualForm || form.loginRequired || form.humanGate) break;
 
     const destinationKey = canonicalVisitedUrl(snapshot.currentUrl);
     if (visitedUrls.has(destinationKey)) {
@@ -1325,6 +1343,181 @@ function transition(manifestPath, candidateId, toState, currentUrl, reason, expe
     formPreparation,
     root,
   });
+}
+
+export const DEFAULT_HUMAN_WAIT_MS = 10 * 60 * 1000;
+
+function subscribeToEnter(callback) {
+  if (!process.stdin.isTTY) return () => {};
+  const input = createInterface({ input: process.stdin, terminal: false });
+  input.on('line', callback);
+  return () => input.close();
+}
+
+function candidateResult(contract, state) {
+  return {
+    batchId: contract.manifest.batchId,
+    candidate: contract.candidate.listingUrl,
+    candidateId: contract.candidate.candidate_id,
+    state: state.state,
+    currentUrl: state.currentUrl,
+    submissionAvailable: false,
+    trackerUpdated: false,
+  };
+}
+
+async function waitForCandidateReview(browser, ownsBrowser, state, options, dependencies) {
+  if (!ownsBrowser || !options.keepOpen || state.state === 'human_action_required'
+      || !shouldKeepBrowserOpen(state) || !browser.isConnected()) return;
+  console.log(`${state.state}. The final action remains untouched. Close the task browser to finish.`);
+  await (dependencies.waitForBrowserClose || ((active) => new Promise((done) => active.once('disconnected', done))))(browser);
+}
+
+function compatibleHumanDestination(contract, currentUrl, identity, gateUrl) {
+  const origins = [contract.candidate.listingUrl, contract.candidate.applyUrl, gateUrl]
+    .filter(Boolean).map((url) => new URL(url).origin);
+  return origins.includes(new URL(currentUrl).origin) && isCompatibleDestination({
+    listingUrl: contract.candidate.listingUrl, applyUrl: contract.candidate.applyUrl, currentUrl, identity,
+  });
+}
+
+async function checkHumanResumeLiveness(page, listingUrl, timeoutMs) {
+  const guard = rejectPrivateOrInvalid(listingUrl);
+  if (guard) return { result: 'uncertain', reason: guard.reason };
+  // Use the profile's HTTP session without navigating or adding another task
+  // page. A JS-only listing that cannot prove liveness remains safely blocked.
+  const response = await page.context().request.get(listingUrl, { timeout: timeoutMs });
+  const html = await response.text();
+  const signals = await page.evaluate((source) => {
+    const document = new DOMParser().parseFromString(source, 'text/html');
+    for (const element of document.querySelectorAll('script, style, nav, header, footer')) element.remove();
+    return {
+      bodyText: document.body?.textContent || '',
+      applyControls: [...document.querySelectorAll('a, button, input[type="submit"]')]
+        .map((element) => element.textContent || element.value || element.getAttribute('aria-label') || ''),
+    };
+  }, html);
+  return classifyLiveness({ ...signals, status: response.status(), finalUrl: response.url() });
+}
+
+// The completion signal permits checks only. This routine never navigates the
+// human's page, fills a field, or activates an application control.
+async function handoffHumanGate(page, contract, gate, stage, options, { root, executionLock, dependencies }) {
+  const candidateId = contract.candidate.candidate_id;
+  let fresh = loadExecutionContract(contract.manifestPath, candidateId, { root, requireCoverLetter: true });
+  executionLock.heartbeat();
+  if (fresh.candidateState.state === 'not_opened') {
+    // The existing state API permits the initial gate through login_required.
+    transition(contract.manifestPath, candidateId, 'login_required', sanitizeHumanGateUrl(page.url()),
+      'Human verification is required before the listing can be verified.',
+      'not_opened', executionLock.token, null, null, root);
+    fresh = loadExecutionContract(contract.manifestPath, candidateId, { root, requireCoverLetter: true });
+  }
+  let state = fresh.candidateState;
+  if (state.state !== 'human_action_required') {
+    state = transitionCandidateState(contract.manifestPath, candidateId, 'human_action_required', {
+      root, lockToken: executionLock.token, expectedFrom: state.state, currentUrl: page.url(),
+      humanAction: { cause: gate.cause, stage, evidence: gate.evidence },
+    });
+  }
+  const gateUrl = state.humanAction.currentUrl;
+  const log = dependencies.log || console.log;
+  log(`Human action required: ${contract.candidate.company} — ${contract.candidate.title} (${candidateId}); cause: ${gate.cause}. Complete it in the open browser page for this candidate. Never click the final application button. Then press Enter here.`);
+  const clock = dependencies.humanClock || Date.now;
+  const waitMs = options.humanWaitMs ?? DEFAULT_HUMAN_WAIT_MS;
+  if (!Number.isFinite(waitMs) || waitMs <= 0) throw new Error('Invalid human wait duration');
+  const deadline = clock() + waitMs;
+  const sleep = dependencies.humanSleep || ((ms) => new Promise((done) => setTimeout(done, ms)));
+  let signalled = false;
+  let wake = null;
+  const unsubscribe = (dependencies.subscribeHumanCompletion || subscribeToEnter)(() => {
+    signalled = true;
+    wake?.();
+  });
+  const move = (to, url, reason, details = null) => transition(
+    contract.manifestPath, candidateId, to, safeCurrentUrl(url, contract.candidate.listingUrl), reason, 'human_action_required',
+    executionLock.token, details, null, root,
+  );
+  try {
+    while (clock() < deadline && !page.isClosed() && page.context().browser()?.isConnected() !== false) {
+      executionLock.heartbeat();
+      let snapshot;
+      try {
+        snapshot = await collectPageSnapshot(page);
+      } catch (error) {
+        if (page.isClosed() || page.context().browser()?.isConnected() === false) break;
+        throw error;
+      }
+      if (signalled || !snapshot.humanGate) {
+        signalled = false;
+        // Reload immutable source/artifact/manifest authority and verify lock
+        // ownership immediately before and after the asynchronous live check.
+        fresh = loadExecutionContract(contract.manifestPath, candidateId, { root, requireCoverLetter: true });
+        executionLock.heartbeat();
+        if (fresh.candidateState.state !== 'human_action_required') throw new Error('Human handoff state changed concurrently');
+        const identity = verifyVisibleIdentity(snapshot, fresh.candidate);
+        if (!compatibleHumanDestination(fresh, snapshot.currentUrl, identity, gateUrl)) {
+          return move('blocked', snapshot.currentUrl, 'Human handoff redirected outside the exact manifest candidate destination.');
+        }
+        // Enter while still gated leaves the persisted pause intact.
+        if (!snapshot.humanGate) {
+          let live;
+          try {
+            live = await (dependencies.checkLivenessViaApi || checkLivenessViaApi)(fresh.candidate.listingUrl);
+            if (!live || live.result === 'unsupported') {
+              live = await (dependencies.checkHumanResumeLiveness || checkHumanResumeLiveness)(
+                page, fresh.candidate.listingUrl, Math.max(1, Math.min(20_000, deadline - clock())));
+            }
+          } catch (error) {
+            if (page.isClosed() || page.context().browser()?.isConnected() === false || clock() >= deadline) break;
+            return move('blocked', page.url(), `Human handoff posting liveness failed: ${inline(error.message).slice(0, 300)}`);
+          }
+          fresh = loadExecutionContract(contract.manifestPath, candidateId, { root, requireCoverLetter: true });
+          executionLock.heartbeat();
+          if (page.isClosed()) break;
+          if (clock() >= deadline) break;
+          snapshot = await collectPageSnapshot(page);
+          const identityNow = verifyVisibleIdentity(snapshot, fresh.candidate);
+          const compatible = compatibleHumanDestination(fresh, snapshot.currentUrl, identityNow, gateUrl);
+          if (!compatible) return move('blocked', snapshot.currentUrl, 'Human handoff destination changed during revalidation.');
+          if (!snapshot.humanGate) {
+            if (live?.result !== 'active') return move('blocked', snapshot.currentUrl,
+              `Human handoff posting liveness failed: ${inline(live?.reason || 'unconfirmed').slice(0, 300)}`);
+            const form = classifyFormSnapshot(snapshot);
+            if (!identityNow.verified || !form.actualForm || !snapshot.applicationFormId) return move('review_required', snapshot.currentUrl,
+              `Human handoff requires review: ${identityNow.reason}; ${form.reason}`);
+            return move('actual_form_reached', snapshot.currentUrl,
+              'Fresh exact-candidate liveness, identity, destination, gate absence, and actual form verified.',
+              { formFingerprint: snapshot.formFingerprint,
+                humanActionRevalidation: { candidate_id: candidateId, listingLive: true,
+                identityVerified: true, destinationCompatible: true, gateCleared: true, formVerified: true } });
+          }
+        }
+      }
+      // Subscribe once; both a line and the watcher can wake this wait. Remove
+      // the subscriber on every exit so it cannot signal another candidate.
+      await Promise.race([sleep(Math.min(1000, Math.max(0, deadline - clock()))),
+        new Promise((done) => { wake = done; if (signalled) done(); })]);
+      wake = null;
+    }
+  } catch (error) {
+    if (!page.isClosed() && page.context().browser()?.isConnected() !== false) {
+      log(`Human handoff remains paused for ${candidateId}: ${inline(error.message).slice(0, 250)}. Resume the exact manifest and candidate with --resume-preparation after resolving this check.`);
+      throw error;
+    }
+  } finally { unsubscribe?.(); }
+  log(`Human handoff paused for ${candidateId} (${page.isClosed() ? 'browser/page closed' : 'wait timed out'}). Resume with node application-browser-executor.mjs --manifest "${contract.manifestPath}" --candidate-id ${candidateId} --resume-preparation. The same persistent profile will be reopened and freshly checked.`);
+  return state;
+}
+
+async function finishHumanHandoff(page, contract, gate, stage, options, environment) {
+  let state = await handoffHumanGate(page, contract, gate, stage, options, environment);
+  if (state.state === 'actual_form_reached' && options.prepareForm) {
+    const fresh = loadExecutionContract(contract.manifestPath, contract.candidate.candidate_id,
+      { root: environment.root, requireCoverLetter: true });
+    state = await prepareResumedForm(page, fresh, environment.root, environment.executionLock, options, environment.dependencies);
+  }
+  return state;
 }
 
 export async function executeCandidate(options, { root = ROOT, dependencies = {} } = {}) {
@@ -1437,9 +1630,6 @@ export async function executeCandidateInBrowserContext(options, {
   if (!browser || !context || !page) {
     throw new Error('Shared browser execution requires an existing browser, context, and exact candidate page');
   }
-  if (options.resumeLogin) {
-    throw new Error('Shared browser execution does not automate interactive login resume');
-  }
   if (typeof page.context === 'function' && page.context() !== context) {
     throw new Error('Shared candidate page does not belong to the supplied browser context');
   }
@@ -1456,7 +1646,7 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
   const contract = loadExecutionContract(options.manifest, options.candidateId, { root, requireCoverLetter: true });
   assertExecutorState(options, contract);
 
-  if (options.resumeLogin) return executeLoginResume(options, contract, { root, executionLock, dependencies });
+  if (options.resumeLogin) return executePreparationResume(options, contract, { root, executionLock, dependencies });
   if (options.resumePreparation) return executePreparationResume(options, contract, { root, executionLock, dependencies });
 
   const listingUrl = contract.candidate.listingUrl;
@@ -1518,25 +1708,18 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
       );
       return { batchId: contract.manifest.batchId, candidate: listingUrl, state: finalState.state };
     }
-    if (earlyForm.loginRequired) {
-      finalState = listingDestinationCompatible
-        ? recordTransition(
-          contract.manifestPath,
-          listingUrl,
-          'login_required',
-          listingCurrentUrl,
-          earlyForm.reason,
-          'not_opened',
-        )
-        : recordTransition(
-          contract.manifestPath,
-          listingUrl,
-          'blocked',
-          listingCurrentUrl,
-          'Login redirect is not compatible with the selected manifest candidate.',
-          'not_opened',
-        );
-      return { batchId: contract.manifest.batchId, candidate: listingUrl, state: finalState.state };
+    if (earlyForm.humanGate || earlyForm.loginRequired) {
+      if (!listingDestinationCompatible) {
+        finalState = recordTransition(contract.manifestPath, listingUrl, 'blocked', listingCurrentUrl,
+          'Human gate redirect is not compatible with the manifest candidate.', 'not_opened');
+      } else {
+        applicationPage = listingPage;
+        finalState = await finishHumanHandoff(listingPage, contract,
+          earlyForm.humanGate || { cause: 'login', evidence: ['legacy_login_gate'] }, 'listing', options,
+          { root, executionLock, dependencies });
+      }
+      await waitForCandidateReview(browser, ownsBrowser, finalState, options, dependencies);
+      return candidateResult(contract, finalState);
     }
     if (browserLiveness.result !== 'active' && !domConfirmsSafeEntry) {
       finalState = recordTransition(
@@ -1597,25 +1780,20 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
       const formCurrentUrl = safeCurrentUrl(entryFlow.snapshot.currentUrl, listingCurrentUrl);
       latestUrl = formCurrentUrl;
 
-      if (entryFlow.form.loginRequired) {
-        finalState = entryFlow.compatible
-          ? recordTransition(
-            contract.manifestPath,
-            listingUrl,
-            'login_required',
-            formCurrentUrl,
-            `${entryFlow.form.reason}; ${entryFlow.reason}`,
-            'listing_verified',
-          )
-          : recordTransition(
-            contract.manifestPath,
-            listingUrl,
-            'blocked',
-            formCurrentUrl,
-            'Login redirect is not compatible with the selected manifest candidate.',
-            'listing_verified',
-          );
-        return { batchId: contract.manifest.batchId, candidate: listingUrl, state: finalState.state };
+      if (entryFlow.form.humanGate || entryFlow.form.loginRequired) {
+        if (!entryFlow.compatible) {
+          finalState = recordTransition(contract.manifestPath, listingUrl, 'blocked', formCurrentUrl,
+            'Human gate redirect is not compatible with the manifest candidate.', 'listing_verified');
+        } else {
+          applicationPage = formPage;
+          if (dependencies.onCandidatePage) await dependencies.onCandidatePage(formPage, contract);
+          if (formPage !== listingPage) await listingPage.close().catch(() => {});
+          finalState = await finishHumanHandoff(formPage, contract,
+            entryFlow.form.humanGate || { cause: 'login', evidence: ['legacy_login_gate'] }, 'application_entry', options,
+            { root, executionLock, dependencies });
+        }
+        await waitForCandidateReview(browser, ownsBrowser, finalState, options, dependencies);
+      return candidateResult(contract, finalState);
       }
       if (!entryFlow.compatible) {
         finalState = recordTransition(
@@ -1662,131 +1840,10 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
     }
 
     if (finalState?.state === 'actual_form_reached' && options.prepareForm) {
-      try {
-        const profile = loadApplicationProfile(root);
-        const artifacts = {
-          ...contract.candidate.artifacts,
-          coverLetterTextContent: readFileSync(contract.candidate.artifacts.coverLetterText.resolvedPath, 'utf8'),
-          coverLetterTextProvenance: contract.candidate.artifacts.coverLetterText.narrativeProvenance || null,
-        };
-        const preparation = await prepareFormPassWithEvidence(applicationPage, context, contract, root, {
-          resumeMode: 'initial', previousEvidence: null,
-        });
-        const evidence = preparation.evidence;
-        const details = {
-          requiredFieldCount: evidence.requiredFieldCount,
-          unresolvedFieldCount: evidence.unresolvedFields.length,
-          uploadCount: evidence.uploadedArtifacts.length,
-          validationErrorCount: evidence.validationErrors.length,
-          finalActionDetected: evidence.finalAction.detected,
-          finalActionActivated: evidence.finalAction.activated,
-          progressionTransitions: evidence.progression?.stepsAdvanced || 0,
-        };
-        finalState = transition(
-          contract.manifestPath,
-          contract.candidate.candidate_id,
-          'form_inspected',
-          evidence.currentUrl,
-          'Inspected the complete actual application form and identified required controls.',
-          'actual_form_reached',
-          executionLock.token,
-          details,
-          evidence,
-          root,
-        );
-        const completedSafeControls = evidence.filledFields.length
-          || evidence.committedSelections.length
-          || evidence.uploadedArtifacts.length;
-        if (completedSafeControls) {
-          finalState = transition(
-            contract.manifestPath,
-            contract.candidate.candidate_id,
-            'fields_filled',
-            evidence.currentUrl,
-            'All safely completable grounded controls were filled or committed and verified.',
-            finalState.state,
-            executionLock.token,
-            details,
-            evidence,
-            root,
-          );
-        }
-        if (evidence.uploadedArtifacts.length) {
-          finalState = transition(
-            contract.manifestPath,
-            contract.candidate.candidate_id,
-            'files_uploaded',
-            evidence.currentUrl,
-            'Exact bound artifact filenames were uploaded and verified.',
-            finalState.state,
-            executionLock.token,
-            details,
-            evidence,
-            root,
-          );
-        }
-        if (preparation.gate || !evidence.reviewComplete) {
-          const gateState = preparationGateState(preparation);
-          finalState = transition(
-            contract.manifestPath,
-            contract.candidate.candidate_id,
-            gateState,
-            evidence.currentUrl,
-            preparation.gate?.reason || 'User review is required for unresolved, unsupported, or consent fields.',
-            finalState.state,
-            executionLock.token,
-            details,
-            evidence,
-            root,
-          );
-          if (evidence.uploadTopology?.mode === 'single_combined' && !contract.candidate.artifacts.combinedDocument) {
-            await prepareAndBindCombinedDocument({
-              manifestPath: contract.manifestPath,
-              candidateId: contract.candidate.candidate_id,
-              confirmFormEvidenceHash: evidence.evidenceHash,
-              root,
-              lockToken: executionLock.token,
-            });
-            console.log('Combined application document generated and bound. Preflight confirmation is invalidated; confirm the exact batch again before --resume-preparation.');
-          }
-        } else {
-          finalState = transition(
-            contract.manifestPath,
-            contract.candidate.candidate_id,
-            'form_prepared',
-            evidence.currentUrl,
-            'Whole-form review passed; required fields and uploads verified; final action detected and untouched.',
-            finalState.state,
-            executionLock.token,
-            details,
-            evidence,
-            root,
-          );
-        }
-      } catch (error) {
-        if (['actual_form_reached', 'form_inspected', 'fields_filled', 'files_uploaded'].includes(finalState?.state)) {
-          finalState = transition(
-            contract.manifestPath,
-            contract.candidate.candidate_id,
-            'review_required',
-            latestUrl,
-            `Form preparation requires review: ${inline(error.message).slice(0, 350)}`,
-            finalState.state,
-            executionLock.token,
-            null,
-            null,
-            root,
-          );
-        } else {
-          throw error;
-        }
-      }
+      finalState = await prepareResumedForm(applicationPage, contract, root, executionLock, options, dependencies, 'initial');
     }
 
-    if (ownsBrowser && shouldKeepBrowserOpen(finalState) && options.keepOpen) {
-      console.log(`${finalState.state}. The final action remains untouched. Close the task browser to finish.`);
-      await new Promise((resolveDisconnected) => browser.once('disconnected', resolveDisconnected));
-    }
+    await waitForCandidateReview(browser, ownsBrowser, finalState, options, dependencies);
 
     return {
       batchId: contract.manifest.batchId,
@@ -1823,12 +1880,16 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
   }
 }
 
-async function prepareResumedForm(page, contract, root, executionLock) {
+async function prepareResumedForm(page, contract, root, executionLock, options = {}, dependencies = {}, resumeMode = 'process_recovery') {
   try {
-    const preparation = await prepareFormPassWithEvidence(page, page.context(), contract, root, {
-      resumeMode: 'process_recovery',
+    const preparation = await (dependencies.prepareFormPassWithEvidence || prepareFormPassWithEvidence)(page, page.context(), contract, root, {
+      resumeMode,
       previousEvidence: contract.candidateState.formPreparation,
     });
+    if (preparation.gate?.state === 'human_action_required') {
+      return await finishHumanHandoff(page, contract, preparation.gate,
+        preparation.gate.stage || 'form_progression', options, { root, executionLock, dependencies });
+    }
     const evidence = preparation.evidence;
     const details = {
       requiredFieldCount: evidence.requiredFieldCount,
@@ -1843,7 +1904,7 @@ async function prepareResumedForm(page, contract, root, executionLock) {
       contract.manifestPath, contract.candidate.candidate_id, to, evidence.currentUrl,
       reason, from, executionLock.token, details, evidence, root,
     );
-    let state = move('form_inspected', 'actual_form_reached', 'Inspected the complete form after fresh login revalidation.');
+    let state = move('form_inspected', 'actual_form_reached', 'Inspected the complete verified application form.');
     const completedSafeControls = evidence.filledFields.length
       || evidence.committedSelections.length
       || evidence.uploadedArtifacts.length;
@@ -1854,17 +1915,23 @@ async function prepareResumedForm(page, contract, root, executionLock) {
       state = move('files_uploaded', state.state, 'Exact bound uploads were visibly verified after revalidation.');
     }
     if (preparation.gate || !evidence.reviewComplete) {
-      return move(
-        preparationGateState(preparation),
-        state.state,
-        preparation.gate?.reason || 'User review is required for unresolved, unsupported, or consent fields.',
-      );
+      state = move(preparationGateState(preparation), state.state,
+        preparation.gate?.reason || 'User review is required for unresolved, unsupported, or consent fields.');
+      if (evidence.uploadTopology?.mode === 'single_combined' && !contract.candidate.artifacts.combinedDocument) {
+        await prepareAndBindCombinedDocument({ manifestPath: contract.manifestPath,
+          candidateId: contract.candidate.candidate_id, confirmFormEvidenceHash: evidence.evidenceHash,
+          root, lockToken: executionLock.token });
+        console.log('Combined application document generated and bound. Preflight confirmation is invalidated; confirm the exact batch again before --resume-preparation.');
+      }
+      return state;
     }
-    return move('form_prepared', state.state, 'Whole-form review passed after login; semantic final action remains untouched.');
+    return move('form_prepared', state.state, 'Whole-form review passed; semantic final action remains untouched.');
   } catch (error) {
+    const current = loadExecutionContract(contract.manifestPath, contract.candidate.candidate_id, { root, requireCoverLetter: true }).candidateState;
+    if (current.state !== 'actual_form_reached') throw error;
     return transition(
       contract.manifestPath, contract.candidate.candidate_id, 'review_required', page.url(),
-      `Post-login form preparation requires review: ${inline(error.message).slice(0, 350)}`,
+      `Form preparation requires review: ${inline(error.message).slice(0, 350)}`,
       'actual_form_reached', executionLock.token, null, null, root,
     );
   }
@@ -1877,7 +1944,7 @@ async function executePreparationResume(options, contract, { root, executionLock
   if (api?.result === 'expired') {
     const state = transition(
       contract.manifestPath, contract.candidate.candidate_id,
-      'closed', listingUrl,
+      fromState === 'human_action_required' ? 'blocked' : 'closed', listingUrl,
       `Fresh preparation-resume liveness check found the posting expired: ${api?.reason || 'expired'}`,
       fromState, executionLock.token, null, null, root,
     );
@@ -1896,11 +1963,22 @@ async function executePreparationResume(options, contract, { root, executionLock
     const live = await (dependencies.checkUrlLiveness || checkUrlLiveness)(listingPage, listingUrl);
     const listingSnapshot = await collectPageSnapshot(listingPage);
     const identity = verifyVisibleIdentity(listingSnapshot, contract.candidate);
+    const form = classifyFormSnapshot(listingSnapshot);
+    const compatible = isCompatibleDestination({ listingUrl, applyUrl: contract.candidate.applyUrl,
+      currentUrl: listingSnapshot.currentUrl, identity });
+    if (compatible && (form.humanGate || form.loginRequired
+        || (form.actualForm && ['human_action_required', 'login_required'].includes(fromState)))) {
+      const state = await finishHumanHandoff(listingPage, contract, form.humanGate
+        || contract.candidateState.humanAction || { cause: 'login', evidence: ['legacy_login_gate'] },
+        'listing', options, { root, executionLock, dependencies });
+      await waitForCandidateReview(browser, ownsBrowser, state, options, dependencies);
+      return candidateResult(contract, state);
+    }
     const domConfirmsSafeEntry = listingSnapshotConfirmsSafeEntry(listingSnapshot, contract.candidate, {
       listingUrl,
       applyUrl: contract.candidate.applyUrl,
     });
-    if ((live.result !== 'active' && !domConfirmsSafeEntry) || !identity.verified) {
+    if (!compatible || (live.result !== 'active' && !domConfirmsSafeEntry) || !identity.verified) {
       const state = transition(
         contract.manifestPath, contract.candidate.candidate_id, 'blocked', listingPage.url(),
         `Preparation resume listing revalidation failed: ${live.reason}; ${identity.reason}`,
@@ -1916,26 +1994,14 @@ async function executePreparationResume(options, contract, { root, executionLock
       { listingUrl, applyUrl: contract.candidate.applyUrl },
     );
     const page = entryFlow.page;
-    if (entryFlow.form.loginRequired && entryFlow.compatible) {
-      const state = transition(
-        contract.manifestPath, contract.candidate.candidate_id, 'login_required', page.url(),
-        `${entryFlow.form.reason}; ${entryFlow.reason}`,
-        fromState, executionLock.token, { entryActions: entryFlow.hops }, null, root,
-      );
+    if ((entryFlow.form.humanGate || entryFlow.form.loginRequired) && entryFlow.compatible) {
       if (dependencies.onCandidatePage) await dependencies.onCandidatePage(page, contract);
       if (page !== listingPage) await listingPage.close().catch(() => {});
-      if (ownsBrowser && options.keepOpen) {
-        console.log('login_required after verified application entry. Complete the external authentication choice manually; Career-Ops will not continue automatically.');
-        await new Promise((resolveDisconnected) => browser.once('disconnected', resolveDisconnected));
-      }
-      return {
-        batchId: contract.manifest.batchId,
-        candidate: listingUrl,
-        state: state.state,
-        currentUrl: state.currentUrl,
-        submissionAvailable: false,
-        trackerUpdated: false,
-      };
+      const state = await finishHumanHandoff(page, contract, entryFlow.form.humanGate
+        || { cause: 'login', evidence: ['legacy_login_gate'] }, 'application_entry', options,
+        { root, executionLock, dependencies });
+      await waitForCandidateReview(browser, ownsBrowser, state, options, dependencies);
+      return candidateResult(contract, state);
     }
     if (!entryFlow.form.actualForm || !entryFlow.compatible) {
       if (entryFlow.manualReviewRequired && entryFlow.compatible) {
@@ -1951,6 +2017,13 @@ async function executePreparationResume(options, contract, { root, executionLock
     }
     if (dependencies.onCandidatePage) await dependencies.onCandidatePage(page, contract);
     if (page !== listingPage) await listingPage.close().catch(() => {});
+    if (['human_action_required', 'login_required'].includes(fromState)) {
+      const state = await finishHumanHandoff(page, contract, contract.candidateState.humanAction
+        || { cause: 'login', evidence: ['legacy_login_gate'] }, 'application_entry', options,
+        { root, executionLock, dependencies });
+      await waitForCandidateReview(browser, ownsBrowser, state, options, dependencies);
+      return candidateResult(contract, state);
+    }
     if (['review_required', 'blocked'].includes(fromState)) {
       transition(
         contract.manifestPath, contract.candidate.candidate_id, 'actual_form_reached', page.url(),
@@ -1958,11 +2031,10 @@ async function executePreparationResume(options, contract, { root, executionLock
         fromState, executionLock.token, { entryActions: entryFlow.hops }, null, root,
       );
     }
-    const state = await prepareResumedForm(page, contract, root, executionLock);
-    if (ownsBrowser && options.keepOpen) {
-      console.log(`${state.state} after preparation resume. The final action remains untouched. Close the task browser to finish.`);
-      await new Promise((resolveDisconnected) => browser.once('disconnected', resolveDisconnected));
-    }
+    const state = options.prepareForm
+      ? await prepareResumedForm(page, contract, root, executionLock, options, dependencies)
+      : loadExecutionContract(contract.manifestPath, contract.candidate.candidate_id, { root }).candidateState;
+    await waitForCandidateReview(browser, ownsBrowser, state, options, dependencies);
     return {
       batchId: contract.manifest.batchId,
       candidate: listingUrl,
@@ -1989,99 +2061,8 @@ async function executePreparationResume(options, contract, { root, executionLock
     if (ownsBrowser) await closeOwnedBrowserSession(ownedBrowserSession, browser);
   }
 }
-
-async function executeLoginResume(options, contract, { root, executionLock, dependencies }) {
-  const listingUrl = contract.candidate.listingUrl;
-  const recordTransition = (manifestPath, _legacySelector, ...args) => transition(
-    manifestPath, contract.candidate.candidate_id, ...args, executionLock.token, null, null, root,
-  );
-  const apiLiveness = await checkLivenessViaApi(listingUrl);
-  if (apiLiveness?.result === 'expired') {
-    const state = recordTransition(contract.manifestPath, listingUrl, 'closed', listingUrl,
-      `Fresh liveness check before login resume: ${apiLiveness.reason}`, 'login_required');
-    return { batchId: contract.manifest.batchId, candidate: listingUrl, state: state.state };
-  }
-  if (apiLiveness?.result && apiLiveness.result !== 'active') {
-    const state = recordTransition(contract.manifestPath, listingUrl, 'blocked', listingUrl,
-      `Liveness could not be confirmed before login resume: ${apiLiveness.reason}`, 'login_required');
-    return { batchId: contract.manifest.batchId, candidate: listingUrl, state: state.state };
-  }
-
-  const ownedBrowserSession = await createOwnedBrowserSession(options, root, dependencies, contract);
-  const { browser, context } = ownedBrowserSession;
-  try {
-    const page = await context.newPage();
-    await page.goto(contract.candidateState.currentUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
-    await page.waitForTimeout(1_500);
-    const snapshot = await collectPageSnapshot(page);
-    const currentUrl = safeCurrentUrl(snapshot.currentUrl, contract.candidateState.currentUrl);
-    const identity = verifyVisibleIdentity(snapshot, contract.candidate);
-    const form = classifyFormSnapshot(snapshot);
-    const compatible = isCompatibleDestination({
-      listingUrl,
-      applyUrl: contract.candidate.applyUrl,
-      currentUrl,
-      identity,
-    });
-    if (!compatible) {
-      const state = recordTransition(contract.manifestPath, listingUrl, 'blocked', currentUrl,
-        'Login resume redirected outside the selected candidate identity.', 'login_required');
-      return { batchId: contract.manifest.batchId, candidate: listingUrl, state: state.state };
-    }
-    if (form.actualForm && identity.verified) {
-      let state = recordTransition(contract.manifestPath, listingUrl, 'actual_form_reached', currentUrl,
-        `Fresh login resume revalidation: ${form.reason}; ${identity.reason}`, 'login_required');
-      if (options.prepareForm) state = await prepareResumedForm(page, contract, root, executionLock);
-      console.log(`${state.state} after login revalidation. The final action remains untouched. Close the task browser to finish.`);
-      await new Promise((resolveDisconnected) => browser.once('disconnected', resolveDisconnected));
-      return { batchId: contract.manifest.batchId, candidate: listingUrl, state: state.state, currentUrl };
-    }
-    if (!form.loginRequired) {
-      const state = recordTransition(contract.manifestPath, listingUrl, 'blocked', currentUrl,
-        'Login resume did not show either the login gate or a verified application form.', 'login_required');
-      return { batchId: contract.manifest.batchId, candidate: listingUrl, state: state.state };
-    }
-    console.log('Login is still required. Complete login only in this task-created browser; this invocation will revalidate the destination and stop at the verified form.');
-    const deadline = Date.now() + 10 * 60 * 1000;
-    while (browser.isConnected() && Date.now() < deadline) {
-      try {
-        await page.waitForTimeout(1_000);
-        const resumedSnapshot = await collectPageSnapshot(page);
-        const resumedForm = classifyFormSnapshot(resumedSnapshot);
-        if (resumedForm.loginRequired) continue;
-        const resumedUrl = safeCurrentUrl(resumedSnapshot.currentUrl, currentUrl);
-        const resumedIdentity = verifyVisibleIdentity(resumedSnapshot, contract.candidate);
-        const resumedCompatible = isCompatibleDestination({
-          listingUrl,
-          applyUrl: contract.candidate.applyUrl,
-          currentUrl: resumedUrl,
-          identity: resumedIdentity,
-        });
-        if (resumedCompatible && resumedIdentity.verified && resumedForm.actualForm) {
-          let state = recordTransition(contract.manifestPath, listingUrl, 'actual_form_reached', resumedUrl,
-            `Fresh post-login revalidation: ${resumedForm.reason}; ${resumedIdentity.reason}`, 'login_required');
-          if (options.prepareForm) state = await prepareResumedForm(page, contract, root, executionLock);
-          console.log(`${state.state} after login. The final action remains untouched. Close the task browser to finish.`);
-          await new Promise((resolveDisconnected) => browser.once('disconnected', resolveDisconnected));
-          return { batchId: contract.manifest.batchId, candidate: listingUrl, state: state.state, currentUrl: resumedUrl };
-        }
-        const state = recordTransition(contract.manifestPath, listingUrl, 'blocked', resumedUrl,
-          `Post-login destination is not the verified application form: ${resumedIdentity.reason}; ${resumedForm.reason}`,
-          'login_required');
-        return { batchId: contract.manifest.batchId, candidate: listingUrl, state: state.state };
-      } catch (error) {
-        if (!browser.isConnected()) break;
-        throw error;
-      }
-    }
-    return { batchId: contract.manifest.batchId, candidate: listingUrl, state: 'login_required', currentUrl };
-  } finally {
-    await closeOwnedBrowserSession(ownedBrowserSession, browser);
-  }
-}
-
 function usage() {
-  return 'Usage: node application-browser-executor.mjs --manifest <manifest.json> --candidate-id <exact-id> [--headless] [--close-after-check] [--inspect-only] [--resume-login|--resume-preparation] [--ephemeral-browser]';
+  return 'Usage: node application-browser-executor.mjs --manifest <manifest.json> --candidate-id <exact-id> [--headless] [--close-after-check] [--inspect-only] [--resume-login|--resume-preparation] [--ephemeral-browser] [--human-wait-ms <milliseconds>]';
 }
 
 async function main() {

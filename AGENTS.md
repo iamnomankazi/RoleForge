@@ -323,16 +323,22 @@ the user supplies evidence of their manual final submission. Agents never click
 the final Submit, Send, or Apply control.
 
 For up to six independently confirmed one-candidate batches,
-`application-shared-browser.mjs` may own one new visible Chromium
-process/context and one task-created tab per exact candidate. It must verify
-every batch before launch, call the locked canonical executor sequentially,
-keep candidate pages/evidence/state isolated, continue after a local candidate
-failure, and leave the browser open until the user closes it. It never accepts
-queue rows, URLs, multi-candidate batches, interactive login-resume authority,
-submission authority, or tracker authority. A previously `blocked`,
-`review_required`, or `actual_form_reached` exact candidate may use the same
-shared page only through the canonical preparation-resume contract and fresh
-liveness, identity, destination, and form revalidation.
+`application-shared-browser.mjs` may own one visible Chromium process using the
+dedicated persistent candidate profile and one task-created page for the active
+exact candidate. It must verify every batch before launch, acquire the exclusive
+profile lock before launch, call the locked canonical executor sequentially,
+keep batch evidence and application state scoped to the exact candidate, continue
+after a local candidate failure, and leave the browser open while a human handoff
+is pending or until the user closes it. It never accepts queue rows, arbitrary
+URLs, multi-candidate batches, submission authority, or tracker authority. The
+human may complete login, account creation, MFA, email verification, and CAPTCHA
+only in the visible task-created page for the exact active candidate; the tool
+never types credentials or solves CAPTCHA. A user completion signal or detected
+gate clearance authorizes revalidation only, not navigation to an arbitrary URL
+or a final action. A previously `blocked`, `review_required`, `login_required`,
+`human_action_required`, or `actual_form_reached` exact candidate may resume only
+through the canonical exact-candidate preparation contract with fresh liveness,
+identity, destination, login/challenge, and form revalidation.
 
 From `listing_verified`, a visible listing-page Apply CTA may be activated only
 when DOM context proves it is an application-entry action: no candidate form

@@ -296,7 +296,7 @@ test('shared executor entrypoint rejects missing ownership and cross-context pag
       context,
       page: { context: () => context },
     }),
-    /does not automate interactive login resume/,
+    /Explicit --manifest path is required/,
   );
   await assert.rejects(
     executeCandidateInBrowserContext({

@@ -54,8 +54,15 @@ export function manifestPathForBatch(root, batchId) {
 
 export function parseSharedBrowserArgs(argv) {
   const batchIds = [];
+  let humanWaitMs;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
+    if (arg === '--human-wait-ms') {
+      const value = Number(argv[++index]);
+      if (!Number.isFinite(value) || value <= 0 || humanWaitMs != null) throw new Error('Invalid or duplicate --human-wait-ms');
+      humanWaitMs = value;
+      continue;
+    }
     if (arg !== '--batch-id') throw new Error(`Unknown or forbidden option: ${arg}`);
     const value = argv[index + 1];
     if (!value || value.startsWith('--')) throw new Error('Missing value for --batch-id');
@@ -69,7 +76,7 @@ export function parseSharedBrowserArgs(argv) {
   if (new Set(batchIds).size !== batchIds.length) {
     throw new Error('Duplicate application batch IDs are not allowed');
   }
-  return { batchIds };
+  return { batchIds, ...(humanWaitMs == null ? {} : { humanWaitMs }) };
 }
 
 export function buildSharedBrowserPlan(batchIds, {
@@ -94,7 +101,7 @@ export function buildSharedBrowserPlan(batchIds, {
     }
     const candidateId = loaded.manifest.candidates[0].candidate_id;
     const contract = loadContract(manifestPath, candidateId, { root, requireCoverLetter: true });
-    const resumePreparation = ['actual_form_reached', 'review_required', 'blocked'].includes(
+    const resumePreparation = ['actual_form_reached', 'review_required', 'blocked', 'login_required', 'human_action_required'].includes(
       contract.candidateState.state,
     );
     assertExecutorState({
@@ -129,7 +136,7 @@ function waitForDisconnect(browser) {
   return new Promise((resolveDisconnected) => browser.once('disconnected', resolveDisconnected));
 }
 
-export async function runSharedBrowserSession({ batchIds, root = ROOT }, dependencies = {}) {
+export async function runSharedBrowserSession({ batchIds, root = ROOT, humanWaitMs }, dependencies = {}) {
   // Every immutable source, artifact hash, manifest scope, confirmation, exact
   // candidate ID, and initial state is verified before Chromium is launched.
   const plan = buildSharedBrowserPlan(batchIds, {
@@ -181,6 +188,7 @@ export async function runSharedBrowserSession({ batchIds, root = ROOT }, depende
           resumeLogin: false,
           resumePreparation: entry.resumePreparation,
           prepareForm: true,
+          ...(humanWaitMs == null ? {} : { humanWaitMs }),
         }, {
           root,
           browser,
@@ -212,6 +220,11 @@ export async function runSharedBrowserSession({ batchIds, root = ROOT }, depende
       if (dependencies.onCandidateComplete) await dependencies.onCandidateComplete(entry);
     }
 
+    const handoffTimedOut = plan.at(-1)?.result?.state === 'human_action_required';
+    if (handoffTimedOut) {
+      if (ownedSession.close) await ownedSession.close();
+      else if (browser.isConnected()) await browser.close();
+    }
     const summary = {
       browserMode: 'one_shared_headed_context',
       candidateCount: plan.length,
@@ -232,7 +245,9 @@ export async function runSharedBrowserSession({ batchIds, root = ROOT }, depende
       trackerUpdated: false,
     };
     if (dependencies.onSessionPrepared) await dependencies.onSessionPrepared(summary, plan);
-    await (dependencies.waitForBrowserClose || waitForDisconnect)(browser);
+    if (!handoffTimedOut) {
+      await (dependencies.waitForBrowserClose || waitForDisconnect)(browser);
+    }
     return {
       ...summary,
       browserRemainsOpen: browser.isConnected(),
@@ -243,7 +258,7 @@ export async function runSharedBrowserSession({ batchIds, root = ROOT }, depende
 }
 
 function usage() {
-  return 'Usage: node application-shared-browser.mjs --batch-id <exact-single-candidate-batch> [--batch-id <next-batch> ...]';
+  return 'Usage: node application-shared-browser.mjs --batch-id <exact-single-candidate-batch> [--batch-id <next-batch> ...] [--human-wait-ms <milliseconds>]';
 }
 
 async function main() {
@@ -259,7 +274,9 @@ async function main() {
     },
     onSessionPrepared(summary) {
       console.log(JSON.stringify(summary, null, 2));
-      console.log('Candidate pages close before the next candidate starts. Close the shared task browser to finish.');
+      console.log(summary.browserRemainsOpen
+        ? 'Candidate pages close before the next candidate starts. Close the shared task browser to finish.'
+        : 'The task browser is closed. Persisted human handoffs can resume using the exact manifest and candidate command shown above.');
     },
   });
   console.log(JSON.stringify(result, null, 2));
