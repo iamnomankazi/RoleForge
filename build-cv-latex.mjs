@@ -7,8 +7,8 @@ import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
 import { randomUUID } from 'node:crypto';
 import { assertWritableOutput } from './output-safety.mjs';
-import { claimRenderOptions, enforceRenderedCvClaims } from './validate-cv-claims.mjs';
-import { hasFactUnits, splitClaimSentences } from './cv-claims.mjs';
+import { claimRenderOptions, enforceRenderedCvClaims, isSkillsCategoryLabel } from './validate-cv-claims.mjs';
+import { splitClaimSentences } from './cv-claims.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEMPLATE_PATH = resolve(__dirname, 'templates', 'cv-template.tex');
@@ -108,7 +108,7 @@ export function structuredCvSegments(payload) {
   const add = value => { if (typeof value === 'string' && value.trim()) segments.push(...splitClaimSentences(value)); };
   const list = value => {
     if (Array.isArray(value)) value.forEach(list);
-    else if (typeof value === 'string') value.split(/[,;|]/).forEach(add);
+    else if (typeof value === 'string') value.split(/[,;|·/]/).forEach(add);
   };
   add(payload.name);
   list(payload.contact_line);
@@ -128,8 +128,7 @@ export function structuredCvSegments(payload) {
     (Array.isArray(entry?.bullets) ? entry.bullets : []).forEach(add);
   }
   for (const category of Array.isArray(payload.skills) ? payload.skills : []) {
-    if (typeof category !== 'string' && hasFactUnits(category?.category)
-      && !/^(?:programming languages?|languages?|frameworks?|libraries|databases?|tools?|technologies|technical skills|machine learning|cloud platforms?|backend|frontend|devops)$/i.test(category?.category || '')) add(category.category);
+    if (typeof category !== 'string' && !isSkillsCategoryLabel(category?.category)) add(category?.category);
     list(typeof category === 'string' ? category : category?.items);
   }
   return segments;

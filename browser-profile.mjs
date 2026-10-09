@@ -3,7 +3,6 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
-  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -58,8 +57,6 @@ function validOwner(owner) {
     && typeof owner?.token === 'string' && owner.token.length > 0;
 }
 
-const RECOVERY_MUTEX_STALE_MS = 60_000;
-
 function acquireRecoveryMutex(lockPath, contents, owner) {
   const recoveryPath = `${lockPath}.recovery`;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -74,18 +71,7 @@ function acquireRecoveryMutex(lockPath, contents, owner) {
     } catch (error) {
       if (descriptor !== undefined) closeSync(descriptor);
       if (error.code !== 'EEXIST') throw error;
-      const existing = readLock(recoveryPath);
-      if (!existing) continue;
-      const age = Date.now() - statSync(recoveryPath).mtimeMs;
-      if (!validOwner(existing.owner) || existing.owner.hostname !== hostname()
-          || age < RECOVERY_MUTEX_STALE_MS || processIsAlive(existing.owner.pid)) {
-        throw new Error(`Browser profile lock recovery is already running: ${recoveryPath}`);
-      }
-      if (readLock(recoveryPath)?.raw === existing.raw) {
-        try { unlinkSync(recoveryPath); } catch (removeError) {
-          if (removeError.code !== 'ENOENT') throw removeError;
-        }
-      }
+      throw new Error(`Browser profile lock recovery is already running or stale: ${recoveryPath}. Delete this file manually only after confirming no RoleForge browser is running.`);
     }
   }
   throw new Error(`Could not acquire browser profile recovery mutex: ${recoveryPath}`);

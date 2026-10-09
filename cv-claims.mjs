@@ -27,6 +27,7 @@ export const TECHNOLOGY_ALIASES = Object.freeze({
   'gcp': 'gcp', 'git': 'git', 'linux': 'linux', 'fastapi': 'fastapi',
   'django': 'django', 'flask': 'flask', 'spring': 'spring', 'pytorch': 'pytorch',
   'tensorflow': 'tensorflow', 'scikit-learn': 'scikit-learn',
+  'pandas': 'pandas',
 });
 
 const ALLOWED_EVIDENCE = new Set([
@@ -177,7 +178,7 @@ export function parseCvClaims(cvText) {
     const kind = classifySection(section);
 
     if (kind === 'technology') {
-      const values = text.replace(/^[^:]{1,40}:\s*/, '').split(/[,;|]/).map((value) => value.trim()).filter(Boolean);
+      const values = text.replace(/^[^:]{1,40}:\s*/, '').split(/[,;|·/]/).map((value) => value.trim()).filter(Boolean);
       if (values.length > 1) for (const value of values) addClaim(claims, 'technology', value, section, lineNumber);
       else {
         const matches = technologyMatches(text);
@@ -286,9 +287,46 @@ function metricTokens(text) {
 }
 
 function meaningfulWords(text) {
-  const withoutDates = String(text).replace(DATE_RE, ' ');
+  const withoutDates = String(text).replace(DATE_RE, ' ').replace(/\s+[|·–—-]\s+/g, ' ');
   const withoutTech = withoutDates.replace(/[\w.+#-]+/g, (token) => technologyMatches(token).length ? ' ' : token);
-  return withoutTech.toLowerCase().match(/[a-z][a-z0-9'-]*/g)?.filter((word) => !STOP_WORDS.has(word)) || [];
+  return withoutTech.toLowerCase().match(/[a-z][a-z0-9'-]*/g)?.filter((word) => !STOP_WORDS.has(word) && !ACTION_LEMMAS.has(word)) || [];
+}
+
+// Explicit inflections: changing an action must never be authorized by its object.
+const ACTION_LEMMAS = new Map([
+  ['manage', 'managed', 'managing'], ['lead', 'led', 'leading'], ['build', 'built', 'building'],
+  ['create', 'created', 'creating'], ['develop', 'developed', 'developing'],
+  ['design', 'designed', 'designing'], ['implement', 'implemented', 'implementing'],
+  ['maintain', 'maintained', 'maintaining'], ['own', 'owned', 'owning'],
+  ['review', 'reviewed', 'reviewing'], ['analyse', 'analysed', 'analysing', 'analyze', 'analyzed', 'analyzing'],
+  ['automate', 'automated', 'automating'], ['process', 'processed', 'processing'],
+  ['migrate', 'migrated', 'migrating'], ['author', 'authored', 'authoring'],
+  ['write', 'wrote', 'written', 'writing'], ['found', 'founded', 'founding'],
+  ['launch', 'launched', 'launching'],
+].flatMap(([lemma, ...forms]) => [lemma, `${lemma}s`, ...forms].map(form => [form, lemma])));
+
+function actionLemmas(text) {
+  return new Set((normalizeText(text).match(/[a-z]+/g) || []).map(word => ACTION_LEMMAS.get(word)).filter(Boolean));
+}
+
+function normalizeRoleHeading(text) {
+  return normalizeText(text).replace(/\s+(?:at|@|[|·–—-])\s+/g, ' ')
+    .replace(/\s*([–—-])\s*(?=\d{4}\b)/g, '-').replace(/\s+/g, ' ');
+}
+
+function coveringRoleHeading(text, cv, allowed, units) {
+  // Only the complete canonical heading may combine its independently stored
+  // role/employer/date fields. Narrative sentences still require one anchor.
+  const canonical = normalizeRoleHeading(text);
+  for (const [index, line] of cv.split(/\r?\n/).entries()) {
+    const heading = HEADING_RE.exec(line.trim());
+    if (!heading || !splitRoleHeader(cleanMarkdown(heading[2]))
+        || normalizeRoleHeading(cleanMarkdown(heading[2])) !== canonical) continue;
+    const fields = allowed.filter(entry => ['role', 'employer', 'dates'].includes(entry.type)
+      && entry.occurrences.some(span => span.startLine === index + 1));
+    if (fields.some(entry => entry.type === 'role') && units.every(unit => unitCovered(unit, fields).length)) return fields;
+  }
+  return [];
 }
 
 function claimedUnits(text) {
@@ -317,7 +355,7 @@ export function technologyListSegments(value) {
   const matches = technologyMatches(text);
   let remainder = normalizeText(text);
   for (const match of [...matches].reverse()) remainder = remainder.slice(0, match.start) + ' ' + remainder.slice(match.end);
-  return matches.length && /^[\s,;|/&.]*$/.test(remainder.replace(/\band\b/g, '')) ? matches.map(match => match.alias) : null;
+  return matches.length && /^[\s,;|·/&.]*$/.test(remainder.replace(/\band\b/g, '')) ? matches.map(match => match.alias) : null;
 }
 
 /** Facts in rendered letter fields, excluding ordinary salutations and courtesy. */
@@ -330,14 +368,14 @@ export function hasFactUnits(text) {
     || /\b[A-Z][a-z]+\s+[A-Z][a-z]+\b/.test(String(text).replace(/^(?:Dear|Hello|Hi)\s+.*?,?$/i, ''));
 }
 
-const CREATION_RE = /\b(built|created|developed|authored|wrote|founded|designed|implemented|led|launched)\s+(.+?)(?=\s+(?:using|with|in|for|at|by|across|to)\b|[.!?;]|$)/gi;
+const CREATION_RE = /\b(build|built|building|create|created|creating|develop|developed|developing|author|authored|authoring|write|wrote|written|writing|found|founded|founding|design|designed|designing|implement|implemented|implementing|lead|led|leading|launch|launched|launching)\s+(.+?)(?=\s+(?:using|with|in|for|at|by|across|to)\b|[.!?;]|$)/gi;
 
 function creationRelationships(text) {
   // Compare the action and its direct object; using a framework is not creating it.
   let canonical = normalizeText(text);
   for (const match of technologyMatches(canonical).reverse()) canonical = canonical.slice(0, match.start) + match.canonical + canonical.slice(match.end);
   const safe = canonical.replace(/(?<=\p{L})\.(?=\p{L})/gu, '\uE000');
-  return [...safe.matchAll(CREATION_RE)].map(match => normalizeText(`${match[1]} ${match[2]}`).replace(/\uE000/g, '.'));
+  return [...safe.matchAll(CREATION_RE)].map(match => normalizeText(`${ACTION_LEMMAS.get(match[1]) || match[1]} ${match[2]}`).replace(/\uE000/g, '.'));
 }
 
 function containsWord(text, word) {
@@ -381,7 +419,8 @@ function currentAllowedEntries(manifest, cv) {
     const current = byId.get(entry.id);
     return Boolean(current && current.textHash === entry.textHash && current.type === entry.type);
   }).filter((entry) => entry.state !== 'supported' || hasCurrentIndependentEvidence(entry))
-    .map((entry) => ({ ...entry, text: byId.get(entry.id).text, sectionType: classifySection(byId.get(entry.id).section) }));
+    .map((entry) => ({ ...entry, text: byId.get(entry.id).text, occurrences: byId.get(entry.id).occurrences,
+      sectionType: classifySection(byId.get(entry.id).section) }));
 }
 
 function hasCurrentIndependentEvidence(entry) {
@@ -434,7 +473,11 @@ export function validateClaims({ claims, manifest, cv } = {}) {
         return { claimId, status: 'fail', reasonCode, anchorIds: anchors };
       }
       const relationships = creationRelationships(claim.text);
+      const actions = actionLemmas(claim.text);
+      const headingFields = actions.size ? [] : coveringRoleHeading(claim.text, cv, allowed, units);
+      if (headingFields.length) return { claimId, status: 'pass', anchorIds: headingFields.map(entry => entry.id) };
       const covering = allowed.filter(entry => units.every(unit => unitCovered(unit, [entry]).length)
+        && [...actions].every(action => actionLemmas(entry.text).has(action))
         && entities.every(entity => normalizeText(entry.text).includes(entity))
         && (!relationships.length || ((['project', 'role'].includes(entry.type)
           || (entry.type === 'authorship' && ['project', 'role'].includes(entry.sectionType)))

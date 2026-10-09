@@ -31,8 +31,9 @@ TeX markup. `generate-latex.mjs` checks rendered content between
 `\begin{document}` and `\end{document}`, excluding definitions and layout
 arguments. Skills lists are checked as individual entries; factual sentences
 must be covered by a single current anchor, preserving object and metric relationships.
-Unrecognized TeX macros and included document files need review rather than
-silently skipping their rendered content.
+Every macro definition must match a trusted definition in `templates/cv-template.tex`.
+Added or changed definitions fail with `untrusted_macro_definition`. Unrecognized
+TeX macros and included document files also fail validation.
 
 The default evidence is `cv.md` with `data/cv-claim-anchors.json`. Both commands
 accept `--cv-source <cv.md>` and `--anchors <manifest.json>`. A missing manifest

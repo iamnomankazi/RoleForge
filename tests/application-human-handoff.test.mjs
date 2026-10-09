@@ -424,11 +424,14 @@ for (const failure of [false, true]) {
   });
 }
 
+for (const queryJob of [false, true]) {
 for (const processResume of [false, true]) {
-  test('matching identity on another same-origin requisition blocks '+(processResume ? 'process resume' : 'handoff'), async () => {
+  test('matching identity on another same-origin '+(queryJob ? 'query job' : 'requisition')+' blocks '+(processResume ? 'process resume' : 'handoff'), async () => {
     const atsOrigin = 'https://job-boards.greenhouse.io';
-    const f = fixture(1, atsOrigin, () => '/fixture/jobs/111');
-    modes.set('/fixture/jobs/111', 'captcha');
+    const listingPath = queryJob ? '/apply?job=111' : '/fixture/jobs/111';
+    const wrongPath = queryJob ? '/apply?job=222' : '/fixture/jobs/222/application';
+    const f = fixture(1, atsOrigin, () => listingPath);
+    modes.set(new URL(listingPath, atsOrigin).pathname, 'captcha');
     let preparations = 0;
     const setup = (e) => {
       e.dependencies.configureContext = async (context) => {
@@ -439,7 +442,8 @@ for (const processResume of [false, true]) {
       e.dependencies.prepareFormPassWithEvidence = async () => { preparations++; assert.fail('Wrong job must never be prepared'); };
     };
     const e = environment(f, processResume ? {} : { onSleep: async ({ page, signal }) => {
-      await page.goto(atsOrigin+'/fixture/jobs/222/application'); signal();
+      if (queryJob) modes.set('/apply', 'clear');
+      await page.goto(atsOrigin+wrongPath); signal();
     } });
     setup(e);
     try {
@@ -448,7 +452,8 @@ for (const processResume of [false, true]) {
         assert.equal(first.state, 'human_action_required');
         const recovery = environment(f); setup(recovery);
         recovery.dependencies.checkUrlLiveness = async (page) => {
-          await page.goto(atsOrigin+'/fixture/jobs/222/application');
+          if (queryJob) modes.set('/apply', 'clear');
+          await page.goto(atsOrigin+wrongPath);
           return { result: 'active', reason: 'fixture listing redirect' };
         };
         const result = await executeCandidate(options(f, 0, { resumePreparation: true }), { root: f.root, dependencies: recovery.dependencies });
@@ -458,6 +463,7 @@ for (const processResume of [false, true]) {
       assertSafe(e);
     } finally { f.cleanup(); modes.clear(); }
   });
+}
 }
 
 test('partial upload, ledger and wizard history persist before pause and extend after exact resume', async () => {
@@ -537,7 +543,20 @@ for (const persistent of [false, true]) {
       assert.ok(existsSync(artifacts.screenshotBefore));
       assert.ok(existsSync(artifacts.screenshotAfter));
       assert.equal(existsSync(join(artifacts.screenshotAfter, '..', 'playwright-trace.zip')), false);
-    } finally { await session?.close(); await browser?.close(); f.cleanup(); }
+      for (const mode of ['captcha', 'login', 'mfa', 'email_verification']) {
+        modes.set('/apply/1', mode);
+        await page.goto(origin + '/apply/1');
+        let screenshots = 0;
+        const originalScreenshot = page.screenshot;
+        page.screenshot = async () => { screenshots++; assert.fail('No screenshot may be taken while gated'); };
+        try {
+          const gated = await prepareFormPassWithEvidence(page, context, contract, f.root);
+          assert.equal(screenshots, 0);
+          assert.equal(gated.evidence.operationalArtifacts.screenshotBefore, 'screenshot omitted: human gate');
+          assert.equal(gated.evidence.operationalArtifacts.screenshotAfter, 'screenshot omitted: human gate');
+        } finally { page.screenshot = originalScreenshot; }
+      }
+    } finally { await session?.close(); await browser?.close(); f.cleanup(); modes.clear(); }
   });
 }
 

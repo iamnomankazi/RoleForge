@@ -144,7 +144,7 @@ test('interleaved stale recovery cannot unlink a newly acquired live profile loc
   }
 });
 
-test('recovery mutex is recoverable only when old and its local owner is dead', () => {
+test('stale recovery mutex requires manual deletion even for a confirmed-dead owner', () => {
   const profileRoot = temporaryProfileRoot();
   const recoveryPath = `${browserProfilePaths({ profileRoot }).lockPath}.recovery`;
   mkdirSync(profileRoot, { recursive: true });
@@ -153,10 +153,45 @@ test('recovery mutex is recoverable only when old and its local owner is dead', 
     writeFileSync(recoveryPath, JSON.stringify(owner));
     assert.throws(() => acquireBrowserProfileLock({ profileRoot }), /recovery is already running/);
     fs.utimesSync(recoveryPath, new Date(0), new Date(0));
-    const recovered = acquireBrowserProfileLock({ profileRoot });
-    recovered.release();
+    assert.throws(() => acquireBrowserProfileLock({ profileRoot }), error =>
+      error.message.includes(recoveryPath) && /Delete this file manually.*no RoleForge browser/.test(error.message));
+    assert.equal(JSON.parse(readFileSync(recoveryPath, 'utf8')).token, owner.token);
     writeFileSync(recoveryPath, JSON.stringify({ ...owner, pid: process.pid }));
     fs.utimesSync(recoveryPath, new Date(0), new Date(0));
     assert.throws(() => acquireBrowserProfileLock({ profileRoot }), /recovery is already running/);
   } finally { rmSync(join(profileRoot, '..'), { recursive: true, force: true }); }
+});
+
+test('a dead recovery mutex is never read or unlinked during the replacement interleave', () => {
+  const profileRoot = temporaryProfileRoot();
+  const recoveryPath = `${browserProfilePaths({ profileRoot }).lockPath}.recovery`;
+  mkdirSync(profileRoot, { recursive: true });
+  writeFileSync(recoveryPath, JSON.stringify({ pid: 2_000_000_000, startedAt: '2020-01-01T00:00:00.000Z',
+    hostname: hostname(), token: 'dead-recovery' }));
+  fs.utimesSync(recoveryPath, new Date(0), new Date(0));
+  const originalRead = fs.readFileSync;
+  const originalUnlink = fs.unlinkSync;
+  let reads = 0;
+  let deletes = 0;
+  fs.readFileSync = (...args) => {
+    const value = originalRead(...args);
+    if (args[0] === recoveryPath && ++reads === 2) {
+      writeFileSync(recoveryPath, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(),
+        hostname: hostname(), token: 'new-live-mutex-owner' }));
+    }
+    return value;
+  };
+  fs.unlinkSync = (...args) => { if (args[0] === recoveryPath) deletes++; return originalUnlink(...args); };
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => acquireBrowserProfileLock({ profileRoot }), /Delete this file manually/);
+    assert.equal(reads, 0);
+    assert.equal(deletes, 0);
+    assert.equal(JSON.parse(originalRead(recoveryPath, 'utf8')).token, 'dead-recovery');
+  } finally {
+    fs.readFileSync = originalRead;
+    fs.unlinkSync = originalUnlink;
+    syncBuiltinESMExports();
+    rmSync(join(profileRoot, '..'), { recursive: true, force: true });
+  }
 });

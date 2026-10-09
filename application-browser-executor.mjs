@@ -70,6 +70,7 @@ export function buildCandidateFormContext(contract) {
 
 async function safeScreenshot(page, path) {
   try {
+    if (classifyHumanGate(await inspectOperationalApplicationForm(page)).gate) return 'screenshot omitted: human gate';
     await page.screenshot({ path, fullPage: true });
     return path;
   } catch {
@@ -469,7 +470,7 @@ export function isCompatibleApplicationEntryDestination({
   }
   const listingRequisition = requisitionIdentity(listingUrl);
   const currentRequisition = requisitionIdentity(currentUrl);
-  if (listing.origin === current.origin && listingRequisition && currentRequisition
+  if (listing.origin === current.origin && listingRequisition
       && !verifyApplicationContinuity({ beforeUrl: listingUrl, currentUrl,
         candidate: { listingUrl, applyUrl } }).verified) return false;
   if (current.hostname === listing.hostname) return true;
@@ -497,7 +498,19 @@ export function requisitionIdentity(value) {
   if (match && /^jobs\.(?:eu\.)?lever\.co$/i.test(parsed.hostname)) {
     return `lever:${match[1].toLowerCase()}:${match[2].toLowerCase()}`;
   }
+  const queryIdentity = jobQueryIdentity(value);
+  if (queryIdentity) return `query:${parsed.origin}:${queryIdentity}`;
   return '';
+}
+
+/** Job identity is separate from the sanitized URL retained in progress state. */
+export function jobQueryIdentity(value) {
+  let parsed;
+  try { parsed = new URL(value); } catch { return ''; }
+  const jobParams = new Set(['job', 'jobid', 'job_id', 'gh_jid', 'jid', 'id', 'req', 'requisition', 'posting']);
+  const identifiers = [...parsed.searchParams].filter(([key]) => jobParams.has(key.toLowerCase()))
+    .map(([key, value]) => [key.toLowerCase(), value]).sort(([a, x], [b, y]) => a.localeCompare(b) || x.localeCompare(y));
+  return identifiers.length ? JSON.stringify(identifiers) : '';
 }
 
 export function isCompatibleDestination({ listingUrl, applyUrl = null, currentUrl, identity }) {
@@ -512,7 +525,7 @@ export function isCompatibleDestination({ listingUrl, applyUrl = null, currentUr
   if (current.protocol !== 'https:' && current.protocol !== 'http:') return false;
   const listingRequisition = requisitionIdentity(listingUrl);
   const currentRequisition = requisitionIdentity(currentUrl);
-  if (listing.origin === current.origin && listingRequisition && currentRequisition
+  if (listing.origin === current.origin && listingRequisition
       && !verifyApplicationContinuity({ beforeUrl: listingUrl, currentUrl,
         candidate: { listingUrl, applyUrl } }).verified) return false;
   if (sameUrlIgnoringHash(listingUrl, currentUrl)) return true;
@@ -536,6 +549,10 @@ export function verifyApplicationContinuity({ beforeUrl, currentUrl, snapshot, c
   const beforeRequisition = requisitionIdentity(beforeUrl);
   const currentRequisition = requisitionIdentity(currentUrl);
   const expectedRequisition = listingRequisition || beforeRequisition;
+  const expectedQuery = jobQueryIdentity(listingUrl) || jobQueryIdentity(beforeUrl);
+  if (expectedQuery && jobQueryIdentity(currentUrl) !== expectedQuery) {
+    return { verified: false, reason: 'application job query identity changed or disappeared' };
+  }
   if (expectedRequisition) {
     return currentRequisition === expectedRequisition
       ? { verified: true, reason: 'ATS requisition identity remained exact' }
@@ -1371,6 +1388,13 @@ async function waitForCandidateReview(browser, ownsBrowser, state, options, depe
 }
 
 function compatibleHumanDestination(contract, currentUrl, identity, gateUrl) {
+  // Compare the authoritative job before stripping authentication query data.
+  const authoritative = [contract.candidate.listingUrl, contract.candidate.applyUrl].filter(Boolean);
+  const currentIdentity = requisitionIdentity(currentUrl);
+  const expectedIdentities = authoritative.map(requisitionIdentity).filter(Boolean);
+  if (expectedIdentities.length && !expectedIdentities.includes(currentIdentity)) return false;
+  const expectedQueries = authoritative.map(jobQueryIdentity).filter(Boolean);
+  if (expectedQueries.length && !expectedQueries.includes(jobQueryIdentity(currentUrl))) return false;
   const origins = [contract.candidate.listingUrl, contract.candidate.applyUrl, gateUrl]
     .filter(Boolean).map((url) => new URL(url).origin);
   const verifiedEntryRoutes = (contract.candidateState.history || [])

@@ -57,8 +57,9 @@ this mode. Keywords may be reformulated but never fabricated.
 ## CV claim check
 
 The PDF CLI enforces claim validation for `--cv` and recognized CV templates.
-Pass `--cv` for every CV, including custom templates. Ordinary reports and cover
-letters keep their existing rendering path. The library `renderHtmlToPdf` is unchanged.
+The CLI validates CV claims by default, including custom HTML templates.
+For a non-CV document, explicitly pass `--document-type cover`, `--document-type report`,
+or `--document-type other`. The library `renderHtmlToPdf` is unchanged.
 The gate reads `cv.md` and `data/cv-claim-anchors.json` by default; use
 `--cv-source <cv.md>` and `--anchors <manifest.json>` to select other evidence.
 Missing manifests and unsupported content stop generation before rendering.

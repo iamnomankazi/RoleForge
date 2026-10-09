@@ -300,7 +300,7 @@ async function generatePDF() {
   }
 
   if (!inputPath || !outputPath) {
-    console.error('Usage: node generate-pdf.mjs <input.html> <output.pdf> [--cv] [--cv-source cv.md] [--anchors manifest.json] [--allow-unverified-claims] [--format=letter|a4] [--report=NNN] [--allow-reorder]');
+    console.error('Usage: node generate-pdf.mjs <input.html> <output.pdf> [--document-type cover|report|other] [--cv-source cv.md] [--anchors manifest.json] [--allow-unverified-claims] [--format=letter|a4] [--report=NNN] [--allow-reorder]');
     console.error('');
     console.error('This script only converts an already-built HTML file to PDF.');
     console.error('The input HTML is produced by the pdf mode: the agent fills cv-template.html');
@@ -348,7 +348,7 @@ async function generatePDF() {
   console.log(`📏 Format: ${format.toUpperCase()}`);
 
   let html = await readFile(inputPath, 'utf-8');
-  const isCv = claimOptions.cvMode || /class=["'][^"']*\b(?:cv-photo|summary-text)\b/i.test(html);
+  const isCv = claimOptions.cvMode || claimOptions.documentType === 'cv';
   let cvMarkdown = '';
   try {
     cvMarkdown = await readFile(resolve(claimOptions.cvPath), 'utf-8');

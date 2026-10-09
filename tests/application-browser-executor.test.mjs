@@ -32,6 +32,18 @@ const RUN_ID = 'phase-2-executor-run';
 const SELECTED = 'https://job-boards.greenhouse.io/wolt/jobs/8035172';
 const UNRELATED = 'https://fixture.invalid/jobs/unrelated-example';
 
+test('job-identifying query parameters compare before URL sanitization', () => {
+  for (const param of ['job', 'jobId', 'job_id', 'gh_jid', 'jid', 'id', 'req', 'requisition', 'posting']) {
+    const listingUrl = `https://fixture.test/apply?${param}=111&access_token=secret`;
+    const currentUrl = `https://fixture.test/apply?${param}=222`;
+    assert.notEqual(requisitionIdentity(listingUrl), requisitionIdentity(currentUrl), param);
+    assert.equal(isCompatibleDestination({ listingUrl, currentUrl, identity: { verified: true } }), false, param);
+    assert.equal(requisitionIdentity(listingUrl), requisitionIdentity(`https://fixture.test/apply?${param}=111&access_token=changed`));
+    assert.doesNotMatch(requisitionIdentity(listingUrl), /secret|access_token/);
+  }
+  assert.equal(requisitionIdentity('https://fixture.test/apply?lever-origin=111'), '');
+});
+
 function makeFixture() {
   const root = mkdtempSync(join(tmpdir(), 'career-ops-application-executor-'));
   const runDir = join(root, 'output', 'scan-runs', RUN_ID);

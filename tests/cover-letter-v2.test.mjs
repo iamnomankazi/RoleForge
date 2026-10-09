@@ -139,11 +139,11 @@ test('fact sentences need complete claims even when they also appear in the JD',
   const contextDraft = makeDraft({ sentences: 10 });
   contextDraft.paragraphs[0].text += ' Northstar Labs has a distributed team.';
   contextDraft.jd.text += ' Northstar Labs has a distributed team.';
-  // Every rendered fact needs a complete claim, including company context.
+  // Non-candidate context is authorized by the independent JD.
   const resultWithContext = await checkDraft(contextDraft, { validateClaims: async ({ claims }) => ({
     ok: true, results: claims.map(claim => ({ claimId: claim.id, status: 'pass' })),
   }) });
-  assert.equal(resultWithContext.checks.find(item => item.id === 'claim_coverage').status, 'fail');
+  assert.equal(resultWithContext.checks.find(item => item.id === 'claim_coverage').status, 'pass');
 });
 
 test('banned phrases and placeholders are rejected', async () => {
@@ -296,6 +296,56 @@ test('a supported substring cannot authorize unsupported additions to a sentence
   assert.ok(coverage.missingSentences.some(item => item.sentence.includes('invented TypeScript')));
   draft.paragraphs[0].claims[0].text = 'I built API services for 30 users and invented TypeScript.';
   assert.equal(claimCheck(await checkDraft(draft, options)).status, 'fail');
+});
+
+test('all first-person references require claims outside the explicit intent and courtesy patterns', async () => {
+  for (const sentence of ['My expertise includes pandas.', 'My expertise includes COBOL.', "I'm adept at pandas.",
+    "I've mastered pandas.", 'Ask me about pandas.', 'I taught myself pandas.']) {
+    const { draft, options } = factualDraft();
+    draft.paragraphs[0].text += ` ${sentence}`;
+    const result = await checkDraft(draft, options);
+    const coverage = result.checks.find(item => item.id === 'claim_coverage');
+    assert.equal(coverage.status, 'fail', sentence);
+    assert.ok(coverage.missingSentences.some(item => item.sentence === sentence));
+  }
+});
+
+test('verbatim non-first-person JD context passes the real validator with and without a claim', async () => {
+  for (const includeClaim of [false, true]) {
+    const { draft, options } = factualDraft();
+    const sentence = 'Northstar Labs builds API services.';
+    draft.jd.text += ` ${sentence}`;
+    draft.paragraphs[0].text += ` ${sentence}`;
+    if (includeClaim) draft.paragraphs[0].claims.push({ id: 'jd-context', text: sentence });
+    assert.equal((await checkDraft(draft, options)).status, 'pass');
+    draft.paragraphs[0].text = draft.paragraphs[0].text.replace(sentence, 'Northstar Labs builds ML services.');
+    assert.equal((await checkDraft(draft, options)).status, 'fail');
+  }
+  const { draft, options } = factualDraft();
+  draft.jd.text += ' My expertise includes pandas.';
+  draft.paragraphs[0].text += ' My expertise includes pandas.';
+  assert.equal((await checkDraft(draft, options)).status, 'fail');
+});
+
+test('JD authorization preserves claim shape and duplicate-ID checks', async () => {
+  const { draft, options } = factualDraft();
+  const sentence = 'Northstar Labs builds API services.';
+  draft.jd.text += ` ${sentence}`;
+  draft.claims = [{ id: draft.paragraphs[0].claims[0].id, text: sentence }];
+  let checked = await checkDraft(draft, options);
+  assert.equal(checked.checks.find(item => item.id === 'claim_coverage').reasonCode, 'duplicate_claim_id');
+  draft.claims = [{ text: sentence }];
+  checked = await checkDraft(draft, options);
+  assert.equal(checked.checks.find(item => item.id === 'claim_coverage').reasonCode, 'invalid_claim');
+});
+
+test('mandatory language scope survives coordinated verbs separated by commas', async () => {
+  const draft = makeDraft();
+  draft.jd.text += ' You must speak, read and write German.';
+  const result = await checkDraft(draft);
+  const language = result.checks.find(item => item.id === 'language');
+  assert.equal(language.requiredByJd, 'de');
+  assert.equal(language.status, 'fail');
 });
 
 test('greeting, closing and factual signatures require complete validated claims', async () => {

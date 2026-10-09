@@ -2,6 +2,7 @@
 import { execFile as execFileCallback } from 'node:child_process';
 import { mkdir, open, readFile, rename, stat, readdir } from 'node:fs/promises';
 import { promisify } from 'node:util';
+import { readFileSync } from 'node:fs';
 import { dirname, extname, basename, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -10,7 +11,6 @@ import {
   extractDriftFacts,
   loadManifest,
   sha256,
-  hasFactUnits,
   splitClaimSentences,
   technologyListSegments,
   validateClaims,
@@ -19,6 +19,62 @@ import {
 
 const execFile = promisify(execFileCallback);
 const ACTIVE_MANIFEST = 'data/cv-claim-anchors.json';
+const SECTION_LABELS = new Set(['summary', 'profile', 'professional summary', 'experience', 'work experience',
+  'education', 'projects', 'personal projects', 'skills', 'languages', 'technical skills', 'contact',
+  'yhteenveto', 'profiili', 'työkokemus', 'kokemus', 'koulutus', 'projektit', 'taidot', 'kielet', 'tekniset taidot', 'yhteystiedot',
+  'zusammenfassung', 'profil', 'berufserfahrung', 'erfahrung', 'ausbildung', 'bildung', 'projekte', 'kenntnisse', 'fähigkeiten', 'sprachen', 'technische kenntnisse', 'kontakt']);
+const SKILLS_LABELS = new Set(['languages', 'frameworks', 'tools', 'databases', 'cloud', 'other']);
+export function isStandardCvLabel(value) {
+  return SECTION_LABELS.has(String(value ?? '').trim().toLowerCase()) || isSkillsCategoryLabel(value);
+}
+export function isSkillsCategoryLabel(value) {
+  return SKILLS_LABELS.has(String(value ?? '').trim().toLowerCase());
+}
+
+function texDefinitions(source) {
+  const text = String(source).split(/\r?\n/).map(line => line.replace(/(?<!\\)%.*$/, '')).join('\n');
+  const definitions = [];
+  const command = /\\(?:newcommand|renewcommand|providecommand|def)\b/g;
+  let match;
+  while ((match = command.exec(text))) {
+    let index = command.lastIndex;
+    const space = () => { while (/\s/.test(text[index] || '') && index < text.length) index++; };
+    const group = (open, close) => {
+      if (text[index] !== open) throw new Error('untrusted_macro_definition');
+      let depth = 1;
+      index++;
+      while (index < text.length && depth) {
+        if (text[index] === '\\') { index += 2; continue; }
+        if (text[index] === open) depth++;
+        if (text[index] === close) depth--;
+        index++;
+      }
+      if (depth) throw new Error('untrusted_macro_definition');
+    };
+    space();
+    if (text[index] === '*') { index++; space(); }
+    if (text[index] === '{') group('{', '}');
+    else {
+      const name = /^\\[A-Za-z]+/.exec(text.slice(index));
+      if (!name) throw new Error('untrusted_macro_definition');
+      index += name[0].length;
+    }
+    space();
+    while (text[index] === '[') { group('[', ']'); space(); }
+    if (match[0] === '\\def') { while (index < text.length && text[index] !== '{') index++; }
+    group('{', '}');
+    definitions.push(text.slice(match.index, index).trim());
+    command.lastIndex = index;
+  }
+  return definitions;
+}
+
+export function enforceTrustedTexDefinitions(source) {
+  const trusted = texDefinitions(readFileSync(new URL('./templates/cv-template.tex', import.meta.url), 'utf8'));
+  for (const definition of texDefinitions(source)) {
+    if (!trusted.includes(definition)) throw new Error('untrusted_macro_definition');
+  }
+}
 const HELP = `Usage:
   node validate-cv-claims.mjs --cv <path> --anchors <path> [--json] [--strict]
   node validate-cv-claims.mjs --cv <path> --init <out> [--json]
@@ -51,6 +107,7 @@ function parseArgs(argv) {
     if (arg === '--help' || arg === '-h') { options.help = true; continue; }
     if (arg === '--json') { options.json = true; continue; }
     if (arg === '--strict') { options.strict = true; continue; }
+    if (arg === '--allow-unverified-claims') { options.allowUnverifiedClaims = true; continue; }
     if (arg === '--replace-active') { options.replaceActive = true; continue; }
     if (arg === '--drift') { commands.push('drift'); continue; }
     if (['--cv', '--anchors', '--init', '--activate', '--check-document', '--approved-dir'].includes(arg)) {
@@ -194,7 +251,7 @@ export function renderedTexText(source) {
       continue;
     }
     if (/^(?:section|subsection|subsubsection)$/.test(name)) {
-      const title = group(); output += `\n${hasFactUnits(title) ? title : ''}\n`; continue;
+      const title = group(); output += `\n${title}\n`; continue;
     }
     if (name === 'item') { skipSpace(); if (body[index] === '[') group('[', ']'); output += '\n'; continue; }
     // Formatting commands have visible group contents. Recursively process these
@@ -216,27 +273,41 @@ function decodeHtml(value) {
 }
 
 /** Split rendered text into one factual sentence or bullet per validation call. */
-export function extractDocumentSegments(source, filePath = 'document.txt') {
+export function extractDocumentSegments(source, filePath = 'document.txt', options = {}) {
+  if (extname(filePath).toLowerCase() === '.tex' && !options.allowUnverifiedClaims) enforceTrustedTexDefinitions(source);
   const text = documentText(source, extname(filePath).toLowerCase());
   const segments = [];
+  let inSkills = false;
   for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.replace(/\s+/g, ' ').trim().replace(/^(?:[-*+•▪◦‣]|\d+[.)])\s+/, '')
-      .replace(/^(?:programming languages?|languages?|technical skills?|skills?|tools?|frameworks?|databases?|backend|frontend|machine learning|coursework|education|experience|projects?)\s*:\s*/i, '');
+    const line = rawLine.replace(/\s+/g, ' ').trim().replace(/^(?:[-*+•▪◦‣]|\d+[.)])\s+/, '');
     if (!line) continue;
-    if (/^(?:profile|professional summary|summary|technical skills|skills|work experience|experience|personal projects|projects?|education|languages|certifications?|about)$/i.test(line)) continue;
-    segments.push(...(technologyListSegments(line) || splitClaimSentences(line)));
+    if (isStandardCvLabel(line)) {
+      inSkills = /^(?:skills|technical skills|taidot|tekniset taidot|kenntnisse|fähigkeiten|technische kenntnisse)$/i.test(line) || isSkillsCategoryLabel(line);
+      continue;
+    }
+    const category = /^([^:]+):\s*(.*)$/.exec(line);
+    if (category && (inSkills || isSkillsCategoryLabel(category[1]))) {
+      if (!isSkillsCategoryLabel(category[1])) segments.push(...splitClaimSentences(category[1]));
+      segments.push(...category[2].split(/[,|·/;]/).map(item => item.trim()).filter(Boolean));
+    } else if (inSkills) segments.push(...line.split(/[,|·/;]/).map(item => item.trim()).filter(Boolean));
+    else segments.push(...(technologyListSegments(line) || splitClaimSentences(line)));
   }
   return segments;
 }
 
 /** Shared CLI claim flags; PDF's --cv is a mode flag, --cv-source supplies evidence. */
 export function claimRenderOptions(argv) {
-  const options = { cvPath: 'cv.md', anchorsPath: ACTIVE_MANIFEST, allowUnverifiedClaims: false, cvMode: false };
+  const options = { cvPath: 'cv.md', anchorsPath: ACTIVE_MANIFEST, allowUnverifiedClaims: false, cvMode: false, documentType: 'cv' };
   const args = [];
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
     if (arg === '--allow-unverified-claims') options.allowUnverifiedClaims = true;
     else if (arg === '--cv') options.cvMode = true;
+    else if (arg.split('=')[0] === '--document-type') {
+      const value = arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : argv[++index];
+      if (!['cover', 'report', 'other'].includes(value)) throw new Error('--document-type requires cover, report, or other');
+      options.documentType = value;
+    }
     else if (['--cv-source', '--anchors', '--manifest'].includes(arg.split('=')[0])) {
       const [flag, inline] = arg.split('=');
       const value = inline ?? argv[++index];
@@ -421,8 +492,12 @@ async function driftReport({ cvText, cvPath, activePath, approvedDir, json }) {
   if (errors) process.exitCode = 1;
 }
 
-async function checkDocument({ filePath, cvText, cvPath, activePath, strict }) {
+async function checkDocument({ filePath, cvText, cvPath, activePath, strict, allowUnverifiedClaims }) {
   const source = await readFile(resolve(filePath), 'utf8');
+  if (allowUnverifiedClaims) {
+    printJson(await enforceRenderedCvClaims([source], { allowUnverifiedClaims: true }));
+    return;
+  }
   const segments = extractDocumentSegments(source, filePath);
   let manifest;
   try { manifest = await loadManifest(resolve(activePath)); }
@@ -478,7 +553,7 @@ async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (options.command === 'checkDocument') {
-    try { await checkDocument({ filePath: options.checkDocument, cvText, cvPath, activePath, strict: options.strict }); }
+    try { await checkDocument({ filePath: options.checkDocument, cvText, cvPath, activePath, strict: options.strict, allowUnverifiedClaims: options.allowUnverifiedClaims }); }
     catch (error) { console.error(error.message); process.exitCode = 1; }
     return;
   }

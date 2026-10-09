@@ -179,7 +179,7 @@ export function detectLanguage(text) {
 }
 
 function requiredLanguage(jdText) {
-  const clauses = String(jdText ?? '').split(/[.!?;\n]|,|\b(?:but|however|whereas)\b|\band\s+(?=[\p{L}]+\s+(?:is\s+)?(?:optional|required|mandatory|essential|not|a\s+plus|nice[- ]to[- ]have)\b)/iu);
+  const clauses = String(jdText ?? '').split(/[.!?;\n]|,(?!\s*(?:speak|read|write|understand|communicate)\b)|\b(?:but|however|whereas)\b|\band\s+(?=[\p{L}]+\s+(?:is\s+)?(?:optional|required|mandatory|essential|not|a\s+plus|nice[- ]to[- ]have)\b)/iu);
   const found = new Set();
   const names = [
     ['fi', 'Finnish|Suomi'],
@@ -207,7 +207,21 @@ function isPlaceholder(text) {
   return /\{[^{}]*\}|\[[^\]]+\]|\bTODO\b|\bXXX\b|\bLorem(?:\s+ipsum)?\b/i.test(text);
 }
 
-function hasClaimCoverage(draft, profileName) {
+function isFirstPerson(text) {
+  return /\b(?:I(?:['’](?:m|ve))?|my|me|myself)\b/i.test(text);
+}
+
+function isJdContext(sentence, jdText) {
+  return !isFirstPerson(sentence) && sentenceList(jdText).some(item => normalizeSpace(item) === normalizeSpace(sentence));
+}
+
+function isIntentOrCourtesy(sentence) {
+  if (/^thank you(?: for (?:your time|considering my application|considering me))?[.!]?$/i.test(sentence)) return true;
+  const match = /^(?:I(?: am|['’]m)? (?:applying|interested|excited|available)|I (?:look forward|would welcome)|thank you)\b([^.!?]{0,160})[.!?]?$/i.exec(sentence);
+  return Boolean(match && !isFirstPerson(match[1]) && !hasFactUnits(match[1]));
+}
+
+function hasClaimCoverage(draft, profileName, jdText) {
   const missing = [];
   const claimTexts = flattenClaims(draft).filter(claim => typeof claim?.text === 'string').map(claim => normalizeSpace(claim.text));
   const signature = String(draft.signature ?? '').trim();
@@ -222,7 +236,8 @@ function hasClaimCoverage(draft, profileName) {
   for (const [field, text] of fields) {
     for (const sentence of sentenceList(text)) {
       const normalizedSentence = normalizeSpace(sentence);
-      if (!hasFactUnits(sentence)) continue;
+      if (isJdContext(sentence, jdText) || isIntentOrCourtesy(sentence)) continue;
+      if (!isFirstPerson(sentence) && !hasFactUnits(sentence)) continue;
       if (!claimTexts.includes(normalizedSentence)) {
         missing.push({ field, sentence });
       }
@@ -313,12 +328,15 @@ export async function checkCoverLetterDraft(draft, {
     reasonCode: placeholders ? 'placeholder_found' : undefined,
   }));
 
-  const claims = flattenClaims(normalizedDraft);
-  const invalidClaims = claims.filter(claim => !claim || typeof claim.id !== 'string' || !claim.id.trim()
+  // JD context has its own authority; it is never submitted as a CV fact.
+  const allClaims = flattenClaims(normalizedDraft);
+  const claims = allClaims.filter(claim => !isJdContext(claim?.text, jdText));
+  const invalidClaims = allClaims.filter(claim => !claim || typeof claim.id !== 'string' || !claim.id.trim()
     || typeof claim.text !== 'string' || !claim.text.trim());
-  const ids = claims.map(claim => String(claim?.id ?? '')).filter(Boolean);
+  const ids = allClaims.map(claim => String(claim?.id ?? '')).filter(Boolean);
+  const candidateIds = claims.map(claim => claim?.id);
   const duplicateIds = ids.filter((id, index) => ids.indexOf(id) !== index);
-  const missingCoverage = hasClaimCoverage(normalizedDraft, profileName);
+  const missingCoverage = hasClaimCoverage(normalizedDraft, profileName, jdText);
   checks.push(check('claim_coverage', claims.length && !invalidClaims.length && !duplicateIds.length && !missingCoverage.length
     ? 'pass' : 'fail', {
     reasonCode: !claims.length ? 'claims_missing' : invalidClaims.length ? 'invalid_claim' : duplicateIds.length
@@ -342,7 +360,7 @@ export async function checkCoverLetterDraft(draft, {
         .map(item => item?.claimId ?? null);
       const missingResults = claims.filter(claim => !byId.has(claim?.id)).map(claim => claim?.id ?? null);
       const failedResults = results.filter(item => item?.status !== 'pass');
-      const extraResults = results.filter(item => !ids.includes(item?.claimId)).map(item => item?.claimId ?? null);
+      const extraResults = results.filter(item => !candidateIds.includes(item?.claimId)).map(item => item?.claimId ?? null);
       const isOk = result?.ok === true && claims.length > 0 && results.length === claims.length
         && !missingResults.length && !failedResults.length && !extraResults.length && !duplicateResults.length;
       checks.push(check('claim_validation', isOk ? 'pass' : 'fail', {

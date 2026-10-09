@@ -357,15 +357,13 @@ test('dotted technology aliases remain intact in HTML, plain text and TeX senten
   assert.deepEqual(segments, ['Used Node.js.', 'Used Next.js.']);
 });
 
-test('standard empty TeX template has no candidate facts; only rendered content is checked', async () => {
+test('standard empty TeX template has no facts and untrusted definitions fail closed', async () => {
   const template = (await readFile(resolve('templates/cv-template.tex'), 'utf8')).replace(/\{\{[A-Z_]+\}\}/g, '');
   assert.deepEqual(extractDocumentSegments(template, 'cv.tex'), []);
   const filled = template.replace('\\section{Education}', '\\section{Education}\n\\resumeItem{Processed 500 rows.}')
     .replace('\\begin{document}', '\\begin{document}\n\\newcommand{\\fixture}[1]{TypeScript and 900 users}\n\\vspace{-7pt}');
-  const segments = extractDocumentSegments(filled, 'cv.tex');
-  assert.deepEqual(segments, ['Processed 500 rows.']);
-  assert.equal(validateClaims({ claims: segments.map(text => ({ id: 'c', text })), manifest: anchoredManifest(), cv: BASE_CV }).ok, true);
-  assert.throws(() => extractDocumentSegments('\\newcommand{\\hidden}{TypeScript}\n\\begin{document}Processed 500 rows.\\hidden\\end{document}', 'cv.tex'), /unsupported_tex_command:hidden/);
+  assert.throws(() => extractDocumentSegments(filled, 'cv.tex'), /untrusted_macro_definition/);
+  assert.throws(() => extractDocumentSegments('\\newcommand{\\hidden}{TypeScript}\n\\begin{document}Processed 500 rows.\\hidden\\end{document}', 'cv.tex'), /untrusted_macro_definition/);
   assert.throws(() => extractDocumentSegments('\\begin{document}Processed 500 rows.\\input{unverified-facts}\\end{document}', 'cv.tex'), /unsupported_tex_command:input/);
   const currencyCv = '# Projects\n- Managed $30 for about 30 users.\n';
   const currency = extractDocumentSegments('\\begin{document}Managed \\$30 for about 30 users.\\end{document}', 'cv.tex');
@@ -388,4 +386,37 @@ test('strict document check reports unsupported generated facts with reason code
     assert.equal(report.failures[0].reasonCode, 'unsupported_technology');
     assert.match(report.failures[0].text, /TypeScript/);
   });
+});
+
+test('every action verb must have the same lemma in the single covering anchor', () => {
+  const cv = '# Projects\n- Built API services for 30 users.\n';
+  for (const text of ['I managed API services for 30 users.', 'I built and maintained API services for 30 users.']) {
+    const result = validateClaims({ claims: [{ id: 'action', text }], manifest: anchoredManifest(cv), cv });
+    assert.equal(result.ok, false, text);
+    assert.equal(result.results[0].reasonCode, 'unsupported_relationship');
+  }
+  for (const [past, present] of [['managed', 'manage'], ['led', 'lead'], ['built', 'build'], ['created', 'create'],
+    ['developed', 'develop'], ['designed', 'design'], ['implemented', 'implement'], ['maintained', 'maintain'],
+    ['owned', 'own'], ['reviewed', 'review'], ['analysed', 'analyze'], ['automated', 'automate'],
+    ['processed', 'process'], ['migrated', 'migrate']]) {
+    const source = `# Projects\n- ${past} API services for 30 users.\n`;
+    assert.equal(validateClaims({ claims: [{ id: 'action', text: `I ${present} API services for 30 users.` }],
+      manifest: anchoredManifest(source), cv: source }).ok, true, past);
+  }
+  assert.equal(validateClaims({ claims: [{ id: 'scope', text: 'Built API services by 30 users.' }], manifest: anchoredManifest(cv), cv }).ok, true);
+});
+
+test('skills lists and heading separators preserve supported structural combinations', () => {
+  const cv = '# Skills\n- Python, Pandas\n\n# Experience\n## Engineer at Synthetic Labs 2022-2023\n';
+  const manifest = anchoredManifest(cv);
+  for (const separator of [',', '|', '·', '/', ';']) {
+    const segments = extractDocumentSegments(`<h2>Skills</h2><p>Python ${separator} Pandas</p>`, 'cv.html');
+    assert.deepEqual(segments, ['Python', 'Pandas']);
+    assert.equal(validateClaims({ claims: segments.map(text => ({ id: text, text })), manifest, cv }).ok, true);
+  }
+  for (const separator of ['|', '·', '–', '—', '-']) {
+    const text = `Engineer ${separator} Synthetic Labs ${separator} 2022-2023`;
+    assert.equal(validateClaims({ claims: [{ id: 'heading', text }], manifest, cv }).ok, true, text);
+  }
+  assert.equal(validateClaims({ claims: [{ id: 'narrative', text: 'Built Python with Pandas.' }], manifest, cv }).ok, false);
 });
