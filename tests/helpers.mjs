@@ -29,13 +29,13 @@ export function pass(msg) { console.log(`  ✅ ${msg}`); passed++; }
 /**
  * Record and print one failing test assertion.
  *
- * Failures increment the shared counter that controls the final process exit
- * code, while still allowing later checks to run and show the full problem set.
+ * Failures increment the shared counter and set a nonzero process exit code,
+ * while still allowing later checks to run and show the full problem set.
  *
  * @param {string} msg - Human-readable failure message for the terminal log.
  * @returns {void}
  */
-export function fail(msg) { console.log(`  ❌ ${msg}`); failed++; }
+export function fail(msg) { console.log(`  ❌ ${msg}`); failed++; process.exitCode = 1; }
 
 /**
  * Record and print one non-fatal warning.

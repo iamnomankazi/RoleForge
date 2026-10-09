@@ -128,3 +128,6 @@ AGENTS.md
 # Per-machine agent session handoff (never commit)
 HANDOFF.md
 CLAUDE.local.md
+
+# Chromium writes this in the working directory during browser tests
+debug.log

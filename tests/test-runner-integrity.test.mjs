@@ -1,13 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 import {
   validateDiscoveredTestSources,
   parseTapSummary,
   discoveredRunFailed,
   collectChildOutput,
 } from '../test-runner-core.mjs';
-import { run } from './helpers.mjs';
-import { spawn } from 'node:child_process';
+import { run, ROOT } from './helpers.mjs';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 test('discovered source validation rejects child-terminating helpers', () => {
@@ -54,6 +57,28 @@ test('runner waits for TAP bytes written during child stream shutdown', async ()
   const parsed = parseTapSummary(result.stdout + result.stderr, { files: 1, exitCode: result.exitCode });
   assert.equal(parsed.complete, true);
   assert.equal(discoveredRunFailed(parsed), false);
+});
+
+test('a discovered legacy test that calls fail() exits nonzero', () => {
+  const testsDir = dirname(fileURLToPath(import.meta.url));
+  const tempDir = mkdtempSync(join(testsDir, 'legacy-discovered-failure-'));
+  const fixture = join(tempDir, 'legacy-failure.test.mjs');
+  const helperUrl = new URL('./helpers.mjs', import.meta.url).href;
+  try {
+    writeFileSync(fixture, `import { fail } from ${JSON.stringify(helperUrl)};\nfail('legacy fixture failure');\n`);
+    const env = { ...process.env, CAREER_OPS_DISCOVERED_TEST_RUN: '1' };
+    delete env.NODE_TEST_CONTEXT;
+    const child = spawnSync(process.execPath, ['test-all.mjs', '--only', basename(tempDir)], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      env,
+    });
+    assert.equal(child.error, undefined, child.error?.message);
+    assert.equal(child.status, 1, `${child.stdout}\n${child.stderr}`);
+    assert.match(`${child.stdout}\n${child.stderr}`, /legacy fixture failure/);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test('test helper requires executable-plus-argv commands and accepts git vectors', () => {

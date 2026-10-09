@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -10,11 +10,12 @@ import { loadProviders, resolveProvider } from '../providers/_registry.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const EVIDENCE_DIR = resolve(ROOT, 'output/phase1b7-evidence-20261001');
-const evidence = JSON.parse(readFileSync(resolve(EVIDENCE_DIR, 'C-funded-delta.json'), 'utf8'));
-const baselineText = readFileSync(resolve(EVIDENCE_DIR, 'C-portals-preimage.yml'), 'utf8');
-const currentText = readFileSync(resolve(ROOT, 'portals.yml'), 'utf8');
-const baseline = yaml.load(baselineText);
-const current = yaml.load(currentText);
+const evidenceAvailable = existsSync(EVIDENCE_DIR);
+const evidence = evidenceAvailable ? JSON.parse(readFileSync(resolve(EVIDENCE_DIR, 'C-funded-delta.json'), 'utf8')) : null;
+const baselineText = evidenceAvailable ? readFileSync(resolve(EVIDENCE_DIR, 'C-portals-preimage.yml'), 'utf8') : '';
+const currentText = evidenceAvailable ? readFileSync(resolve(ROOT, 'portals.yml'), 'utf8') : '';
+const baseline = evidenceAvailable ? yaml.load(baselineText) : null;
+const current = evidenceAvailable ? yaml.load(currentText) : null;
 const PHASE2_TITLE_POSITIVE_ALIASES = [
   'Computer Vision Engineer',
   'Fullstack Entwickler',
@@ -41,8 +42,8 @@ function removeApprovedPhase2TitleAliases(text) {
   return `${text.slice(0, positiveAt)}${positiveBlock}${text.slice(negativeAt)}`;
 }
 
-const currentTextWithoutPhase2Aliases = removeApprovedPhase2TitleAliases(currentText);
-const currentWithoutPhase2Aliases = yaml.load(currentTextWithoutPhase2Aliases);
+const currentTextWithoutPhase2Aliases = evidenceAvailable ? removeApprovedPhase2TitleAliases(currentText) : '';
+const currentWithoutPhase2Aliases = evidenceAvailable ? yaml.load(currentTextWithoutPhase2Aliases) : null;
 
 function normalizeName(value) {
   return String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -52,7 +53,14 @@ function findRole(pattern) {
   return evidence.isarRoleEvidence.find(item => pattern.test(item.title));
 }
 
-test('Isar funding and current board support one review-required useful entry', () => {
+function skipIfEvidenceMissing(t) {
+  if (evidenceAvailable) return false;
+  t.skip('phase1b7 evidence directory is missing; funded-company evidence checks require the archived fixtures');
+  return true;
+}
+
+test('Isar funding and current board support one review-required useful entry', (t) => {
+  if (skipIfEvidenceMissing(t)) return;
   const decision = evidence.decisions.find(item => item.company === 'Isar Aerospace');
   assert.equal(decision?.decision, 'add');
 
@@ -75,7 +83,8 @@ test('Isar funding and current board support one review-required useful entry', 
   assert.match(evidence.portalsEntry.notes, /No eligibility or sponsorship is inferred/i);
 });
 
-test('current provider resolves and unchanged evaluator records search relevance only', async () => {
+test('current provider resolves and unchanged evaluator records search relevance only', async (t) => {
+  if (skipIfEvidenceMissing(t)) return;
   const providers = await loadProviders(resolve(ROOT, 'providers'));
   const resolved = resolveProvider(evidence.portalsEntry, providers);
   assert.equal(resolved?.provider?.id, 'greenhouse');
@@ -107,7 +116,8 @@ test('current provider resolves and unchanged evaluator records search relevance
   assert.equal(analyst.searchRelevanceResult.reason, 'content');
 });
 
-test('mandatory Germany-enrollment question is not confused with search relevance', () => {
+test('mandatory Germany-enrollment question is not confused with search relevance', (t) => {
+  if (skipIfEvidenceMissing(t)) return;
   const studentSoftware = findRole(/Working Student Software Engineer/i);
   assert.equal(studentSoftware.searchRelevanceResult.eligible, true, 'title/location/content relevance is still recorded accurately');
   assert.equal(studentSoftware.searchRelevanceResult.interpretation.includes('does not establish application eligibility'), true);
@@ -133,7 +143,8 @@ test('mandatory Germany-enrollment question is not confused with search relevanc
   assert.ok(applicationSoftware.applicationEligibilityAssessment.reasons.some(reason => /§13.*SÜG/i.test(reason)));
 });
 
-test('the one-entry delta preserves the complete portals preimage and search policy', () => {
+test('the one-entry delta preserves the complete portals preimage and search policy', (t) => {
+  if (skipIfEvidenceMissing(t)) return;
   const baselineMarker = baselineText.indexOf('\njob_boards:');
   const currentMarker = currentTextWithoutPhase2Aliases.indexOf('\njob_boards:');
   assert.notEqual(baselineMarker, -1);
@@ -187,7 +198,8 @@ test('the one-entry delta preserves the complete portals preimage and search pol
   }
 });
 
-test('manual, excluded, and already tracked candidates are not added', () => {
+test('manual, excluded, and already tracked candidates are not added', (t) => {
+  if (skipIfEvidenceMissing(t)) return;
   assert.equal(evidence.decisions.filter(item => item.decision === 'add').length, 1);
   const additions = current.tracked_companies.filter(item => normalizeName(item.name) === 'isar aerospace');
   assert.equal(additions.length, 1);

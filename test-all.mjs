@@ -4730,7 +4730,8 @@ try {
   const doctorScript = readFile('doctor.mjs');
   if (
     !/Claude Code config/i.test(doctorScript) &&
-    /project-level MCP config/i.test(doctorScript) &&
+    /explicitly selected MCP/i.test(doctorScript) &&
+    /project-level Playwright MCP configuration/i.test(doctorScript) &&
     /\.mcp\.json/.test(doctorScript) &&
     /\.claude\/settings\.json/.test(doctorScript) &&
     /\.claude\/settings\.local\.json/.test(doctorScript)
@@ -4740,19 +4741,33 @@ try {
     fail('doctor Playwright MCP guidance is still Claude-specific or lost config detection');
   }
 
-  // No project MCP config → doctor surfaces a (non-fatal) warning instead of
-  // letting SPA job boards fail silently.
+  // The local CLI extractor is the default; MCP configuration is optional
+  // unless the user explicitly selects scan.extractor: mcp.
   const noMcp = mkdtempSync(join(tmpdir(), 'co-nomcp-'));
   const a = JSON.parse(run(NODE, ['doctor.mjs', '--json', '--target', noMcp]) || '{}');
-  if (Array.isArray(a.warnings) && a.warnings.some((w) => /playwright mcp/i.test(w))) {
-    pass('No Playwright MCP config → warning surfaced');
+  if (Array.isArray(a.warnings) && !a.warnings.some((w) => /playwright mcp/i.test(w))) {
+    pass('Default CLI extractor does not require a Playwright MCP config');
   } else {
-    fail(`Expected a Playwright MCP warning, got: ${JSON.stringify(a.warnings)}`);
+    fail(`Default CLI extractor unexpectedly requires Playwright MCP: ${JSON.stringify(a.warnings)}`);
   }
   rmSync(noMcp, { recursive: true, force: true });
 
-  // A project that registers a Playwright MCP server → no warning.
+  // Explicit MCP selection without a registered project server needs a warning.
+  const explicitMcp = mkdtempSync(join(tmpdir(), 'co-explicit-mcp-'));
+  mkdirSync(join(explicitMcp, 'config'), { recursive: true });
+  writeFileSync(join(explicitMcp, 'config', 'profile.yml'), 'scan:\n  extractor: mcp\n');
+  const a2 = JSON.parse(run(NODE, ['doctor.mjs', '--json', '--target', explicitMcp]) || '{}');
+  if (Array.isArray(a2.warnings) && a2.warnings.some((w) => /playwright mcp/i.test(w))) {
+    pass('Explicit MCP selection without project config warns');
+  } else {
+    fail(`Expected a Playwright MCP warning for explicit MCP selection, got: ${JSON.stringify(a2.warnings)}`);
+  }
+  rmSync(explicitMcp, { recursive: true, force: true });
+
+  // A project that registers a Playwright MCP server → no warning when MCP is selected.
   const withMcp = mkdtempSync(join(tmpdir(), 'co-mcp-'));
+  mkdirSync(join(withMcp, 'config'), { recursive: true });
+  writeFileSync(join(withMcp, 'config', 'profile.yml'), 'scan:\n  extractor: mcp\n');
   mkdirSync(join(withMcp, '.claude'), { recursive: true });
   writeFileSync(
     join(withMcp, '.claude', 'settings.json'),
@@ -4766,8 +4781,10 @@ try {
   }
   rmSync(withMcp, { recursive: true, force: true });
 
-  // Local Claude settings should also count as a valid MCP registration.
+  // Local CLI-specific settings should also count as a valid MCP registration.
   const withLocalMcp = mkdtempSync(join(tmpdir(), 'co-local-mcp-'));
+  mkdirSync(join(withLocalMcp, 'config'), { recursive: true });
+  writeFileSync(join(withLocalMcp, 'config', 'profile.yml'), 'scan:\n  extractor: mcp\n');
   mkdirSync(join(withLocalMcp, '.claude'), { recursive: true });
   writeFileSync(
     join(withLocalMcp, '.claude', 'settings.local.json'),

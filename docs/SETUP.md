@@ -20,6 +20,8 @@ Optionally copy `voice-dna.example.md` to local `voice-dna.md` and customize you
 
 Ask the agent to “Run scan mode”, “Evaluate this job description”, “Run PDF mode”, or “Run tracker mode”. Legacy `/career-ops` skill aliases remain compatible; Codex can use the same modes by name. See [SCRIPTS.md](SCRIPTS.md) for CLI commands and immutable application-batch authority. Agents stop before final application submission.
 
+Codex reads the shared project instructions through the root `CODEX.md` wrapper. Native `/career-ops` slash commands are not guaranteed, so use a plain-language prompt with the mode name. For one-shot or headless use, run `codex exec "Run career-ops scan mode and summarize new matches."` See [CODEX.md](CODEX.md) for more examples.
+
 For PDF rendering, install Chromium if the dependency install has not already done so:
 
 ```sh

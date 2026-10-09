@@ -197,6 +197,8 @@ Prepare the exact candidate in this application batch.
 
 Existing `/career-ops` skill aliases and internal compatibility identifiers remain available where the inherited workflow still depends on them.
 
+Codex reads the shared project guidance through the root [CODEX.md](CODEX.md) wrapper. Native `/career-ops` slash commands are not guaranteed, so ask for the mode by name in a plain-language prompt. For a one-shot run, use `codex exec "Run career-ops scan mode and summarize new matches."` See the [Codex guide](docs/CODEX.md) for interactive and headless examples.
+
 For fuller onboarding instructions, see [docs/SETUP.md](docs/SETUP.md).
 
 ## Common commands
