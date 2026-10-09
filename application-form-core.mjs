@@ -17,6 +17,71 @@ function digest(value) {
   return `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
 }
 
+export const HUMAN_GATE_CAUSES = Object.freeze(['captcha', 'login', 'account_creation', 'mfa', 'email_verification', 'uncertain']);
+export const HUMAN_GATE_SIGNALS = Object.freeze([
+  'captcha_blocking', 'captcha_uncertain', 'password_field', 'login_text', 'authentication_path',
+  'account_creation_text', 'account_creation_path', 'one_time_code_field', 'mfa_text',
+  'email_verification_text', 'human_verification_text', 'legacy_login_gate', 'conflicting_gate_signals',
+]);
+
+// Credentials and challenge responses must never be treated as candidate answers,
+// even when their labels overlap a grounded application-field semantic.
+export function classifyHumanOnlyField(field = {}) {
+  const text = clean([field.type, field.name, field.id, field.label, field.text,
+    field.questionText, field.placeholder, field.autocomplete, field.semantic].join(' '));
+  if (/captcha|turnstile|challenge[-_ ]?response/i.test(text)) return 'captcha_response';
+  if (/one[-_ ]?time[-_ ]?(?:code|password)|(?:^|[^a-z])otp(?:[^a-z]|$)|(?:verification|security|authentication|authenticator|mfa)[-_ ]?code|(?:sms|email)[-_ ]?code/i.test(text)) return 'one_time_code';
+  if (clean(field.type).toLowerCase() === 'password' || /password/i.test(text)) return 'password';
+  return null;
+}
+
+export function sanitizeHumanGateUrl(value) {
+  const url = new URL(value);
+  if (!['http:', 'https:', 'about:'].includes(url.protocol)) throw new Error('Invalid human gate URL');
+  url.search = '';
+  url.hash = '';
+  url.username = '';
+  url.password = '';
+  return url.href;
+}
+
+export function classifyHumanGate(pageSignals = {}) {
+  const body = clean(pageSignals.bodyText).toLowerCase();
+  const fields = (pageSignals.fields || []).filter((field) => field.visible !== false);
+  const url = String(pageSignals.currentUrl || pageSignals.url || '');
+  const evidence = [];
+  const causes = new Set();
+  const add = (cause, signal) => { causes.add(cause); evidence.push(signal); };
+  const captcha = pageSignals.captcha || classifyCaptchaState(pageSignals.captchaSignals || {
+    present: CAPTCHA_SIGNAL_WORDS.test(body), textSignal: CAPTCHA_SIGNAL_WORDS.test(body),
+    bodySignalText: body, totalNormalFields: fields.length,
+    accessibleNormalFields: fields.filter((field) => !field.disabled).length,
+  });
+  if (!captcha.completed && captcha.present) {
+    if (captcha.classification === 'active_blocking') add('captcha', 'captcha_blocking');
+    else if (captcha.classification === 'uncertain') add('uncertain', 'captcha_uncertain');
+  }
+  if (fields.some((field) => classifyHumanOnlyField(field) === 'password')) add('login', 'password_field');
+  if (/(?:sign|log)\s*in to (?:apply|continue)|login to (?:apply|continue)|einloggen|weiter mit e-mail-adresse|weiter als gast/.test(body)
+      || (!pageSignals.applicationFormId && /\b(?:(?:sign|log)\s*in|login)\b/.test(body))) add('login', 'login_text');
+  if (/\/(?:login|signin|sign-in|(?:application|apply)\/authentication)(?:[/?#]|$)/i.test(url)
+      && fields.some((field) => /e-?mail/i.test(clean([field.type, field.label, field.text, field.name].join(' '))))) add('login', 'authentication_path');
+  if (/\b(?:create (?:an? |your )?account|account creation|register to apply|sign up to (?:apply|continue))\b/.test(body)) add('account_creation', 'account_creation_text');
+  if (/\/(?:register|signup|sign-up|create-account)(?:[/?#]|$)/i.test(url)
+      && fields.some((field) => ['password', 'email'].includes(clean(field.type).toLowerCase()))) add('account_creation', 'account_creation_path');
+  if (fields.some((field) => classifyHumanOnlyField(field) === 'one_time_code')) add('mfa', 'one_time_code_field');
+  if (/\b(?:mfa|two[- ]factor|multi[- ]factor|one[- ]time (?:code|password)|enter (?:the |your )?(?:verification|security|authentication) code|authenticator (?:app|code))\b/.test(body)) add('mfa', 'mfa_text');
+  if (/\b(?:verify (?:your |the )?(?:e-?mail|email address)|email verification|check your (?:e-?mail|inbox)|verification (?:e-?mail|link)|confirm your (?:e-?mail|email address))\b/.test(body)) add('email_verification', 'email_verification_text');
+  if (!causes.size && /\b(?:verify (?:your identity|you are human)|verification required|checking your browser|just a moment|access denied|unusual traffic)\b/.test(body)) add('uncertain', 'human_verification_text');
+  if (!causes.size && pageSignals.loginGate) add('uncertain', 'legacy_login_gate');
+  // A password is expected on registration and MFA can follow login. Those
+  // combinations identify the more specific step; unrelated gates are ambiguous.
+  if (causes.has('account_creation') || causes.has('mfa')) causes.delete('login');
+  if (!causes.size) return { gate: null };
+  if (causes.size > 1) evidence.push('conflicting_gate_signals');
+  return { gate: { cause: causes.size === 1 ? [...causes][0] : 'uncertain', evidence: [...new Set(evidence)] } };
+}
+
 export function classifyCaptchaState(signals = {}) {
   const elements = Array.isArray(signals.elements) ? signals.elements : [];
   const signalText = clean([
@@ -58,7 +123,8 @@ export function classifyCaptchaState(signals = {}) {
   } else if (visibleChallenge && accessibleFields > 0) {
     classification = 'active_non_blocking';
     observedBlockingStatus = 'visible_challenge_does_not_block_accessible_fields';
-  } else if ((signals.scriptCount || elements.length) && !visibleChallenge && accessibleFields > 0) {
+  } else if ((signals.scriptCount || elements.length) && !visibleChallenge
+      && (accessibleFields > 0 || (totalFields === 0 && !signals.textSignal))) {
     classification = 'passive_invisible';
     observedBlockingStatus = 'captcha_present_without_visible_blocking_challenge';
   } else {
@@ -171,6 +237,7 @@ export function applicationFormStateFingerprint(snapshot) {
 }
 
 export function classifyField(field) {
+  if (classifyHumanOnlyField(field)) return 'human_action';
   const label = clean([field.questionText, field.groupLabel, field.label, field.name, field.placeholder].filter(Boolean).join(' ')).toLowerCase();
   const semantics = classifyFieldSemantics(field);
   if (field.type === 'file') {
@@ -356,8 +423,8 @@ export function buildFormPlan(snapshot, profile, artifacts, { candidateId = null
   return { actions, unresolvedFields, finalActions, progressionActions, ambiguousActions, uploadTopology, snapshotHash: digest(snapshot) };
 }
 
-export async function inspectApplicationForm(page) {
-  const snapshot = await page.evaluate(({ finalTokenSource, finalTokenFlags }) => {
+export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
+  const snapshot = await page.evaluate(({ finalTokenSource, finalTokenFlags, gateOnly }) => {
     const finalToken = new RegExp(finalTokenSource, finalTokenFlags);
     const controlSelector = 'button, input[type="submit"], input[type="button"], input[type="image"], input[type="reset"], a, [role="button"], [role="link"]';
     const visible = (element) => {
@@ -390,7 +457,9 @@ export async function inspectApplicationForm(page) {
     for (const element of fieldElements) {
       const existing = String(element.getAttribute('data-career-ops-field-id') || '').trim();
       if (!existing) continue;
-      if (usedFieldIds.has(existing)) throw new Error(`Duplicate Career-Ops field identity detected: ${existing}`);
+      // Gate detection does not trust field identities. Exact interaction and
+      // ordinary form inspection still reject duplicates independently.
+      if (usedFieldIds.has(existing) && !gateOnly) throw new Error(`Duplicate Career-Ops field identity detected: ${existing}`);
       usedFieldIds.add(existing);
       const generated = existing.match(/^field-(\d+)$/);
       if (generated) globalThis.__careerOpsFieldCounter = Math.max(globalThis.__careerOpsFieldCounter, Number(generated[1]));
@@ -665,7 +734,7 @@ export async function inspectApplicationForm(page) {
       submitAttempts: Number(globalThis.__careerOpsSubmitAttempts || 0),
       progressionSubmits: Number(globalThis.__careerOpsProgressionSubmits || 0),
     };
-  }, { finalTokenSource: FINAL_TOKEN.source, finalTokenFlags: FINAL_TOKEN.flags });
+  }, { finalTokenSource: FINAL_TOKEN.source, finalTokenFlags: FINAL_TOKEN.flags, gateOnly });
   return { ...snapshot, captcha: classifyCaptchaState(snapshot.captchaSignals) };
 }
 
@@ -731,6 +800,17 @@ export async function executeFormPlan(page, plan) {
   const unresolvedFields = [];
   for (const action of plan.actions) {
     const locator = await exactLocator(page, action);
+    const liveField = await locator.evaluate((element) => ({
+      type: element.type, name: element.name, id: element.id,
+      label: [...(element.labels || [])].map((label) => label.innerText).join(' '),
+      autocomplete: element.getAttribute('autocomplete'),
+      text: element.getAttribute('aria-label'), placeholder: element.getAttribute('placeholder'),
+    }));
+    if (classifyHumanOnlyField(action) || classifyHumanOnlyField(liveField)) {
+      unresolvedFields.push({ fieldId: action.fieldId, label: action.label, semantic: action.semantic,
+        reason: 'Credential or challenge field requires the human.' });
+      continue;
+    }
     if (isSemanticFinalAction(await locator.evaluate((element) => ({
       tag: element.tagName.toLowerCase(),
       role: element.getAttribute('role') || '',

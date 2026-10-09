@@ -1156,10 +1156,11 @@ test('maximum eight transitions hands off safely', { timeout: 30_000 }, async ()
 });
 
 test('CAPTCHA or login appearing later stops before another activation', { timeout: 30_000 }, async () => {
-  for (const [options, state] of [[{ captchaAt: 3 }, 'blocked'], [{ loginAt: 3 }, 'login_required']]) {
+  for (const [options, cause] of [[{ captchaAt: 3 }, 'captcha'], [{ loginAt: 3 }, 'login']]) {
     const run = await runFixture(options);
     try {
-      assert.equal(run.result.gate.state, state);
+      assert.equal(run.result.gate.state, 'human_action_required');
+      assert.equal(run.result.gate.cause, cause);
       assert.equal(run.result.evidence.progression.stepsAdvanced, 2);
       assert.equal(run.result.evidence.finalAction.activated, false);
     } finally {

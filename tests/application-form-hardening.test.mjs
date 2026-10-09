@@ -1060,7 +1060,8 @@ test('28–30. final Submit and blocking CAPTCHA protections remain untouched wi
     </form>
   `);
   const result = await prepareOperationalApplicationForm(page, profile, {}, { context: formContext });
-  assert.equal(result.gate.state, 'blocked');
+  assert.equal(result.gate.state, 'human_action_required');
+  assert.equal(result.gate.cause, 'captcha');
   assert.equal(result.evidence.filledFields.length, 0);
   assert.equal(result.evidence.finalAction.activated, false);
   assert.equal(await page.evaluate(() => window.fixtureSubmits || 0), 0);

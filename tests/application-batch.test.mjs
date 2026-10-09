@@ -446,6 +446,7 @@ test('state schema carries IDs and rejects invalid transitions and Applied statu
   assert.deepEqual(EXECUTION_STATES, [
     'not_opened', 'listing_verified', 'actual_form_reached', 'form_inspected',
     'fields_filled', 'files_uploaded', 'review_required', 'login_required',
+    'human_action_required',
     'form_prepared', 'blocked', 'closed', 'abandoned',
   ]);
   assert.throws(
@@ -464,7 +465,7 @@ test('state schema carries IDs and rejects invalid transitions and Applied statu
     currentUrl: SELECTED_SIX[0], reason: 'visible identity matched',
   });
   const state = loadBatchState(created.manifestPath, { root: fixture.root }).state;
-  assert.equal(state.schemaVersion, 4);
+  assert.equal(state.schemaVersion, 5);
   assert.equal(state.candidates[0].candidate_id, candidateId);
   assert.equal(state.candidates[0].run_id, RUN_ID);
   assert.equal(state.candidates[0].history.at(-1).from, 'not_opened');
@@ -573,7 +574,7 @@ test('unsupported future manifest and state major versions are rejected', () => 
   assert.throws(() => loadBatchState(stateCreated.manifestPath, { root: fixture.root }), /Unsupported future application-batch state/);
 }));
 
-test('Phase 2/3 state reads normalize to v4 in memory without rewriting the old state file', () => withFixture((fixture) => {
+test('Phase 2/3 state reads normalize to v5 in memory without rewriting the old state file', () => withFixture((fixture) => {
   const created = createOne(fixture, 'state-v2-migration');
   const original = JSON.parse(readFileSync(created.statePath, 'utf8'));
   original.schemaVersion = 2;
@@ -581,7 +582,7 @@ test('Phase 2/3 state reads normalize to v4 in memory without rewriting the old 
   writeFileSync(created.statePath, `${JSON.stringify(original, null, 2)}\n`);
   const before = readFileSync(created.statePath, 'utf8');
   const loaded = loadBatchState(created.manifestPath, { root: fixture.root });
-  assert.equal(loaded.state.schemaVersion, 4);
+  assert.equal(loaded.state.schemaVersion, 5);
   assert.equal(loaded.state.migratedFromSchemaVersion, 2);
   assert.equal(loaded.state.candidates[0].formPreparation, null);
   assert.equal(readFileSync(created.statePath, 'utf8'), before);

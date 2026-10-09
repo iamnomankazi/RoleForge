@@ -34,12 +34,13 @@ import {
   validateArtifactRecord,
 } from './application-integrity.mjs';
 import { GENERIC_APPLICATION_CLASSIFICATION_SEMANTICS } from './application-reasoning.mjs';
+import { HUMAN_GATE_CAUSES, HUMAN_GATE_SIGNALS, sanitizeHumanGateUrl } from './application-form-core.mjs';
 import { normalizeTextKey, parseTrackerRow, resolveColumns } from './tracker-parse.mjs';
 import { loadCanonicalStates, resolveCanonicalState } from './tracker-utils.mjs';
 
 export const ROOT = dirname(fileURLToPath(import.meta.url));
 export const APPLICATION_BATCH_MANIFEST_SCHEMA_VERSION = 2;
-export const APPLICATION_BATCH_STATE_SCHEMA_VERSION = 4;
+export const APPLICATION_BATCH_STATE_SCHEMA_VERSION = 5;
 export const APPLICATION_BATCH_SCHEMA_VERSION = APPLICATION_BATCH_MANIFEST_SCHEMA_VERSION;
 export const EXECUTION_STATES = Object.freeze([
   'not_opened',
@@ -50,6 +51,7 @@ export const EXECUTION_STATES = Object.freeze([
   'files_uploaded',
   'review_required',
   'login_required',
+  'human_action_required',
   'form_prepared',
   'blocked',
   'closed',
@@ -59,21 +61,48 @@ export const EXECUTION_STATES = Object.freeze([
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/;
 const TRANSITIONS = Object.freeze({
   not_opened: new Set(['listing_verified', 'login_required', 'blocked', 'closed', 'abandoned']),
-  listing_verified: new Set(['actual_form_reached', 'review_required', 'login_required', 'blocked', 'closed', 'abandoned']),
-  actual_form_reached: new Set(['form_inspected', 'form_prepared', 'review_required', 'login_required', 'blocked', 'closed', 'abandoned']),
+  listing_verified: new Set(['actual_form_reached', 'review_required', 'login_required', 'human_action_required', 'blocked', 'closed', 'abandoned']),
+  actual_form_reached: new Set(['form_inspected', 'form_prepared', 'review_required', 'login_required', 'human_action_required', 'blocked', 'closed', 'abandoned']),
   form_inspected: new Set(['fields_filled', 'review_required', 'login_required', 'blocked', 'closed', 'abandoned']),
   fields_filled: new Set(['files_uploaded', 'form_prepared', 'review_required', 'login_required', 'blocked', 'closed', 'abandoned']),
   files_uploaded: new Set(['form_prepared', 'review_required', 'login_required', 'blocked', 'closed', 'abandoned']),
-  review_required: new Set(['review_required', 'actual_form_reached', 'form_inspected', 'blocked', 'closed', 'abandoned']),
-  login_required: new Set(['listing_verified', 'actual_form_reached', 'review_required', 'blocked', 'closed', 'abandoned']),
+  review_required: new Set(['review_required', 'actual_form_reached', 'form_inspected', 'human_action_required', 'blocked', 'closed', 'abandoned']),
+  login_required: new Set(['listing_verified', 'actual_form_reached', 'review_required', 'human_action_required', 'blocked', 'closed', 'abandoned']),
+  human_action_required: new Set(['actual_form_reached', 'login_required', 'blocked', 'review_required', 'abandoned']),
   form_prepared: new Set(['closed', 'abandoned']),
-  blocked: new Set(['actual_form_reached', 'review_required', 'login_required', 'closed', 'abandoned']),
+  blocked: new Set(['actual_form_reached', 'review_required', 'login_required', 'human_action_required', 'closed', 'abandoned']),
   closed: new Set(),
   abandoned: new Set(),
 });
 
 function inline(value) {
   return String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+}
+
+const HUMAN_ACTION_STAGES = new Set(['listing', 'application_entry', 'form_inspection', 'field_filling', 'form_progression', 'form_review']);
+
+function validateHumanAction(value, candidateId) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Human action record is required');
+  assertKnownFields(value, new Set(['candidate_id', 'cause', 'stage', 'currentUrl', 'timestamp', 'evidence']), 'human action record');
+  if (value.candidate_id !== candidateId) throw new Error('Human action candidate identity mismatch');
+  if (!HUMAN_GATE_CAUSES.includes(value.cause)) throw new Error('Invalid human action cause');
+  if (!HUMAN_ACTION_STAGES.has(value.stage)) throw new Error('Invalid human action stage');
+  requireHttpUrl(value.currentUrl, 'human action current URL');
+  if (value.currentUrl !== sanitizeHumanGateUrl(value.currentUrl)) throw new Error('Human action URL must be sanitized');
+  if (!Number.isFinite(Date.parse(value.timestamp))) throw new Error('Invalid human action timestamp');
+  if (!Array.isArray(value.evidence) || !value.evidence.length
+      || value.evidence.some((signal) => !HUMAN_GATE_SIGNALS.includes(signal))) {
+    throw new Error('Human action evidence must contain only classifier signal names');
+  }
+}
+
+function validateHumanActionRevalidation(details, candidateId) {
+  const checks = details?.humanActionRevalidation;
+  if (checks?.candidate_id !== candidateId
+      || !['listingLive', 'identityVerified', 'destinationCompatible', 'gateCleared', 'formVerified']
+        .every((key) => checks[key] === true)) {
+    throw new Error('Resuming a human action pause requires fresh exact-candidate revalidation');
+  }
 }
 
 function requireSafeId(value, label) {
@@ -935,6 +964,11 @@ function validateState(state, manifest) {
   for (const candidate of state.candidates || []) candidate.formPreparationHistory ??= [];
   if (state.schemaVersion === 2) return validateState(normalizeStateV2(state), manifest);
   if (state.schemaVersion === 3) return validateState(normalizeStateV3(state), manifest);
+  if (state.schemaVersion === 4) {
+    state = structuredClone(state);
+    state.schemaVersion = APPLICATION_BATCH_STATE_SCHEMA_VERSION;
+    state.migratedFromSchemaVersion ??= 4;
+  }
   if (state.schemaVersion !== APPLICATION_BATCH_STATE_SCHEMA_VERSION) {
     if (Number.isInteger(state.schemaVersion) && state.schemaVersion > APPLICATION_BATCH_STATE_SCHEMA_VERSION) {
       throw new Error(`Unsupported future application-batch state schema version: ${state.schemaVersion}`);
@@ -959,6 +993,7 @@ function validateState(state, manifest) {
       'currentUrl', 'reason', 'history', 'importVerification', 'submission',
       'formPreparation', 'formPreparationHistory',
       'abandonmentHistory',
+      'humanAction',
     ]), 'candidate state');
     const candidate = manifest.candidates[index];
     if (candidateState.candidate_id !== candidate.candidate_id || candidateState.run_id !== manifest.sourceRunId
@@ -1009,12 +1044,13 @@ function validateState(state, manifest) {
     }
     candidateState.submission = submission;
     validateFormPreparation(candidateState.formPreparation);
+    if (candidateState.humanAction != null) validateHumanAction(candidateState.humanAction, candidateState.candidate_id);
     if (!EXECUTION_STATES.includes(candidateState.state)) throw new Error(`Invalid stored execution state: ${candidateState.state}`);
     if (!Array.isArray(candidateState.history) || !candidateState.history.length) throw new Error('Batch state history is missing');
     let previous = null;
     let previousTimestamp = 0;
     candidateState.history.forEach((event, eventIndex) => {
-      assertKnownFields(event, new Set(['seq', 'from', 'to', 'timestamp', 'currentUrl', 'reason', 'details']), 'state history event');
+      assertKnownFields(event, new Set(['seq', 'from', 'to', 'timestamp', 'currentUrl', 'reason', 'details', 'humanAction']), 'state history event');
       if (event.seq !== eventIndex || event.from !== previous) throw new Error('Batch state history sequence is invalid');
       if (!EXECUTION_STATES.includes(event.to)) throw new Error(`Invalid history execution state: ${event.to}`);
       if (eventIndex === 0) {
@@ -1025,11 +1061,26 @@ function validateState(state, manifest) {
       const timestamp = Date.parse(event.timestamp);
       if (!Number.isFinite(timestamp) || timestamp < previousTimestamp) throw new Error('Batch state history timestamps are invalid');
       requireHttpUrl(event.currentUrl, 'state history current URL');
+      if (event.to === 'human_action_required') {
+        validateHumanAction(event.humanAction, candidateState.candidate_id);
+        if (event.details != null || event.currentUrl !== event.humanAction.currentUrl
+            || event.timestamp !== event.humanAction.timestamp
+            || event.reason !== `Human action required: ${event.humanAction.cause}.`) {
+          throw new Error('Invalid human action history record');
+        }
+      } else if (event.humanAction != null) throw new Error('Human action history record requires a pause transition');
+      if (event.from === 'human_action_required' && event.to === 'actual_form_reached') {
+        validateHumanActionRevalidation(event.details, candidateState.candidate_id);
+      }
       if (!inline(event.reason)) throw new Error('State history reason is missing');
       previous = event.to;
       previousTimestamp = timestamp;
     });
     const last = candidateState.history.at(-1);
+    if (candidateState.state === 'human_action_required'
+        && JSON.stringify(candidateState.humanAction) !== JSON.stringify(last.humanAction)) {
+      throw new Error('Candidate human action does not match its final history event');
+    }
     if (candidateState.state !== last.to || candidateState.currentUrl !== last.currentUrl || candidateState.reason !== last.reason) {
       throw new Error('Candidate state does not match its final history event');
     }
@@ -1654,12 +1705,18 @@ export function transitionCandidateState(manifestPath, selector, toState, {
   lockToken = null,
   details = null,
   formPreparation = null,
+  humanAction = null,
   now = new Date(),
 } = {}) {
   if (!EXECUTION_STATES.includes(toState)) throw new Error(`Invalid execution state: ${toState}`);
   if (toState === 'abandoned') throw new Error('State abandoned may only be recorded by the canonical abandonment API');
-  const current = requireHttpUrl(currentUrl, 'current URL');
-  const evidence = inline(reason);
+  const isHumanPause = toState === 'human_action_required';
+  const current = requireHttpUrl(isHumanPause ? sanitizeHumanGateUrl(currentUrl) : currentUrl, 'current URL');
+  const evidence = isHumanPause ? `Human action required: ${humanAction?.cause}.` : inline(reason);
+  if (isHumanPause && (details != null || formPreparation != null)) {
+    throw new Error('Human action pause records only sanitized classifier evidence');
+  }
+  if (!isHumanPause && humanAction != null) throw new Error('Human action record requires a pause transition');
   if (!evidence) throw new Error('A short reason/evidence value is required for every state transition');
   if (evidence.length > 500) throw new Error('State transition reason/evidence must be 500 characters or fewer');
   const executorOnly = !['blocked', 'closed'].includes(toState);
@@ -1684,6 +1741,9 @@ export function transitionCandidateState(manifestPath, selector, toState, {
     if (!TRANSITIONS[candidateState.state]?.has(toState)) {
       throw new Error(`Invalid state transition: ${candidateState.state} -> ${toState}`);
     }
+    if (candidateState.state === 'human_action_required' && toState === 'actual_form_reached') {
+      validateHumanActionRevalidation(details, candidate.candidate_id);
+    }
     const effectivePreparation = formPreparation || candidateState.formPreparation;
     if (toState === 'form_prepared' && (!effectivePreparation?.reviewComplete
         || effectivePreparation?.finalAction?.activated !== false
@@ -1693,6 +1753,17 @@ export function transitionCandidateState(manifestPath, selector, toState, {
       throw new Error('form_prepared requires complete whole-form review evidence with the final action untouched');
     }
     const timestamp = now.toISOString();
+    let pauseRecord = null;
+    if (isHumanPause) {
+      assertKnownFields(humanAction || {}, new Set(['candidate_id', 'cause', 'stage', 'currentUrl', 'timestamp', 'evidence']), 'human action record');
+      pauseRecord = {
+        candidate_id: humanAction?.candidate_id ?? candidate.candidate_id,
+        cause: humanAction?.cause, stage: humanAction?.stage,
+        currentUrl: current, timestamp,
+        evidence: [...new Set(humanAction?.evidence || [])],
+      };
+      validateHumanAction(pauseRecord, candidate.candidate_id);
+    }
     candidateState.history.push({
       seq: candidateState.history.length,
       from: candidateState.state,
@@ -1701,11 +1772,13 @@ export function transitionCandidateState(manifestPath, selector, toState, {
       currentUrl: current,
       reason: evidence,
       ...(details ? { details } : {}),
+      ...(pauseRecord ? { humanAction: pauseRecord } : {}),
     });
     candidateState.state = toState;
     candidateState.updatedAt = timestamp;
     candidateState.currentUrl = current;
     candidateState.reason = evidence;
+    if (pauseRecord) candidateState.humanAction = pauseRecord;
     if (formPreparation) appendFormPreparationEvidence(candidateState, formPreparation);
     if (toState === 'listing_verified' && candidateState.importVerification?.status === 'legacy_unverified') {
       candidateState.importVerification = {
@@ -1715,6 +1788,7 @@ export function transitionCandidateState(manifestPath, selector, toState, {
       };
     }
     loaded.state.revision += 1;
+    loaded.state.schemaVersion = APPLICATION_BATCH_STATE_SCHEMA_VERSION;
     loaded.state.updatedAt = timestamp;
     writeJsonAtomic(loaded.statePath, loaded.state);
     if (toState === 'closed') releaseCandidateClaim(root, loaded.manifest.batchId, candidate.candidate_id);

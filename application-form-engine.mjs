@@ -3,11 +3,14 @@ import {
   applicationFormStateFingerprint,
   classifyApplicationControl,
   classifyCaptchaState,
+  classifyHumanGate,
+  classifyHumanOnlyField,
   classifyUserGate,
   FINAL_TOKEN,
   inspectApplicationForm as inspectLegacyApplicationForm,
   isSemanticFinalAction,
   PROGRESSION_ACTION_LABEL,
+  sanitizeHumanGateUrl,
 } from './application-form-core.mjs';
 import {
   canonicalFieldValue,
@@ -102,6 +105,21 @@ export function actionAttemptLimitMs(action, limits = DEFAULT_LIVE_FORM_LIMITS) 
 
 function digest(value) {
   return hashFormValue(JSON.stringify(value));
+}
+
+function humanGateOutcome(snapshot, stage) {
+  const { gate } = classifyHumanGate(snapshot);
+  return gate ? {
+    state: 'human_action_required', ...gate, stage,
+    currentUrl: sanitizeHumanGateUrl(snapshot.url || snapshot.currentUrl || 'about:blank'),
+    reason: `Human action required: ${gate.cause}.`,
+  } : null;
+}
+
+async function inspectLiveHumanGate(page, stage) {
+  // Non-browser test adapters may execute a supplied action implementation.
+  if (typeof page.locator !== 'function') return null;
+  return humanGateOutcome(await inspectLegacyApplicationForm(page, { gateOnly: true }), stage);
 }
 
 function escapeRegex(value) {
@@ -424,6 +442,11 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
   }
 
   for (const field of visibleFields) {
+    const humanField = classifyHumanOnlyField(field);
+    if (humanField) {
+      unresolvedFields.push(manualField(field, { category: 'human_action', semantic: humanField }, 'Credential or challenge field requires the human.'));
+      continue;
+    }
     const { semantics, semanticResolution, narrativeRouting } = resolvedFieldSemantics(
       field, snapshot, context, semanticResolutions,
     );
@@ -920,6 +943,13 @@ export async function activateProgressionControl(page, control, options = {}) {
     throw new Error('Progression control identity is no longer exact.');
   }
   const liveSnapshot = await inspectOperationalApplicationForm(page);
+  const humanGate = humanGateOutcome(liveSnapshot, 'form_progression');
+  if (humanGate) {
+    await clearProgressionPermit(page);
+    const error = new Error(humanGate.reason);
+    error.humanGate = humanGate;
+    throw error;
+  }
   const liveControl = liveSnapshot.controls.find((item) => item.controlId === control.controlId);
   if (!liveControl || classifyApplicationControl(liveControl) !== 'progression'
       || JSON.stringify(applicationControlSignature(liveControl)) !== JSON.stringify(applicationControlSignature(control))) {
@@ -1077,6 +1107,7 @@ async function chooseAutocomplete(page, action, visibleOptions, { deadlineMs, cl
   let selectedLabel = null;
   for (const query of autocompleteQueries(action)) {
     locator = await exactLocator(page, action);
+    await assertHumanFillTarget(locator, action);
     await locator.focus({ timeout: remainingTimeout(deadlineMs, clock) });
     await locator.fill('', { timeout: remainingTimeout(deadlineMs, clock) });
     await locator.pressSequentially(query, { delay: 20, timeout: remainingTimeout(deadlineMs, clock) });
@@ -1140,9 +1171,23 @@ async function chooseAutocomplete(page, action, visibleOptions, { deadlineMs, cl
   return committed;
 }
 
+async function assertHumanFillTarget(locator, action) {
+  const liveField = await locator.evaluate((element) => ({
+    type: element.type, name: element.name, id: element.id,
+    label: [...(element.labels || [])].map((label) => label.innerText).join(' '),
+    autocomplete: element.getAttribute('autocomplete'),
+    placeholder: element.getAttribute('placeholder'),
+    text: element.getAttribute('aria-label'),
+  }));
+  if (classifyHumanOnlyField(action) || classifyHumanOnlyField(liveField)) {
+    throw new Error('Refusing to fill a credential or challenge response field.');
+  }
+}
+
 async function performAction(page, action, visibleOptions, { deadlineMs, clock }) {
   let locator = await exactLocator(page, action);
   await assertNotFinal(locator);
+  await assertHumanFillTarget(locator, action);
   if (action.action === 'upload') {
     const target = await locator.elementHandle();
     if (!target) throw new Error(`Exact upload input is unavailable: ${action.semantic}`);
@@ -1253,8 +1298,17 @@ async function executeOperationalFormPlanGuarded(page, plan, {
   const attemptLedger = [...priorLedger];
 
   let sessionLimitReached = false;
+  let gate = null;
   for (let actionIndex = 0; actionIndex < plan.actions.length; actionIndex += 1) {
     const action = plan.actions[actionIndex];
+    gate = await inspectLiveHumanGate(page, 'field_filling');
+    if (gate) break;
+    if (classifyHumanOnlyField(action)) {
+      unresolvedFields.push({ fieldId: action.fieldId, stableFieldId: action.stableFieldId,
+        category: action.category, semantic: action.semantic, label: action.label,
+        reason: 'Credential or challenge field requires the human.', manualActionRequired: true });
+      continue;
+    }
     if (clock() >= hardDeadlineMs) {
       sessionLimitReached = true;
       for (const pending of plan.actions.slice(actionIndex)) {
@@ -1274,6 +1328,8 @@ async function executeOperationalFormPlanGuarded(page, plan, {
     let success = false;
     let lastReason = null;
     for (let attempt = 1; attempt <= effectiveLimits.maxAttempts; attempt += 1) {
+      gate = await inspectLiveHumanGate(page, 'field_filling');
+      if (gate) break;
       const attemptedAt = now().toISOString();
       try {
         const sessionRemainingMs = Math.max(0, hardDeadlineMs - clock());
@@ -1340,6 +1396,8 @@ async function executeOperationalFormPlanGuarded(page, plan, {
         success = true;
         break;
       } catch (error) {
+        gate = await inspectLiveHumanGate(page, 'field_filling');
+        if (gate) break;
         const timeoutCode = clock() >= hardDeadlineMs ? 'FORM_SESSION_TIMEOUT' : error.code;
         sessionLimitReached = timeoutCode === 'FORM_SESSION_TIMEOUT';
         lastReason = timeoutCode === 'FORM_SESSION_TIMEOUT'
@@ -1370,6 +1428,7 @@ async function executeOperationalFormPlanGuarded(page, plan, {
         if (sessionLimitReached) break;
       }
     }
+    if (gate) break;
     if (!success) {
       unresolvedFields.push({
         fieldId: action.fieldId,
@@ -1396,6 +1455,7 @@ async function executeOperationalFormPlanGuarded(page, plan, {
       break;
     }
   }
+  gate ||= await inspectLiveHumanGate(page, 'field_filling');
   return {
     completed,
     uploadedArtifacts,
@@ -1404,6 +1464,7 @@ async function executeOperationalFormPlanGuarded(page, plan, {
     attemptLedger,
     timeLimits: effectiveLimits,
     sessionLimitReached,
+    ...(gate ? { gate } : {}),
   };
 }
 
@@ -1833,7 +1894,7 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
       visited.add(stateFingerprint);
       progression.visitedFingerprints = [...new Set([...historicalVisited, ...visited])];
 
-      const gate = classifyUserGate(snapshot);
+      const gate = humanGateOutcome(snapshot, 'form_inspection');
       if (gate) {
         outcome = { gate, snapshot };
         break;
@@ -1877,6 +1938,10 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
       aggregate.answerRecords = mergeAnswerRecords(aggregate.answerRecords, plan.answerRecords || []);
       aggregate.sessionLimitReached ||= execution.sessionLimitReached;
       aggregate.precomputedNarrativeCount += plan.answerRecords.length;
+      if (execution.gate) {
+        outcome = { gate: execution.gate, snapshot };
+        break;
+      }
       addPreparedAnswers(reasoningState, plan, plan.formFingerprint, snapshot);
       const triggerReasons = verifierTriggerReasons(reasoningState, plan, aggregate);
       reasoningState.riskReasons = new Set(triggerReasons);
@@ -1890,6 +1955,11 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
       reviewed.evidence.evidenceHash = digest({ ...reviewed.evidence, evidenceHash: undefined });
       const currentSnapshot = reviewed.snapshot;
       const currentPlan = reviewed.plan;
+      const reviewGate = humanGateOutcome(currentSnapshot, 'form_review');
+      if (reviewGate) {
+        outcome = { ...reviewed, gate: reviewGate };
+        break;
+      }
       const currentStateFingerprint = applicationFormStateFingerprint(currentSnapshot);
       const staleProgressionMutation = plan.progressionActions.find((oldControl) => {
         const liveControl = currentSnapshot.controls.find((item) => item.controlId === oldControl.controlId);
@@ -1971,6 +2041,10 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
           aggregate[key].push(...(repairExecution[key] || []));
         }
         aggregate.attemptLedger = repairExecution.attemptLedger;
+        if (repairExecution.gate) {
+          outcome = { gate: repairExecution.gate, snapshot: repairSnapshot };
+          break;
+        }
         aggregate.answerRecords = mergeAnswerRecords(aggregate.answerRecords, repairPlan.answerRecords || []);
         addPreparedAnswers(reasoningState, repairPlan, repairPlan.formFingerprint, repairSnapshot);
         reasoningState.semanticVerification.repair.outcome = repairExecution.unresolvedFields.length
@@ -2025,7 +2099,7 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
           timeoutMs: Math.min(transitionTimeoutMs, Math.max(1, progressionDeadlineMs - clock())),
         });
       } catch (error) {
-        outcome = { ...reviewed, gate: { state: 'review_required', reason: `Progression control changed before safe activation: ${cleanFormText(error.message)}` } };
+        outcome = { ...reviewed, gate: error.humanGate || { state: 'review_required', reason: `Progression control changed before safe activation: ${cleanFormText(error.message)}` } };
         break;
       }
       const transition = await waitForTransitionImpl(page, currentStateFingerprint, {
@@ -2033,6 +2107,18 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         stabilityMs: transitionStabilityMs,
       });
       await clearProgressionPermit(page);
+      const transitionGate = transition.snapshot && humanGateOutcome(transition.snapshot, 'form_progression');
+      if (transitionGate) {
+        if (!transition.timedOut && transition.fingerprint !== currentStateFingerprint) {
+          progression.stepsAdvanced += 1;
+          progression.transitions.push({
+            controlId: control.controlId, label: control.label, before: currentStateFingerprint,
+            after: transition.fingerprint, durationMs: transition.durationMs ?? Math.max(0, clock() - startedAt),
+          });
+        }
+        outcome = { gate: transitionGate, snapshot: transition.snapshot };
+        break;
+      }
       if (transition.timedOut || transition.fingerprint === currentStateFingerprint) {
         outcome = { ...reviewed, gate: { state: 'review_required', reason: 'Progression activation produced no verified application-state transition.' } };
         break;
@@ -2078,6 +2164,18 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
       context, previousEvidence: effectivePreviousEvidence, reasoningState, passId, resumeMode,
     });
     outcome = { ...reviewed, gate: outcome.gate };
+  }
+  if (outcome.gate?.state === 'human_action_required') {
+    outcome.humanAction = {
+      candidate_id: context.candidate?.candidate_id || context.candidate?.candidateId || null,
+      cause: outcome.gate.cause, stage: outcome.gate.stage,
+      currentUrl: outcome.gate.currentUrl, timestamp: new Date().toISOString(),
+      evidence: outcome.gate.evidence,
+    };
+    outcome.evidence.currentUrl = outcome.gate.currentUrl;
+    outcome.evidence.userActionRequired = true;
+    outcome.evidence.deterministicReviewComplete = false;
+    outcome.evidence.reviewComplete = false;
   }
   outcome.evidence.progression = { ...progression, progressionSubmits: outcome.snapshot?.progressionSubmits || progression.stepsAdvanced };
   outcome.evidence.operationalArtifacts.submissionGuardActiveAtHandoff = false;
