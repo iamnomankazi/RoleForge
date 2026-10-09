@@ -7,6 +7,7 @@ All scripts live in the project root as `.mjs` modules and are exposed via `npm 
 | Command | Script | Purpose |
 |---------|--------|---------|
 | `npm run doctor` | `doctor.mjs` | Validate setup prerequisites |
+| `npm run backup` | `backup.mjs` | Back up personal files and application history locally |
 | `npm run verify` | `verify-pipeline.mjs` | Check pipeline data integrity |
 | `npm run normalize` | `normalize-statuses.mjs` | Fix non-canonical statuses |
 | `npm run dedup` | `dedup-tracker.mjs` | Remove duplicate tracker entries |
@@ -28,6 +29,26 @@ All scripts live in the project root as `.mjs` modules and are exposed via `npm 
 | `npm run tracker` | `tracker.mjs` | SQLite derived index over applications.md — sync/query/history/export |
 | `npm run find` | `find.mjs` | Resolve a report#/tracker#/company query to its full pipeline identity |
 | `npm run invite-match` | `invite-match.mjs` | Fuzzy-match a pasted interview-invite email against `data/applications.md` |
+
+---
+
+## backup
+
+Run from the project root:
+
+```bash
+npm run backup
+npm run backup -- --dry-run   # file count and total bytes; writes nothing
+node backup.mjs --help
+```
+
+Copies `cv.md`, `config/profile.yml`, `modes/_profile.md`, `modes/_custom.md`, `article-digest.md`, `portals.yml`, `voice-dna.md`, `writing-samples/`, `data/`, `reports/`, `interview-prep/`, and `jds/`. It also preserves authoritative state in `output/cv-approved/`, `output/application-answer-bank.md`, `output/application-batches/`, and `output/scan-runs/`. Missing sources are skipped; `backups/`, `preimages/`, and `node_modules/` are excluded at every depth. Symbolic links are reported as failures rather than followed.
+
+Backups live in gitignored `backups/<UTC timestamp>/`, with original relative paths and a `manifest.json` listing each file's size and SHA-256. The newest 5 timestamp directories are retained after a successful copy. Any failed file is listed and makes the command exit non-zero; incomplete copies stay in a `.incomplete` directory and do not trigger retention. Other directory names are never pruned.
+
+Restore manually by copying the needed files from a backup to their original relative paths in the project. These local copies contain personal data; to survive disk failure, copy a backup to a separate disk yourself.
+
+**Exit codes:** `0` backup or dry-run succeeded, `1` invalid arguments or any backup/retention failure.
 
 ---
 
