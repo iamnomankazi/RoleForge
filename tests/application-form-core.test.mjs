@@ -105,6 +105,35 @@ test('field and final-action semantics cover common ATS patterns', () => {
   assert.equal(classifyApplicationControl({ ...workflow, type: 'submit', label: 'Continue', hasRemainingStep: false }), 'ambiguous');
 });
 
+test('editable fields and choice controls never classify as final actions', () => {
+  for (const field of [
+    { tag: 'input', type: 'text', label: 'Confirm email' },
+    { tag: 'input', type: 'email', label: 'Confirm email', value: 'confirm@example.test' },
+    { tag: 'input', type: 'tel', label: 'Confirm phone number' },
+    { tag: 'input', type: 'file', label: 'Upload complete CV' },
+    { tag: 'input', type: 'checkbox', label: 'Send me updates' },
+    { tag: 'input', type: 'radio', label: 'Confirm' },
+    { tag: 'textarea', label: 'Confirm', value: 'Submit' },
+    { tag: 'select', label: 'Confirm' },
+    { tag: 'div', role: 'combobox', label: 'Confirm' },
+    { tag: 'button', role: 'checkbox', label: 'Send me updates' },
+  ]) {
+    assert.equal(isSemanticFinalAction({ ...field, insideApplicationForm: true }), false, JSON.stringify(field));
+  }
+  for (const action of [
+    { tag: 'button', label: 'Absenden' },
+    { tag: 'button', label: 'Lähetä hakemus' },
+    { tag: 'button', label: 'Hae kaupunki' },
+    { tag: 'button', label: 'Upload complete CV' },
+    { tag: 'input', type: 'image', label: 'Confirm' },
+    { tag: 'a', label: 'Submit application' },
+    { tag: 'div', role: 'button', label: 'Apply' },
+    { tag: 'div', role: 'link', label: 'Apply' },
+  ]) {
+    assert.equal(isSemanticFinalAction({ ...action, insideApplicationForm: true }), true, JSON.stringify(action));
+  }
+});
+
 test('localized progression requires a numbered remaining step and all final words are terminal', () => {
   const workflow = {
     type: 'submit', insideApplicationForm: true, candidateFieldCount: 2, workflowVerified: true,

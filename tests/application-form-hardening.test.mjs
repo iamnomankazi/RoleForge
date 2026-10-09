@@ -816,11 +816,37 @@ test('21–24. autocomplete captures options, retries once, preserves other fiel
   await page.close();
 });
 
-test('location autocomplete uses only its owned listbox while preserving grounded country fallback and commit verification', async () => {
+test('Confirm email and Confirm phone number remain fillable with the submission guard active', async () => {
+  const page = await browser.newPage();
+  await page.setContent(`
+    <form id="application">
+      <label>Confirm email<input id="email" name="confirm_email" type="email" aria-label="Confirm email" required></label>
+      <label>Confirm phone number<input id="phone" name="confirm_phone" type="tel" aria-label="Confirm phone number" required></label>
+      <label>LinkedIn<input name="linkedin"></label>
+      <label>Send me updates<input id="updates" type="checkbox"></label>
+      <button type="submit" onclick="window.finalClicks=(window.finalClicks||0)+1">Absenden</button>
+    </form><script>
+      updates.addEventListener('click', () => { window.updateClicks=(window.updateClicks||0)+1; });
+      application.addEventListener('submit', event => { event.preventDefault(); window.submits=(window.submits||0)+1; });
+    </script>
+  `);
+  const result = await prepareOperationalApplicationForm(page, profile, {}, { context: formContext });
+  assert.equal(await page.locator('#email').inputValue(), profile.candidate.email);
+  assert.equal(await page.locator('#phone').inputValue(), profile.candidate.phone);
+  await page.locator('#updates').check();
+  assert.equal(await page.evaluate(() => window.updateClicks || 0), 1);
+  assert.equal(await page.evaluate(() => window.finalClicks || 0), 0);
+  assert.equal(await page.evaluate(() => window.submits || 0), 0);
+  assert.equal(result.evidence.finalAction.detected, true);
+  assert.equal(result.evidence.finalAction.activated, false);
+  await page.close();
+});
+
+test('untyped autocomplete options retain their handlers while native submission stays blocked', async () => {
   const page = await browser.newPage();
   await page.setContent(`
     <button id="unrelated-option" type="button" role="option">Finland</button>
-    <form>
+    <form id="application">
       <label for="location">Location</label><input id="location" role="combobox" aria-autocomplete="list" aria-controls="location-options" required>
       <div id="location-options" role="listbox"></div>
       <button type="submit">Submit application</button>
@@ -838,7 +864,7 @@ test('location autocomplete uses only its owned listbox while preserving grounde
           locationOptions.innerHTML = '<div role="status">No options</div>';
           return;
         }
-        locationOptions.innerHTML = '<button id="owned-option" type="button" role="option">Finland</button>';
+        locationOptions.innerHTML = '<button id="owned-option" role="option">Finland</button>';
         locationOptions.querySelector('[role=option]').onclick = () => {
           ownedClicks += 1;
           locationInput.value = 'Finland';
@@ -847,6 +873,7 @@ test('location autocomplete uses only its owned listbox while preserving grounde
       });
       window.locationQueries = () => queries;
       window.autocompleteClicks = () => ({ unrelatedClicks, ownedClicks });
+      application.addEventListener('submit', event => { event.preventDefault(); window.submits=(window.submits||0)+1; });
     </script>
   `);
   const result = await prepareOperationalApplicationForm(page, profile, {}, { context: formContext });
@@ -869,6 +896,7 @@ test('location autocomplete uses only its owned listbox while preserving grounde
   assert.equal(verifiedPlan.actions.some((row) => row.semantic === 'current_location'), false);
   assert.equal(verifiedPlan.preservedFields.some((row) => row.semantic === 'current_location'), true);
   assert.equal(result.evidence.finalAction.activated, false);
+  assert.equal(await page.evaluate(() => window.submits || 0), 0);
   await page.close();
 });
 

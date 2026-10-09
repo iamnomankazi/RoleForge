@@ -103,6 +103,14 @@ export function applicationControlSignature(control) {
 }
 
 export function classifyApplicationControl(control) {
+  const tag = clean(control?.tag).toLowerCase();
+  const type = clean(control?.type).toLowerCase();
+  const role = clean(control?.role).toLowerCase();
+  const inputAction = ['submit', 'button', 'image', 'reset'].includes(type);
+  if (['textarea', 'select'].includes(tag) || (tag === 'input' && !inputAction)
+      || ['textbox', 'checkbox', 'radio', 'combobox', 'listbox'].includes(role)) return 'ambiguous';
+  if (!['button', 'a'].includes(tag) && !(tag === 'input' && inputAction)
+      && !['button', 'link'].includes(role) && !(!tag && inputAction)) return 'ambiguous';
   const label = controlLabel(control);
   const insideForm = Boolean(control?.insideApplicationForm);
   if (FINAL_TOKEN.test(clean([label, control?.text, control?.value].join(' ')))) return insideForm ? 'final' : 'ambiguous';
@@ -351,6 +359,7 @@ export function buildFormPlan(snapshot, profile, artifacts, { candidateId = null
 export async function inspectApplicationForm(page) {
   const snapshot = await page.evaluate(({ finalTokenSource, finalTokenFlags }) => {
     const finalToken = new RegExp(finalTokenSource, finalTokenFlags);
+    const controlSelector = 'button, input[type="submit"], input[type="button"], input[type="image"], input[type="reset"], a, [role="button"], [role="link"]';
     const visible = (element) => {
       if (!element || element.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
       const style = getComputedStyle(element);
@@ -461,7 +470,7 @@ export async function inspectApplicationForm(page) {
       const candidates = [...form.querySelectorAll('input, textarea, select, [role="combobox"]')]
         .filter((field) => !['hidden', 'submit', 'button', 'reset', 'image'].includes((field.type || '').toLowerCase()));
       const visibleCandidates = candidates.filter(visible);
-      const visibleControls = [...form.querySelectorAll('button, input[type="submit"], input[type="button"], a[role="button"], a.btn')]
+      const visibleControls = [...form.querySelectorAll(controlSelector)]
         .filter(visible);
       const score = visibleCandidates.filter((field) => applicationFieldPattern.test(textFor(field))
         || ['email', 'tel', 'file'].includes((field.type || '').toLowerCase())).length;
@@ -511,7 +520,7 @@ export async function inspectApplicationForm(page) {
     const applicationStepIndicator = applicationWizard
       ? parseStep(applicationWizard, '[data-career-ops-step], [aria-current="step"], [role="progressbar"], .step, .steps, .progress')
       : parseStep(uniqueTopForm || document.createElement('div'), '[data-career-ops-step], [aria-current="step"], .step, .steps');
-    const controls = [...document.querySelectorAll('button, input[type="submit"], input[type="button"], a[role="button"], a.btn')]
+    const controls = [...document.querySelectorAll(controlSelector)]
       .filter(visible)
       .map((element) => {
         if (!element.getAttribute('data-career-ops-control-id')) {
@@ -528,6 +537,8 @@ export async function inspectApplicationForm(page) {
         const formAction = element.getAttribute('formaction') || form?.getAttribute('action') || '';
         return {
           controlId: element.getAttribute('data-career-ops-control-id'),
+          tag: element.tagName.toLowerCase(),
+          role: element.getAttribute('role') || '',
           formId: form?.getAttribute('data-career-ops-form-id') || '',
           label: (element.getAttribute('aria-label') || element.innerText || element.value || textFor(element)).replace(/\s+/g, ' ').trim(),
           text: element.innerText || '',
@@ -721,10 +732,14 @@ export async function executeFormPlan(page, plan) {
   for (const action of plan.actions) {
     const locator = await exactLocator(page, action);
     if (isSemanticFinalAction(await locator.evaluate((element) => ({
+      tag: element.tagName.toLowerCase(),
+      role: element.getAttribute('role') || '',
       type: element.type,
       formAction: element.getAttribute('formaction'),
       insideApplicationForm: Boolean(element.closest('form')),
       label: element.getAttribute('aria-label') || element.innerText || element.value,
+      text: element.innerText || '',
+      value: element.value || '',
     })))) throw new Error('Refusing to interact with a final-action control');
     try {
       if (action.action === 'upload') {

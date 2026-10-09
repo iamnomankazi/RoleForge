@@ -703,9 +703,16 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
     globalThis.__careerOpsProgressionSubmits = Number(globalThis.__careerOpsProgressionSubmits || 0);
     const finalToken = new RegExp(finalTokenSource, finalTokenFlags);
     const progressionLabel = new RegExp(progressionLabelSource, progressionLabelFlags);
+    const controlLabels = (control) => {
+      const labelled = (control.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+        .map((id) => document.getElementById(id)?.textContent || '').join(' ');
+      return [control.getAttribute('aria-label'), labelled, control.innerText, control.value,
+        ...[...(control.labels || [])].map((label) => label.innerText)]
+        .map((value) => String(value || '').replace(/\s+/g, ' ').trim());
+    };
     const isIntermediateControl = (control, form) => {
       const label = String(control.getAttribute('aria-label') || control.innerText || control.value || '').replace(/\s+/g, ' ').trim().replace(/\s*&\s*/g, ' & ');
-      if (!progressionLabel.test(label) || finalToken.test(`${label} ${control.innerText || ''} ${control.value || ''}`)) return false;
+      if (!progressionLabel.test(label) || finalToken.test(controlLabels(control).join(' '))) return false;
       const root = form.closest('[data-career-ops-workflow-id]') || form;
       const candidates = [...root.querySelectorAll('[data-career-ops-step], [aria-current="step"], [role="progressbar"], .step, .steps, .progress')];
       if (root !== form) candidates.push(...[...root.querySelectorAll('*')].filter((element) => !form.contains(element)));
@@ -771,19 +778,26 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
       event?.stopImmediatePropagation?.();
       throw new Error('Career-Ops blocked a final form submission attempt');
     };
-    const guardClick = (event) => {
-      const control = event.target?.closest?.('button, input[type="submit"], input[type="button"], a[role="button"], a.btn');
+    const activationEvents = ['pointerdown', 'mousedown', 'touchstart', 'click', 'auxclick', 'keydown'];
+    const guardActivation = (event) => {
+      if (event.type === 'keydown' && !['Enter', ' ', 'Spacebar'].includes(event.key)) return;
+      const target = event.type === 'keydown' ? document.activeElement : event.target;
+      const control = target?.closest?.('button, input[type="submit"], input[type="button"], input[type="image"], input[type="reset"], a, [role="button"], [role="link"]');
+      if (!control || ['textbox', 'checkbox', 'radio', 'combobox', 'listbox'].includes(control.getAttribute('role'))
+          || (control.tagName === 'INPUT' && !['submit', 'button', 'image', 'reset'].includes(control.type))
+          || ['TEXTAREA', 'SELECT'].includes(control.tagName)) return;
       const form = control && (control.form || control.closest('form'));
       if (!form) return;
-      const text = `${control.getAttribute('aria-label') || ''} ${control.innerText || ''} ${control.value || ''}`;
-      if (control.type !== 'submit' && !finalToken.test(text) && !progressionLabel.test(text.trim())) return;
+      const labels = controlLabels(control);
+      if (finalToken.test(labels.join(' '))) return block(event);
+      if (!labels.some((label) => progressionLabel.test(label))) return;
       if (!permittedControl(control, form)) block(event);
     };
     const nativeSubmit = HTMLFormElement.prototype.submit;
     const nativeRequestSubmit = HTMLFormElement.prototype.requestSubmit;
-    globalThis.__careerOpsOperationalGuard = { block, guardClick, isIntermediateControl, nativeSubmit, nativeRequestSubmit, document };
+    globalThis.__careerOpsOperationalGuard = { block, guardActivation, activationEvents, isIntermediateControl, nativeSubmit, nativeRequestSubmit, document };
     document.addEventListener('submit', block, true);
-    document.addEventListener('click', guardClick, true);
+    for (const type of activationEvents) document.addEventListener(type, guardActivation, { capture: true, passive: false });
     HTMLFormElement.prototype.submit = function guardedSubmit() { block(); };
     HTMLFormElement.prototype.requestSubmit = function guardedRequestSubmit(submitter) {
       const permit = globalThis.__careerOpsProgressionPermit;
@@ -823,7 +837,7 @@ export async function removeOperationalSubmissionGuard(page) {
     const guard = globalThis.__careerOpsOperationalGuard;
     if (!guard) return;
     document.removeEventListener('submit', guard.block, true);
-    document.removeEventListener('click', guard.guardClick, true);
+    for (const type of guard.activationEvents) document.removeEventListener(type, guard.guardActivation, true);
     HTMLFormElement.prototype.submit = guard.nativeSubmit;
     HTMLFormElement.prototype.requestSubmit = guard.nativeRequestSubmit;
     delete globalThis.__careerOpsProgressionPermit;
@@ -996,10 +1010,14 @@ async function exactLocator(page, action) {
 
 async function assertNotFinal(locator) {
   const final = await locator.evaluate((element) => ({
+    tag: element.tagName.toLowerCase(),
+    role: element.getAttribute('role') || '',
     type: element.type,
     formAction: element.getAttribute('formaction'),
     insideApplicationForm: Boolean(element.closest('form')),
     label: element.getAttribute('aria-label') || element.innerText || element.value,
+    text: element.innerText || '',
+    value: element.value || '',
   }));
   if (isSemanticFinalAction(final)) throw new Error('Refusing to interact with a final-action control');
 }

@@ -312,9 +312,12 @@ test('fresh executor DOM may confirm a delayed safe entry without changing scann
     bodyText: 'Fluxion Data Scientist / AI Engineer',
     formCount: 0,
     fields: [],
-    controls: [{ tag: 'button', type: 'button', text: 'Apply', visible: true, dataDestination: listingUrl }],
+    controls: [{ tag: 'a', text: 'Apply', visible: true, href: `${listingUrl}/application` }],
   };
   assert.equal(listingSnapshotConfirmsSafeEntry(snapshot, candidate, { listingUrl }), true);
+  assert.equal(listingSnapshotConfirmsSafeEntry({ ...snapshot, controls: [{
+    tag: 'button', type: 'button', text: 'Apply', visible: true, dataDestination: listingUrl,
+  }] }, candidate, { listingUrl }), false);
   assert.equal(listingSnapshotConfirmsSafeEntry({ ...snapshot, bodyText: 'Other company', documentTitle: 'Other company' }, candidate, { listingUrl }), false);
 });
 

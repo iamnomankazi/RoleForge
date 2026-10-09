@@ -148,6 +148,127 @@ test('the click guard rechecks the step and final label after a progression perm
   }
 });
 
+test('untyped option and Add another buttons keep their handlers under the guard without submitting', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`
+      <div data-career-ops-wizard><p data-career-ops-step="1" data-career-ops-total-steps="2">Step 1 of 2</p>
+      <form id="application"><label>Email<input name="email"></label>
+        <button id="country-option" role="option">Finland</button>
+        <button id="add-another">Add another</button>
+        <label>Send me updates<input id="updates" type="checkbox"></label>
+        <button id="continue" type="submit" aria-label="Continue application">Continue</button>
+      </form></div><script>
+        document.getElementById('country-option').onclick = () => { window.optionClicks=(window.optionClicks||0)+1; };
+        document.getElementById('add-another').onclick = () => { window.addClicks=(window.addClicks||0)+1; };
+        updates.onclick = () => { window.updateClicks=(window.updateClicks||0)+1; };
+        application.addEventListener('submit', event => { event.preventDefault(); window.submits=(window.submits||0)+1; });
+      </script>
+    `);
+    const snapshot = await inspectOperationalApplicationForm(page);
+    const control = snapshot.controls.find((row) => row.text === 'Continue');
+    assert.equal(await grantProgressionPermit(page, control, {
+      applicationIdentity: 'fixture', stateFingerprint: applicationFormStateFingerprint(snapshot),
+    }), true);
+    await page.locator('#country-option').click();
+    await page.locator('#add-another').click();
+    await page.locator('#updates').check();
+    assert.equal(await page.evaluate(() => window.optionClicks || 0), 1);
+    assert.equal(await page.evaluate(() => window.addClicks || 0), 1);
+    assert.equal(await page.evaluate(() => window.updateClicks || 0), 1);
+    assert.equal(await page.evaluate(() => window.submits || 0), 0);
+    assert.equal((await inspectOperationalApplicationForm(page)).submitAttempts, 2);
+    await removeOperationalSubmissionGuard(page);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('capture guards recheck every early activation event against the live final label and step', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    for (const activation of ['pointerdown', 'mousedown', 'touchstart', 'click', 'auxclick', 'Enter', ' ']) {
+      const type = ['Enter', ' '].includes(activation) ? 'keydown' : activation;
+      for (const mutation of ['label', 'last-step']) {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <div data-career-ops-wizard><p id="step" data-career-ops-step="1" data-career-ops-total-steps="2">Step 1 of 2</p>
+          <form id="application"><label>Email<input name="email"></label>
+            <button id="continue" type="submit" aria-label="Continue application">Continue</button>
+          </form></div><script>
+            document.getElementById('continue').addEventListener('${type}', () => {
+              window.handlerCalls=(window.handlerCalls||0)+1;
+              application.requestSubmit(document.getElementById('continue'));
+            });
+            application.addEventListener('submit', event => { event.preventDefault(); window.submits=(window.submits||0)+1; });
+          </script>
+        `);
+        const snapshot = await inspectOperationalApplicationForm(page);
+        const control = snapshot.controls.find((row) => row.text === 'Continue');
+        assert.equal(await grantProgressionPermit(page, control, {
+          applicationIdentity: 'fixture', stateFingerprint: applicationFormStateFingerprint(snapshot),
+        }), true);
+        const dispatched = await page.evaluate(({ type, mutation, activation }) => {
+          const control = document.getElementById('continue');
+          if (mutation === 'label') control.textContent = 'Absenden';
+          else { step.dataset.careerOpsStep = '2'; step.textContent = 'Step 2 of 2'; }
+          control.focus();
+          const event = type === 'keydown'
+            ? new KeyboardEvent(type, { key: activation, bubbles: true, cancelable: true })
+            : new Event(type, { bubbles: true, cancelable: true });
+          return control.dispatchEvent(event);
+        }, { type, mutation, activation });
+        assert.equal(dispatched, false, `${activation}: ${mutation}`);
+        assert.equal(await page.evaluate(() => window.handlerCalls || 0), 0, `${activation}: ${mutation}`);
+        assert.equal(await page.evaluate(() => window.submits || 0), 0, `${activation}: ${mutation}`);
+        await removeOperationalSubmissionGuard(page);
+        await page.close();
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test('mousedown mutation into a final action blocks requestSubmit and the subsequent click', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    for (const mutation of ['label', 'last-step']) {
+      const page = await browser.newPage();
+      await page.setContent(`
+        <div data-career-ops-wizard><p id="step" data-career-ops-step="1" data-career-ops-total-steps="2">Step 1 of 2</p>
+        <form id="application" action="/application/step/2">
+          <label>Email<input name="email" type="email" required></label>
+          <button id="continue" type="submit" aria-label="Continue application">Continue</button>
+        </form></div><script>
+          const control = document.getElementById('continue');
+          control.addEventListener('mousedown', () => {
+            window.mouseDowns=(window.mouseDowns||0)+1;
+            if ('${mutation}' === 'label') control.textContent='Lähetä hakemus';
+            else { step.dataset.careerOpsStep='2'; step.textContent='Step 2 of 2'; }
+            application.requestSubmit(control);
+          });
+          control.addEventListener('click', () => { window.clicks=(window.clicks||0)+1; });
+          application.addEventListener('submit', event => { event.preventDefault(); window.submits=(window.submits||0)+1; });
+        </script>
+      `);
+      const result = await prepareOperationalApplicationForm(page, profile, {}, {
+        context, transitionTimeoutMs: 150, transitionStabilityMs: 0,
+      });
+      assert.equal(await page.evaluate(() => window.mouseDowns || 0), 1, mutation);
+      assert.equal(await page.evaluate(() => window.clicks || 0), 0, mutation);
+      assert.equal(await page.evaluate(() => window.submits || 0), 0, mutation);
+      assert.equal(result.evidence.finalAction.activated, false, mutation);
+      assert.equal(result.evidence.progression.stepsAdvanced, 0, mutation);
+      assert.equal(result.gate.state, 'review_required', mutation);
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
 test('progression permit is exact, rejects other/final controls, and is single-use', async () => {
   const browser = await chromium.launch({ headless: true });
   try {
@@ -164,14 +285,14 @@ test('progression permit is exact, rejects other/final controls, and is single-u
     const final = snapshot.controls.find((control) => control.text === 'Submit application');
     const fingerprint = applicationFormStateFingerprint(snapshot);
     assert.equal(await grantProgressionPermit(page, progression, { applicationIdentity: 'fixture', stateFingerprint: fingerprint }), true);
-    await page.locator('#final').click().catch(() => {});
+    await page.locator('#final').evaluate((element) => element.click());
     let guarded = await inspectOperationalApplicationForm(page);
     assert.equal(guarded.submitAttempts, 1);
     assert.equal(await page.evaluate(() => window.submits || 0), 0);
     await assert.rejects(() => grantProgressionPermit(page, final, { applicationIdentity: 'fixture', stateFingerprint: fingerprint }), /non-progression/);
     await activateProgressionControl(page, progression, { applicationIdentity: 'fixture', stateFingerprint: fingerprint });
     assert.equal(await page.evaluate(() => window.submits || 0), 1);
-    await page.locator('#continue').click().catch(() => {});
+    await page.locator('#continue').evaluate((element) => element.click());
     guarded = await inspectOperationalApplicationForm(page);
     assert.equal(guarded.submitAttempts, 2);
     assert.equal(guarded.progressionSubmits, 1);
@@ -181,7 +302,7 @@ test('progression permit is exact, rejects other/final controls, and is single-u
     assert.equal(guarded.submitAttempts, 3);
     assert.equal(await grantProgressionPermit(page, progression, { applicationIdentity: 'fixture', stateFingerprint: fingerprint }), true);
     await page.locator('#continue').evaluate((element) => element.replaceWith(element.cloneNode(true)));
-    await page.locator('#continue').click().catch(() => {});
+    await page.locator('#continue').evaluate((element) => element.click());
     guarded = await inspectOperationalApplicationForm(page);
     assert.equal(guarded.submitAttempts, 4);
     assert.equal(await page.evaluate(() => window.submits || 0), 1);

@@ -347,7 +347,7 @@ export function isKnownApplicationHost(value) {
 }
 
 function predictedEntryDestination(control) {
-  return inline(control?.href || control?.formAction || control?.dataDestination);
+  return normalized(control?.tag) === 'a' ? inline(control?.href) : '';
 }
 
 function safePredictedEntryDestination(destination, { listingUrl } = {}) {
@@ -393,14 +393,15 @@ export function classifyApplicationEntryAction(control, {
   if (control?.formHasCandidateFields) return reject('associated form contains candidate data');
   if (formMethod === 'post') return reject('POST-associated controls may submit candidate data');
   if (associatedForm) return reject('form-associated controls are never application-entry actions');
+  if (tag !== 'a') return reject('application entry requires an anchor with a verified href; button and metadata destinations require manual continuation');
   const destination = predictedEntryDestination(control);
-  if (!destination) return reject('application-entry destination cannot be verified before clicking; continue manually');
+  if (!destination) return reject('application-entry anchor has no verifiable href; metadata destinations require manual continuation');
   if (!safePredictedEntryDestination(destination, { listingUrl })) {
     return reject('entry destination is not the selected company or a known ATS route');
   }
   return {
     safe: true,
-    reason: tag === 'a' ? 'verified listing-page application link' : 'verified listing-page application button destination',
+    reason: 'verified listing-page application link',
     destination,
   };
 }
@@ -742,16 +743,14 @@ export async function rankSafeApplyContinuations(page, controls, scope = {}) {
       let acquired = await reacquireSafeContinuation(page, expected, scope);
       await acquired.locator.scrollIntoViewIfNeeded({ timeout: 1_500 }).catch(() => {});
       acquired = await reacquireSafeContinuation(page, expected, scope);
-      const trialActionable = acquired.control.attached && acquired.control.enabled && acquired.control.visible
-        ? await acquired.locator.click({ trial: true, timeout: 750 }).then(() => true).catch(() => false)
-        : false;
-      ranked.push({ ...acquired.control, index: expected.index, trialActionable });
+      const navigationReady = acquired.control.attached && acquired.control.enabled && acquired.control.visible;
+      ranked.push({ ...acquired.control, index: expected.index, navigationReady });
     } catch (error) {
-      ranked.push({ ...expected, trialActionable: false, rankingError: inline(error.message).slice(0, 300) });
+      ranked.push({ ...expected, navigationReady: false, rankingError: inline(error.message).slice(0, 300) });
     }
   }
   return ranked.sort((left, right) => {
-    const score = (control) => (control.trialActionable ? 32 : 0)
+    const score = (control) => (control.navigationReady ? 32 : 0)
       + (control.attached !== false ? 8 : 0)
       + (control.enabled !== false ? 8 : 0)
       + (control.visible ? 4 : 0)
@@ -989,57 +988,41 @@ export async function followSafeContinuation(context, page, control, scope, {
   const beforeUrl = page.url();
   const baselineSnapshot = await collectPageSnapshot(page);
   const expectedDestination = predictedEntryDestination(control);
-  const attempts = [];
-  const methods = ['playwright_click', 'exact_dom_click'];
-  for (const method of methods) {
-    let acquired = null;
-    let methodError = null;
-    const before = new Set(context.pages());
-    try {
-      acquired = await reacquireSafeContinuation(page, control, scope);
-      await acquired.locator.scrollIntoViewIfNeeded({ timeout: 3_000 }).catch(() => {});
-      await acquired.locator.waitFor({ state: 'visible', timeout: 3_000 });
-      acquired = await reacquireSafeContinuation(page, control, scope);
-      if (method === 'playwright_click') {
-        await acquired.locator.click({ trial: true, timeout: 3_000 });
-        acquired = await reacquireSafeContinuation(page, control, scope);
-        await acquired.locator.click({ timeout: 7_000 });
-      } else {
-        if (!acquired.control.attached || !acquired.control.enabled || !acquired.control.topmostMatches) {
-          throw new Error('Exact DOM activation safety gate failed: control is detached, disabled, or intercepted');
-        }
-        await acquired.locator.evaluate((element, operation) => {
-          if (operation !== 'career-ops-exact-entry-click') throw new Error('Invalid activation operation');
-          element.click();
-        }, 'career-ops-exact-entry-click');
-      }
-    } catch (error) {
-      methodError = error;
+  const method = 'verified_href_navigation';
+  let acquired = null;
+  let methodError = null;
+  const before = new Set(context.pages());
+  try {
+    acquired = await reacquireSafeContinuation(page, control, scope);
+    if (!acquired.control.attached || !acquired.control.enabled) {
+      throw new Error('Verified entry link is detached or disabled; refusing to navigate');
     }
-    const outcome = await inspectContinuationAttempt(
-      context, page, before, beforeUrl, expectedDestination, observationWindowMs, baselineSnapshot,
-    );
-    attempts.push({
-      method,
-      control: acquired?.control || control,
-      error: methodError ? inline(methodError.message).slice(0, 1_000) : null,
-      observation: outcome.observation,
-    });
-    if (outcome.succeeded) {
-      for (const extra of outcome.created) {
-        if (extra !== outcome.destination) await extra.close().catch(() => {});
-      }
-      await outcome.destination.waitForTimeout(750).catch(() => {});
-      Object.defineProperty(outcome.destination, '__careerOpsEntryInteractionEvidence', {
-        configurable: true,
-        value: { successfulMethod: method, attempts: [...attempts] },
-      });
-      return outcome.destination;
-    }
-    for (const extra of outcome.created) await extra.close().catch(() => {});
-    if (method === 'playwright_click' && acquired?.control?.interceptor) break;
+    await page.goto(predictedEntryDestination(acquired.control), { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  } catch (error) {
+    methodError = error;
   }
-  const error = new Error('Verified safe application-entry control could not be operated by the bounded safe activation ladder');
+  const outcome = await inspectContinuationAttempt(
+    context, page, before, beforeUrl, expectedDestination, observationWindowMs, baselineSnapshot,
+  );
+  const attempts = [{
+    method,
+    control: acquired?.control || control,
+    error: methodError ? inline(methodError.message).slice(0, 1_000) : null,
+    observation: outcome.observation,
+  }];
+  if (outcome.succeeded) {
+    for (const extra of outcome.created) {
+      if (extra !== outcome.destination) await extra.close().catch(() => {});
+    }
+    await outcome.destination.waitForTimeout(750).catch(() => {});
+    Object.defineProperty(outcome.destination, '__careerOpsEntryInteractionEvidence', {
+      configurable: true,
+      value: { successfulMethod: method, attempts },
+    });
+    return outcome.destination;
+  }
+  for (const extra of outcome.created) await extra.close().catch(() => {});
+  const error = new Error('Verified application-entry href navigation did not reach the application surface');
   error.code = 'application_entry_interaction_failed';
   error.entryDiagnostics = {
     controlId: control.controlId,
