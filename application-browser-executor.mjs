@@ -35,6 +35,7 @@ import {
 } from './application-form-engine.mjs';
 import { prepareAndBindCombinedDocument } from './application-documents.mjs';
 import { createConfiguredApplicationReasoningProvider } from './application-reasoning-provider.mjs';
+import { openPersistentBrowserProfile } from './browser-profile.mjs';
 
 function inline(value) {
   return String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
@@ -155,7 +156,7 @@ function sameUrlIgnoringHash(left, right) {
 }
 
 export function parseExecutorArgs(argv) {
-  const options = { headless: false, keepOpen: true, resumeLogin: false, resumePreparation: false, prepareForm: true };
+  const options = { headless: false, keepOpen: true, resumeLogin: false, resumePreparation: false, prepareForm: true, ephemeralBrowser: false };
   let keepOpenExplicit = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -172,6 +173,11 @@ export function parseExecutorArgs(argv) {
     if (arg === '--resume-preparation') {
       if (options.resumePreparation) throw new Error('Duplicate option: --resume-preparation');
       options.resumePreparation = true;
+      continue;
+    }
+    if (arg === '--ephemeral-browser') {
+      if (options.ephemeralBrowser) throw new Error('Duplicate option: --ephemeral-browser');
+      options.ephemeralBrowser = true;
       continue;
     }
     if (arg === '--inspect-only') {
@@ -1367,6 +1373,54 @@ export async function executeCandidate(options, { root = ROOT, dependencies = {}
   }
 }
 
+async function createOwnedBrowserSession(options, root, dependencies, contract) {
+  let session;
+  if (dependencies.openBrowserProfile) {
+    session = await dependencies.openBrowserProfile({
+      root,
+      headless: options.headless,
+      contextOptions: LIVENESS_CONTEXT_OPTIONS,
+    });
+  } else if (options.ephemeralBrowser || dependencies.launchBrowser) {
+    const browser = dependencies.launchBrowser
+      ? await dependencies.launchBrowser(options)
+      : await (await import('playwright')).chromium.launch({ headless: options.headless });
+    const context = dependencies.createContext
+      ? await dependencies.createContext(browser, contract)
+      : await browser.newContext(LIVENESS_CONTEXT_OPTIONS);
+    session = {
+      browser,
+      context,
+      async close() {
+        if (browser.isConnected()) await browser.close();
+      },
+    };
+  } else {
+    session = await openPersistentBrowserProfile({
+      root,
+      headless: options.headless,
+      contextOptions: LIVENESS_CONTEXT_OPTIONS,
+    });
+  }
+  try {
+    if (dependencies.configureContext) await dependencies.configureContext(session.context, contract);
+  } catch (error) {
+    await closeOwnedBrowserSession(session, session.browser);
+    throw error;
+  }
+  return session;
+}
+
+async function closeOwnedBrowserSession(session, browser) {
+  try {
+    if (session?.close) await session.close();
+    else if (browser?.isConnected?.()) await browser.close();
+  } catch {
+    // The browser may already have been closed by the user. The profile lock's
+    // close handler and session cleanup both release ownership idempotently.
+  }
+}
+
 /**
  * Run the canonical one-candidate executor inside a coordinator-owned browser
  * context and page. The candidate lock, immutable manifest checks, liveness,
@@ -1402,7 +1456,7 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
   const contract = loadExecutionContract(options.manifest, options.candidateId, { root, requireCoverLetter: true });
   assertExecutorState(options, contract);
 
-  if (options.resumeLogin) return executeLoginResume(options, contract, { root, executionLock });
+  if (options.resumeLogin) return executeLoginResume(options, contract, { root, executionLock, dependencies });
   if (options.resumePreparation) return executePreparationResume(options, contract, { root, executionLock, dependencies });
 
   const listingUrl = contract.candidate.listingUrl;
@@ -1424,11 +1478,11 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
 
   const sharedSession = dependencies.browserSession || null;
   const ownsBrowser = !sharedSession;
-  const browser = sharedSession?.browser || (dependencies.launchBrowser
-    ? await dependencies.launchBrowser(options)
-    : await (await import('playwright')).chromium.launch({ headless: options.headless }));
-  const context = sharedSession?.context || await browser.newContext(LIVENESS_CONTEXT_OPTIONS);
-  if (ownsBrowser && dependencies.configureContext) await dependencies.configureContext(context, contract);
+  const ownedBrowserSession = ownsBrowser
+    ? await createOwnedBrowserSession(options, root, dependencies, contract)
+    : null;
+  const browser = sharedSession?.browser || ownedBrowserSession.browser;
+  const context = sharedSession?.context || ownedBrowserSession.context;
   let finalState = null;
   let latestUrl = listingUrl;
   let applicationPage = null;
@@ -1765,7 +1819,7 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
     if (dependencies.beforeBrowserClose) {
       await dependencies.beforeBrowserClose({ browser, context, contract, ownsBrowser });
     }
-    if (ownsBrowser && browser.isConnected()) await browser.close().catch(() => {});
+    if (ownsBrowser) await closeOwnedBrowserSession(ownedBrowserSession, browser);
   }
 }
 
@@ -1831,11 +1885,11 @@ async function executePreparationResume(options, contract, { root, executionLock
   }
   const sharedSession = dependencies.browserSession || null;
   const ownsBrowser = !sharedSession;
-  const browser = sharedSession?.browser || (dependencies.launchBrowser
-    ? await dependencies.launchBrowser(options)
-    : await (await import('playwright')).chromium.launch({ headless: options.headless }));
-  const context = sharedSession?.context || await browser.newContext(LIVENESS_CONTEXT_OPTIONS);
-  if (ownsBrowser && dependencies.configureContext) await dependencies.configureContext(context, contract);
+  const ownedBrowserSession = ownsBrowser
+    ? await createOwnedBrowserSession(options, root, dependencies, contract)
+    : null;
+  const browser = sharedSession?.browser || ownedBrowserSession.browser;
+  const context = sharedSession?.context || ownedBrowserSession.context;
   try {
     const listingPage = sharedSession?.page || await context.newPage();
     if (dependencies.onCandidatePage) await dependencies.onCandidatePage(listingPage, contract);
@@ -1932,11 +1986,11 @@ async function executePreparationResume(options, contract, { root, executionLock
     if (dependencies.beforeBrowserClose) {
       await dependencies.beforeBrowserClose({ browser, context, contract, ownsBrowser });
     }
-    if (ownsBrowser && browser.isConnected()) await browser.close().catch(() => {});
+    if (ownsBrowser) await closeOwnedBrowserSession(ownedBrowserSession, browser);
   }
 }
 
-async function executeLoginResume(options, contract, { root, executionLock }) {
+async function executeLoginResume(options, contract, { root, executionLock, dependencies }) {
   const listingUrl = contract.candidate.listingUrl;
   const recordTransition = (manifestPath, _legacySelector, ...args) => transition(
     manifestPath, contract.candidate.candidate_id, ...args, executionLock.token, null, null, root,
@@ -1953,9 +2007,8 @@ async function executeLoginResume(options, contract, { root, executionLock }) {
     return { batchId: contract.manifest.batchId, candidate: listingUrl, state: state.state };
   }
 
-  const { chromium } = await import('playwright');
-  const browser = await chromium.launch({ headless: false });
-  const context = await browser.newContext(LIVENESS_CONTEXT_OPTIONS);
+  const ownedBrowserSession = await createOwnedBrowserSession(options, root, dependencies, contract);
+  const { browser, context } = ownedBrowserSession;
   try {
     const page = await context.newPage();
     await page.goto(contract.candidateState.currentUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
@@ -2023,12 +2076,12 @@ async function executeLoginResume(options, contract, { root, executionLock }) {
     }
     return { batchId: contract.manifest.batchId, candidate: listingUrl, state: 'login_required', currentUrl };
   } finally {
-    if (browser.isConnected()) await browser.close().catch(() => {});
+    await closeOwnedBrowserSession(ownedBrowserSession, browser);
   }
 }
 
 function usage() {
-  return 'Usage: node application-browser-executor.mjs --manifest <manifest.json> --candidate-id <exact-id> [--headless] [--close-after-check] [--inspect-only] [--resume-login|--resume-preparation]';
+  return 'Usage: node application-browser-executor.mjs --manifest <manifest.json> --candidate-id <exact-id> [--headless] [--close-after-check] [--inspect-only] [--resume-login|--resume-preparation] [--ephemeral-browser]';
 }
 
 async function main() {

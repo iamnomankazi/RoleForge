@@ -192,12 +192,18 @@ test('executor CLI prefers candidate ID and exposes no submit, Applied, or queue
   const candidateId = `cand_v1_${'a'.repeat(64)}`;
   assert.deepEqual(
     parseExecutorArgs(['--manifest', 'output/application-batches/x/manifest.json', '--candidate-id', candidateId]),
-    { headless: false, keepOpen: true, resumeLogin: false, resumePreparation: false, prepareForm: true, manifest: 'output/application-batches/x/manifest.json', candidateId },
+    { headless: false, keepOpen: true, resumeLogin: false, resumePreparation: false, prepareForm: true, ephemeralBrowser: false, manifest: 'output/application-batches/x/manifest.json', candidateId },
   );
   assert.throws(
     () => parseExecutorArgs(['--manifest', 'x', '--candidate-url', SELECTED]),
     /Unknown or forbidden option/,
   );
+  assert.equal(parseExecutorArgs([
+    '--manifest', 'x', '--candidate-id', candidateId, '--ephemeral-browser',
+  ]).ephemeralBrowser, true);
+  assert.throws(() => parseExecutorArgs([
+    '--manifest', 'x', '--candidate-id', candidateId, '--ephemeral-browser', '--ephemeral-browser',
+  ]), /Duplicate option/);
   for (const forbidden of ['--url', '--submit', '--send', '--mark-applied', '--queue']) {
     assert.throws(
       () => parseExecutorArgs(['--manifest', 'x', '--candidate-id', candidateId, forbidden, 'value']),

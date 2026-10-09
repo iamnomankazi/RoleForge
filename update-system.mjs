@@ -148,6 +148,7 @@ const SYSTEM_PATHS = [
   'application-abandon.mjs',
   'application-batch.mjs',
   'application-browser-executor.mjs',
+  'browser-profile.mjs',
   'application-documents.mjs',
   'application-evidence.mjs',
   'application-form-core.mjs',

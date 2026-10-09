@@ -90,6 +90,7 @@ function mockBrowser(events) {
   const pages = [];
   const context = {
     newPage: async () => {
+      assert.equal(pages.filter((page) => !page.closed).length, 0, 'close the previous candidate page before creating another');
       const page = {
         id: pages.length + 1,
         context: () => context,
@@ -102,7 +103,7 @@ function mockBrowser(events) {
       events.push(`page:${page.id}`);
       return page;
     },
-    pages: () => [...pages],
+    pages: () => pages.filter((page) => !page.closed),
     close: async () => {
       throw new Error('Coordinator must not close the shared context');
     },
@@ -175,7 +176,7 @@ test('a previously blocked exact candidate is planned as preparation-resume, not
   assert.ok(plan.slice(1).every((entry) => entry.resumePreparation === false));
 });
 
-test('one shared browser creates six pages, executes sequentially, isolates evidence, survives one failure, and stays open', async () => {
+test('one shared browser creates one active page at a time, isolates evidence, survives one failure, and stays open', async () => {
   const root = mkdtempSync(join(tmpdir(), 'career-ops-shared-browser-'));
   try {
     const events = [];
@@ -239,9 +240,10 @@ test('one shared browser creates six pages, executes sequentially, isolates evid
     assert.equal(launches, 1);
     assert.deepEqual(mock.metrics(), { contextCount: 1, closeCount: 0 });
     assert.equal(mock.pages.length, 6);
-    assert.ok(mock.pages.every((page) => page.closed === false));
+    assert.ok(mock.pages.slice(0, -1).every((page) => page.closed === true));
+    assert.equal(mock.pages.at(-1).closed, false, 'the final candidate page stays available for manual review');
     assert.equal(started.length, 6);
-    assert.ok(started.every((row) => row.pageCount === 6));
+    assert.ok(started.every((row) => row.pageCount === 1));
     assert.deepEqual(started.map((row) => row.pageId), [1, 2, 3, 4, 5, 6]);
     assert.deepEqual(started.map((row) => row.resumePreparation), [true, false, false, false, false, false]);
     assert.equal(maxActive, 1);
@@ -270,6 +272,10 @@ test('one shared browser creates six pages, executes sequentially, isolates evid
     assert.equal(new Set(ledgers.map((row) => relative(root, row.path))).size, 6);
     assert.deepEqual(ledgers.map((row) => row.value.pageId), [1, 2, 3, 4, 5, 6]);
     assert.ok(ledgers.every((row) => row.value.finalActionActivated === false));
+    for (const { value } of ledgers) {
+      const serialized = JSON.stringify(value);
+      assert.doesNotMatch(serialized, /cookie|storageState|localStorage|sessionStorage|private-cookie-value/i);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -306,8 +312,10 @@ test('shared executor entrypoint rejects missing ownership and cross-context pag
 
 test('shared coordinator exposes no queue, final-submission, or tracker authority', () => {
   const source = readFileSync(new URL('../application-shared-browser.mjs', import.meta.url), 'utf8');
+  const executorSource = readFileSync(new URL('../application-browser-executor.mjs', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /apply-queue\.csv|application-submission\.mjs|set-status\.mjs|data[\\/]applications\.md/i);
   assert.doesNotMatch(source, /\.submit\(|requestSubmit\(|getByRole\(['"]button['"].*submit/i);
+  assert.doesNotMatch(`${source}\n${executorSource}`, /storageState|\.cookies\(/i);
   assert.match(source, /submissionAvailable: false/);
   assert.match(source, /trackerUpdated: false/);
 });

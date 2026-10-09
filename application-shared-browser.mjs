@@ -27,6 +27,7 @@ import {
   executeCandidateInBrowserContext,
 } from './application-browser-executor.mjs';
 import { LIVENESS_CONTEXT_OPTIONS } from './liveness-browser.mjs';
+import { openPersistentBrowserProfile } from './browser-profile.mjs';
 
 export const MAX_SHARED_BROWSER_CANDIDATES = 6;
 
@@ -136,84 +137,109 @@ export async function runSharedBrowserSession({ batchIds, root = ROOT }, depende
     loadState: dependencies.loadState,
     loadContract: dependencies.loadContract,
   });
-  const browser = dependencies.launchBrowser
-    ? await dependencies.launchBrowser()
-    : await (await import('playwright')).chromium.launch({ headless: false });
-  const context = dependencies.createContext
-    ? await dependencies.createContext(browser)
-    : await browser.newContext(LIVENESS_CONTEXT_OPTIONS);
-  if (dependencies.configureContext) await dependencies.configureContext(context, plan);
-
-  for (const entry of plan) {
-    entry.page = await context.newPage();
-  }
-
-  const execute = dependencies.executeCandidate || executeCandidateInBrowserContext;
-  for (const entry of plan) {
-    if (!browser.isConnected()) {
-      entry.error = 'Shared browser was closed by the user before this candidate started';
-      continue;
+  const ownedSession = dependencies.openBrowserProfile
+    ? await dependencies.openBrowserProfile({ root, headless: false, contextOptions: LIVENESS_CONTEXT_OPTIONS })
+    : dependencies.launchBrowser
+      ? {
+        browser: await dependencies.launchBrowser(),
+        context: null,
+        close: null,
+      }
+      : await openPersistentBrowserProfile({ root, headless: false, contextOptions: LIVENESS_CONTEXT_OPTIONS });
+  const browser = ownedSession.browser;
+  let context = ownedSession.context;
+  try {
+    if (!context) {
+      context = dependencies.createContext
+        ? await dependencies.createContext(browser)
+        : await browser.newContext(LIVENESS_CONTEXT_OPTIONS);
     }
-    try {
-      const executorDependencies = dependencies.executorDependencies
-        ? await dependencies.executorDependencies(entry)
-        : {};
-      entry.result = await execute({
-        manifest: entry.manifestPath,
-        candidateId: entry.candidateId,
-        headless: false,
-        keepOpen: true,
-        resumeLogin: false,
-        resumePreparation: entry.resumePreparation,
-        prepareForm: true,
-      }, {
-        root,
-        browser,
-        context,
-        page: entry.page,
-        dependencies: {
-          ...executorDependencies,
-          onCandidatePage: async (currentPage, contract) => {
-            entry.page = currentPage;
-            if (executorDependencies.onCandidatePage) {
-              await executorDependencies.onCandidatePage(currentPage, contract);
-            }
+    if (dependencies.configureContext) await dependencies.configureContext(context, plan);
+    for (const startupPage of context.pages()) await startupPage.close().catch(() => {});
+
+    const execute = dependencies.executeCandidate || executeCandidateInBrowserContext;
+    let activeCandidatePage = null;
+    for (const entry of plan) {
+      if (activeCandidatePage) {
+        for (const previousPage of context.pages()) await previousPage.close().catch(() => {});
+        activeCandidatePage = null;
+      }
+      if (!browser.isConnected()) {
+        entry.error = 'Shared browser was closed by the user before this candidate started';
+        continue;
+      }
+      try {
+        entry.page = await context.newPage();
+        const executorDependencies = dependencies.executorDependencies
+          ? await dependencies.executorDependencies(entry)
+          : {};
+        entry.result = await execute({
+          manifest: entry.manifestPath,
+          candidateId: entry.candidateId,
+          headless: false,
+          keepOpen: true,
+          resumeLogin: false,
+          resumePreparation: entry.resumePreparation,
+          prepareForm: true,
+        }, {
+          root,
+          browser,
+          context,
+          page: entry.page,
+          dependencies: {
+            ...executorDependencies,
+            onCandidatePage: async (currentPage, contract) => {
+              entry.page = currentPage;
+              if (executorDependencies.onCandidatePage) {
+                await executorDependencies.onCandidatePage(currentPage, contract);
+              }
+            },
           },
-        },
-      });
-    } catch (error) {
-      // Candidate executor locks release in its own finally block. A local
-      // candidate failure cannot close this coordinator-owned browser/context.
-      entry.error = String(error?.message || error);
+        });
+      } catch (error) {
+        // Candidate executor locks release in its own finally block. A local
+        // candidate failure cannot close this coordinator-owned browser/context.
+        entry.error = String(error?.message || error);
+      }
+      if (entry.error) {
+        for (const activePage of context.pages()) {
+          if (!activePage.isClosed?.()) await activePage.close().catch(() => {});
+        }
+        entry.page = null;
+      } else {
+        activeCandidatePage = entry.page;
+      }
+      if (dependencies.onCandidateComplete) await dependencies.onCandidateComplete(entry);
     }
-    if (dependencies.onCandidateComplete) await dependencies.onCandidateComplete(entry);
-  }
 
-  const summary = {
-    browserMode: 'one_shared_headed_context',
-    candidateCount: plan.length,
-    completed: plan.map((entry) => ({
-      order: entry.order + 1,
-      batchId: entry.batchId,
-      candidateId: entry.candidateId,
-      company: entry.company,
-      title: entry.title,
-      state: entry.result?.state || null,
-      error: entry.error,
-      evidenceRoot: entry.evidenceRoot,
+    const summary = {
+      browserMode: 'one_shared_headed_context',
+      candidateCount: plan.length,
+      completed: plan.map((entry) => ({
+        order: entry.order + 1,
+        batchId: entry.batchId,
+        candidateId: entry.candidateId,
+        company: entry.company,
+        title: entry.title,
+        state: entry.result?.state || null,
+        error: entry.error,
+        evidenceRoot: entry.evidenceRoot,
+        submissionAvailable: false,
+        trackerUpdated: false,
+      })),
+      browserRemainsOpen: browser.isConnected(),
       submissionAvailable: false,
       trackerUpdated: false,
-    })),
-    browserRemainsOpen: browser.isConnected(),
-    submissionAvailable: false,
-    trackerUpdated: false,
-  };
-  if (dependencies.onSessionPrepared) await dependencies.onSessionPrepared(summary, plan);
-  await (dependencies.waitForBrowserClose || waitForDisconnect)(browser);
-  return {
-    ...summary,
-    browserRemainsOpen: browser.isConnected(),
-  };
+    };
+    if (dependencies.onSessionPrepared) await dependencies.onSessionPrepared(summary, plan);
+    await (dependencies.waitForBrowserClose || waitForDisconnect)(browser);
+    return {
+      ...summary,
+      browserRemainsOpen: browser.isConnected(),
+    };
+  } finally {
+    if (ownedSession.close) await ownedSession.close().catch(() => {});
+  }
 }
 
 function usage() {
@@ -233,7 +259,7 @@ async function main() {
     },
     onSessionPrepared(summary) {
       console.log(JSON.stringify(summary, null, 2));
-      console.log('All candidate tabs remain open for manual review. Close the shared task browser to finish.');
+      console.log('Candidate pages close before the next candidate starts. Close the shared task browser to finish.');
     },
   });
   console.log(JSON.stringify(result, null, 2));
