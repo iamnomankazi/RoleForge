@@ -17,6 +17,7 @@ import {
 import { createDocumentPlan, prepareAndBindDocuments } from '../application-documents.mjs';
 import { executeCandidate } from '../application-browser-executor.mjs';
 import { hashFile } from '../application-integrity.mjs';
+import { createDraftManifest } from '../cv-claims.mjs';
 import { greenhouseFixture, listingFixture } from './fixtures/application-form-fixtures.mjs';
 
 function write(root, path, value) {
@@ -28,7 +29,11 @@ function write(root, path, value) {
 
 function profileFixture(root) {
   write(root, 'config/profile.yml', `candidate:\n  full_name: Alex Example\n  email: alex.example@example.test\n  phone: "+1 202-555-0142"\n  location: Example City, Finland\n  linkedin: https://linkedin.test/alex-example\n  github: https://github.test/alex-example\nlocation:\n  country: Finland\n  city: Example City\n  work_authorization:\n    finland: Authorized to work in Finland on a Finnish student residence permit.\n    outside_finland: Visa or work permit sponsorship is required outside Finland.\ncurrent_status:\n  summary: Graduate student at Example University\n  availability:\n    start: Available immediately\ncompensation:\n  target_range: EUR 50,000-55,000/year\neducation_details:\n  expected_graduation_date: 31/12/2030\nnarrative:\n  banned_phrases: [excited to leverage, cutting-edge, passionate]\ncv:\n  approved_system:\n    master_pdf: output/cv-approved/Alex Example Master CV.pdf\n    role_pdfs:\n      data_engineering: output/cv-approved/Alex Example Data Engineering CV.pdf\n      ai_ml: output/cv-approved/Alex Example AI ML CV.pdf\n      software_backend: output/cv-approved/Alex Example Software Backend CV.pdf\n`);
-  write(root, 'cv.md', '# Alex Example\nPython SQL PostgreSQL 250K+ rows ETL Django PyTorch Hugging Face Git Linux');
+  const cvText = '## Projects\nI used Python and SQL for data validation.';
+  write(root, 'cv.md', cvText);
+  const claimManifest = createDraftManifest(cvText);
+  claimManifest.claims.forEach((claim) => { claim.state = 'asserted'; });
+  write(root, 'data/cv-claim-anchors.json', JSON.stringify(claimManifest));
   const profilePath = join(root, 'config', 'profile.yml');
   writeFileSync(profilePath, readFileSync(profilePath, 'utf8').replace('\ncv:', `
 application_form:

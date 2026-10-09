@@ -61,4 +61,12 @@ It refuses existing filenames and never writes under `output/cv-approved/`. A fa
 
 After a successful run, show the complete text file and every check result in chat. Make the PDF available beside the text. Ask the candidate for explicit approval of this exact draft hash before treating it as approved or using it in an application. A successful quality check is not approval.
 
+Only after the candidate explicitly approves the exact draft hash in chat, record that approval with:
+
+```bash
+node cover-letter-v2.mjs --approve output/cover-letters/<matching-basename>.check.json
+```
+
+This rechecks the text and PDF hashes and writes the matching `.approved.json` record. Do not run it before explicit approval.
+
 If the candidate asks for any edit, update the JSON as a new draft, run the CLI again, and show the new full text and results. Do not reuse the previous pair or approval. The candidate remains responsible for final application submission.

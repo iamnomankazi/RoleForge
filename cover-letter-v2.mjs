@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, open, readFile, rm, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { PDFDocument } from 'pdf-lib';
@@ -474,6 +474,43 @@ export async function runCoverLetterV2(draft, {
   }
 }
 
+export async function approveCoverLetterV2(checkPath, { now = new Date() } = {}) {
+  const sidecarPath = resolve(checkPath);
+  if (!sidecarPath.endsWith('.check.json')) throw new Error('Approval requires a .check.json sidecar');
+  const sidecar = JSON.parse((await readFile(sidecarPath, 'utf8')).replace(/^\uFEFF/, ''));
+  if (sidecar.status !== 'pass' || !Array.isArray(sidecar.checks)
+      || sidecar.checks.some(item => item?.status !== 'pass')) {
+    throw new Error('Only a passing cover-letter v2 check can be approved');
+  }
+  for (const key of ['draftHash', 'jdHash', 'textHash', 'pdfHash']) {
+    if (!/^[a-f0-9]{64}$/.test(sidecar[key] || '')) throw new Error(`Check sidecar has an invalid ${key}`);
+  }
+  const stem = basename(sidecarPath, '.check.json');
+  const expectedText = `${stem}.txt`;
+  const expectedPdf = `${stem}.pdf`;
+  const textPath = resolve(dirname(sidecarPath), sidecar.files?.text || '');
+  const pdfPath = resolve(dirname(sidecarPath), sidecar.files?.pdf || '');
+  if (dirname(textPath) !== dirname(sidecarPath) || dirname(pdfPath) !== dirname(sidecarPath)
+      || basename(textPath) !== expectedText || basename(pdfPath) !== expectedPdf) {
+    throw new Error('Check sidecar does not reference its matching text/PDF pair');
+  }
+  const [textBytes, pdfBytes] = await Promise.all([readFile(textPath), readFile(pdfPath)]);
+  if (sha256(textBytes) !== sidecar.textHash || sha256(pdfBytes) !== sidecar.pdfHash) {
+    throw new Error('Cover-letter v2 pair hash mismatch; refusing approval');
+  }
+  const approvedPath = join(dirname(sidecarPath), `${stem}.approved.json`);
+  const approval = {
+    approvedAt: now.toISOString(),
+    draftHash: sidecar.draftHash,
+    textHash: sidecar.textHash,
+    pdfHash: sidecar.pdfHash,
+  };
+  const handle = await open(approvedPath, 'wx');
+  try { await handle.writeFile(`${JSON.stringify(approval, null, 2)}\n`, 'utf8'); }
+  finally { await handle.close(); }
+  return { approvedPath, approval };
+}
+
 async function loadValidator(modulePath) {
   const resolved = resolve(modulePath);
   if (!existsSync(resolved)) throw new Error(`Claim validator module not found: ${resolved}`);
@@ -493,6 +530,7 @@ async function readJd(draft, draftPath) {
 async function main() {
   const { values, positionals } = parseArgs({
     options: {
+      approve: { type: 'string' },
       draft: { type: 'string' },
       'claims-validator': { type: 'string' },
       manifest: { type: 'string' },
@@ -502,9 +540,19 @@ async function main() {
     allowPositionals: true,
     strict: true,
   });
-  if (values.help || !values.draft) {
+  if (values.help) {
+    console.log('Usage: node cover-letter-v2.mjs --draft <draft.json> [--claims-validator <module>] [--manifest <manifest.json> --cv <cv.md>]\n       node cover-letter-v2.mjs --approve <check.json>');
+    return;
+  }
+  if (values.approve) {
+    const approved = await approveCoverLetterV2(values.approve);
+    console.log(JSON.stringify(approved, null, 2));
+    return;
+  }
+  if (!values.draft) {
     console.log('Usage: node cover-letter-v2.mjs --draft <draft.json> [--claims-validator <module>] [--manifest <manifest.json> --cv <cv.md>]');
-    process.exit(values.help ? 0 : 1);
+    process.exitCode = 1;
+    return;
   }
   const draftPath = resolve(values.draft);
   const draft = JSON.parse(await readFile(draftPath, 'utf8'));

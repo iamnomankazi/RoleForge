@@ -1,4 +1,7 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
+import { validateClaims as validateCvClaims } from './cv-claims.mjs';
 import {
   createNarrativeProvenanceRecord,
   revalidateFactualEvidence,
@@ -7,6 +10,78 @@ import {
 } from './application-evidence.mjs';
 
 const PLACEHOLDER_PATTERN = /(?:\[(?:tool|real project|related skill|[A-Z][A-Z0-9 _-]{1,40})\]|\{\{[^}]+\}\}|<[^>]*placeholder[^>]*>|\bTODO\b|\bTBD\b|template instructions?)/i;
+
+export function validateCandidateFactClaims(claims, {
+  root = process.cwd(),
+  manifestPath = null,
+  cvPath = null,
+  cvText = null,
+} = {}) {
+  const projectRoot = resolve(root);
+  const resolvedManifest = resolve(projectRoot, manifestPath || join('data', 'cv-claim-anchors.json'));
+  const resolvedCv = resolve(projectRoot, cvPath || 'cv.md');
+  const normalizedClaims = Array.isArray(claims) ? claims.map((claim, index) => ({
+    id: String(claim?.id || `candidate-fact-${index + 1}`),
+    text: String(claim?.text || '').trim(),
+  })) : [];
+  const unavailable = (reasonCode, message = '') => ({
+    status: 'review_required', reasonCode, reasonCodes: [reasonCode], message,
+    results: normalizedClaims.map((claim) => ({ claimId: claim.id, status: 'review_required', reasonCode })),
+  });
+
+  if (!normalizedClaims.length || normalizedClaims.some((claim) => !claim.text)) {
+    return unavailable('candidate_claims_missing');
+  }
+  if (!existsSync(resolvedManifest)) return unavailable('claim_manifest_missing', `Claim manifest is missing: ${resolvedManifest}`);
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(resolvedManifest, 'utf8').replace(/^\uFEFF/, ''));
+  } catch (error) {
+    return unavailable('claim_manifest_invalid', error?.message || String(error));
+  }
+  let currentCv = cvText;
+  if (typeof currentCv !== 'string') {
+    if (!existsSync(resolvedCv)) return unavailable('claim_cv_missing', `CV is missing: ${resolvedCv}`);
+    try { currentCv = readFileSync(resolvedCv, 'utf8'); }
+    catch (error) { return unavailable('claim_cv_unavailable', error?.message || String(error)); }
+  }
+  try {
+    const checked = validateCvClaims({ claims: normalizedClaims, manifest, cv: currentCv });
+    const results = Array.isArray(checked?.results) ? checked.results : [];
+    const byId = new Map(results.map((result) => [result?.claimId, result]));
+    const failures = normalizedClaims.map((claim) => byId.get(claim.id)).filter((result) => result?.status !== 'pass');
+    const missingResults = normalizedClaims.filter((claim) => !byId.has(claim.id));
+    if (checked?.ok === true && !failures.length && !missingResults.length && results.length === normalizedClaims.length) {
+      return { status: 'pass', reasonCode: null, reasonCodes: [], results };
+    }
+    const reasonCodes = [...new Set([
+      ...failures.map((result) => result?.reasonCode || 'claim_validation_failed'),
+      ...(missingResults.length || results.length !== normalizedClaims.length ? ['claim_result_missing'] : []),
+    ])];
+    return {
+      status: 'review_required', reasonCode: reasonCodes[0] || 'claim_validation_failed', reasonCodes,
+      results: normalizedClaims.map((claim) => {
+        const result = byId.get(claim.id);
+        return result?.status === 'pass' ? result : {
+          claimId: claim.id, status: 'review_required', reasonCode: result?.reasonCode || 'claim_result_missing',
+          anchorIds: result?.anchorIds || [],
+        };
+      }),
+    };
+  } catch (error) {
+    return unavailable('claim_validation_error', error?.message || String(error));
+  }
+}
+
+function validateNarrativeCandidateFacts(profile, factualEvidence, manifestPath = null) {
+  const claims = factualEvidence.map((entry, index) => ({ id: `candidate-fact-${index + 1}`, text: entry.text }));
+  return validateCandidateFactClaims(claims, {
+    root: profile?.projectRoot || process.cwd(),
+    manifestPath,
+    cvPath: profile?.sourceFiles?.cv?.path || null,
+    cvText: profile?.cvText,
+  });
+}
 
 export function cleanFormText(value) {
   return String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
@@ -295,6 +370,8 @@ export function generateCustomNarrativeAnswer(profile, {
   jdText = '',
   maxLength = null,
   routing = null,
+  validateCandidateClaims = true,
+  claimManifestPath = null,
 } = {}) {
   const candidateId = cleanFormText(candidate.candidate_id || candidate.candidateId);
   const normalizedQuestion = normalizeFormQuestion(question);
@@ -311,6 +388,7 @@ export function generateCustomNarrativeAnswer(profile, {
     });
     return {
       ...record, answer: validated, reused: true,
+      claimValidation: validateCandidateClaims ? validateNarrativeCandidateFacts(profile, saved.factualEvidence, claimManifestPath) : null,
     };
   }
   const allowedTemplates = new Set(['role-fit-v1', 'role-fit-evidence-only-v1']);
@@ -388,7 +466,10 @@ export function generateCustomNarrativeAnswer(profile, {
   const record = createNarrativeProvenanceRecord({
     candidateId, normalizedQuestion, answer: validated, wording: 'generated', templateId, factualEvidence: includedEvidence,
   });
-  return { ...record, answer: validated, reused: false };
+  return {
+    ...record, answer: validated, reused: false,
+    claimValidation: validateCandidateClaims ? validateNarrativeCandidateFacts(profile, includedEvidence, claimManifestPath) : null,
+  };
 }
 
 function formRules(profile) {

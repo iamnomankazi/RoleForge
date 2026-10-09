@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { PDFDocument } from 'pdf-lib';
 import {
   checkCoverLetterDraft,
+  approveCoverLetterV2,
   draftHash,
   loadBannedPhrases,
   runCoverLetterV2,
@@ -207,6 +208,45 @@ test('colliding artifact names are refused without changing the existing pair', 
     assert.equal(second.status, 'blocked');
     assert.equal(second.checks.find(item => item.id === 'output_collision').reasonCode, 'output_exists');
     assert.equal(await readFile(first.files.text, 'utf8'), originalText);
+  } finally {
+    await rm(outputDirectory, { recursive: true, force: true });
+  }
+});
+
+test('explicit approval rechecks both pair hashes, creates one record, and refuses double approval', async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), 'cover-letter-v2-approval-'));
+  try {
+    const draft = makeDraft();
+    const result = await runCoverLetterV2(draft, {
+      jdText: draft.jd.text,
+      validateClaims: passingValidator,
+      outputDirectory,
+    });
+    const approved = await approveCoverLetterV2(result.files.check, { now: new Date('2031-01-02T03:04:05.000Z') });
+    const record = JSON.parse(await readFile(approved.approvedPath, 'utf8'));
+    assert.deepEqual(record, {
+      approvedAt: '2031-01-02T03:04:05.000Z',
+      draftHash: result.draftHash,
+      textHash: result.textHash,
+      pdfHash: result.pdfHash,
+    });
+    await assert.rejects(() => approveCoverLetterV2(result.files.check), /EEXIST|already exists/i);
+  } finally {
+    await rm(outputDirectory, { recursive: true, force: true });
+  }
+});
+
+test('v2 approval refuses a PDF that changed after its check sidecar was written', async () => {
+  const outputDirectory = await mkdtemp(join(tmpdir(), 'cover-letter-v2-tamper-'));
+  try {
+    const draft = makeDraft();
+    const result = await runCoverLetterV2(draft, {
+      jdText: draft.jd.text,
+      validateClaims: passingValidator,
+      outputDirectory,
+    });
+    await writeFile(result.files.pdf, 'tampered PDF');
+    await assert.rejects(() => approveCoverLetterV2(result.files.check), /pair hash mismatch/i);
   } finally {
     await rm(outputDirectory, { recursive: true, force: true });
   }

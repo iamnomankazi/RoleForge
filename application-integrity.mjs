@@ -102,6 +102,7 @@ export function createArtifactRecord({
   createdAt = null,
   sourceArtifacts = null,
   narrativeProvenance = null,
+  coverLetterV2Approval = null,
 }) {
   if (!['cv', 'cover_letter', 'cover_letter_text', 'combined_document'].includes(artifactType)) {
     throw new Error(`Unsupported artifact type: ${artifactType}`);
@@ -139,6 +140,11 @@ export function createArtifactRecord({
     validateArtifactNarrativeProvenance(narrativeProvenance);
     record.narrativeProvenance = JSON.parse(JSON.stringify(narrativeProvenance));
   }
+  if (coverLetterV2Approval != null) {
+    if (!['cover_letter', 'cover_letter_text'].includes(artifactType)) throw new Error('Only cover-letter artifacts may bind a v2 approval record');
+    validateCoverLetterV2Approval(coverLetterV2Approval, artifactType, record.sha256);
+    record.coverLetterV2Approval = JSON.parse(JSON.stringify(coverLetterV2Approval));
+  }
   if (artifactType === 'combined_document') {
     if (!Array.isArray(sourceArtifacts) || sourceArtifacts.length !== 2) throw new Error('Combined document requires exactly two ordered source artifacts');
     record.sourceArtifacts = sourceArtifacts.map((item) => ({ artifactType: item.artifactType, sha256: item.sha256, size: item.size }));
@@ -150,6 +156,7 @@ export function validateArtifactRecord(record, { root, expectedType = null } = {
   if (!record || typeof record !== 'object' || Array.isArray(record)) throw new Error('Artifact record must be an object');
   const allowed = new Set([
     'artifactType', 'intendedFilename', 'resolvedPath', 'sha256', 'size', 'sourceCvVariant', 'createdAt', 'sourceArtifacts', 'narrativeProvenance',
+    'coverLetterV2Approval',
   ]);
   for (const key of Object.keys(record)) {
     if (!allowed.has(key)) throw new Error(`Unknown critical artifact field: ${key}`);
@@ -174,6 +181,10 @@ export function validateArtifactRecord(record, { root, expectedType = null } = {
     if (!['cover_letter', 'cover_letter_text'].includes(record.artifactType)) throw new Error('Only cover-letter artifacts may contain narrative provenance');
     validateArtifactNarrativeProvenance(record.narrativeProvenance);
   }
+  if (record.coverLetterV2Approval != null) {
+    if (!['cover_letter', 'cover_letter_text'].includes(record.artifactType)) throw new Error('Only cover-letter artifacts may bind a v2 approval record');
+    validateCoverLetterV2Approval(record.coverLetterV2Approval, record.artifactType, record.sha256);
+  }
   validateReadableFilename(record.intendedFilename);
   if (!isAbsolute(record.resolvedPath)) throw new Error('Artifact resolved path must be absolute');
   const outputRoot = realpathSync(resolve(root, 'output'));
@@ -187,6 +198,20 @@ export function validateArtifactRecord(record, { root, expectedType = null } = {
     throw new Error(`Artifact hash or size mismatch: ${record.intendedFilename}`);
   }
   return record;
+}
+
+function validateCoverLetterV2Approval(approval, artifactType, artifactHash) {
+  const keys = ['approvedAt', 'draftHash', 'textHash', 'pdfHash', 'approvalRecordSha256'];
+  if (!approval || typeof approval !== 'object' || Array.isArray(approval)
+      || Object.keys(approval).some((key) => !keys.includes(key))
+      || keys.some((key) => !Object.hasOwn(approval, key))
+      || !Number.isFinite(Date.parse(approval.approvedAt || ''))
+      || !['draftHash', 'textHash', 'pdfHash'].every((key) => /^[a-f0-9]{64}$/.test(approval[key] || ''))
+      || !/^sha256:[a-f0-9]{64}$/.test(approval.approvalRecordSha256)) {
+    throw new Error('Cover-letter v2 approval binding is invalid');
+  }
+  const expected = artifactType === 'cover_letter_text' ? approval.textHash : approval.pdfHash;
+  if (artifactHash !== `sha256:${expected}`) throw new Error('Cover-letter v2 approval hash does not match its bound artifact');
 }
 
 function validateArtifactNarrativeProvenance(record) {

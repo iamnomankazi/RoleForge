@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
-import { readFileSync, writeFileSync } from 'fs';
-import { resolve } from 'path';
-import { fileURLToPath } from 'url';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { validateCandidateFactClaims } from './application-form-policy.mjs';
 
 export const APPLICATION_ANSWERS_HEADING = '## Application Answers';
+const ROOT = dirname(fileURLToPath(import.meta.url));
 
 const VALID_STATES = new Set(['filled', 'submitted']);
 
@@ -51,16 +53,21 @@ function quoteBlock(value) {
   return text.split('\n').map((line) => `> ${line}`).join('\n');
 }
 
-function qaLines(entries, { labelKeys, valueKeys, fallback }) {
+function qaLines(entries, { labelKeys, valueKeys, fallback, includeClaimCheck = false }) {
   if (entries.length === 0) return ['- None captured.'];
 
   return entries.flatMap((entry, index) => {
     const label = inline(pick(entry, labelKeys)) || `${fallback} ${index + 1}`;
-    const answer = pick(entry, valueKeys);
+    const answer = typeof entry === 'string' ? entry : pick(entry, valueKeys);
+    const check = entry?.claimValidation;
+    const checkLine = includeClaimCheck && check?.status === 'review_required'
+      ? [`> Claim validation: **REVIEW REQUIRED** (${(check.reasonCodes || [check.reasonCode]).filter(Boolean).join(', ') || 'claim_validation_failed'}).`]
+      : [];
     return [
       `${index + 1}. **${label}**`,
       '',
       quoteBlock(answer),
+      ...checkLine,
       '',
     ];
   }).slice(0, -1);
@@ -98,8 +105,28 @@ export function normalizeApplicationAnswersSnapshot(snapshot = {}) {
   };
 }
 
-export function formatApplicationAnswersSection(snapshot = {}) {
+export function validateApplicationAnswersSnapshot(snapshot = {}, {
+  root = ROOT,
+  manifestPath = join('data', 'cv-claim-anchors.json'),
+  cvPath = 'cv.md',
+} = {}) {
   const normalized = normalizeApplicationAnswersSnapshot(snapshot);
+  normalized.freeText = normalized.freeText.map((entry, index) => {
+    if (entry?.claimValidation) return entry;
+    const answer = typeof entry === 'string' ? entry : pick(entry, ['answer', 'response', 'value', 'text']);
+    return {
+      ...(typeof entry === 'object' && entry !== null ? entry : { answer }),
+      claimValidation: validateCandidateFactClaims([{
+        id: `free-text-answer-${index + 1}`,
+        text: String(answer ?? ''),
+      }], { root, manifestPath, cvPath }),
+    };
+  });
+  return normalized;
+}
+
+export function formatApplicationAnswersSection(snapshot = {}, options = {}) {
+  const normalized = validateApplicationAnswersSnapshot(snapshot, options);
   const lines = [
     APPLICATION_ANSWERS_HEADING,
     '',
@@ -112,6 +139,7 @@ export function formatApplicationAnswersSection(snapshot = {}) {
       labelKeys: ['question', 'field', 'label', 'prompt'],
       valueKeys: ['answer', 'response', 'value', 'text'],
       fallback: 'Answer',
+      includeClaimCheck: true,
     }),
     '',
     '### Selections made',
@@ -138,9 +166,9 @@ export function formatApplicationAnswersSection(snapshot = {}) {
   return `${lines.join('\n').replace(/\n{3,}/g, '\n\n').trim()}\n`;
 }
 
-export function upsertApplicationAnswersSection(reportText, snapshot = {}) {
+export function upsertApplicationAnswersSection(reportText, snapshot = {}, options = {}) {
   const report = String(reportText ?? '').replace(/\r\n/g, '\n');
-  const section = formatApplicationAnswersSection(snapshot).trimEnd();
+  const section = formatApplicationAnswersSection(snapshot, options).trimEnd();
   const heading = /^## Application Answers\s*$/m.exec(report);
 
   if (!heading) {
@@ -176,7 +204,7 @@ function parseArgs(argv) {
 
 function usage() {
   return [
-    'Usage: node application-answers.mjs --report <report.md> --input <answers.json> [--state filled] [--date YYYY-MM-DD]',
+    'Usage: node application-answers.mjs --report <report.md> --input <answers.json> [--state filled] [--date YYYY-MM-DD] [--manifest <claim-manifest.json>] [--cv <cv.md>]',
     '',
     'The input JSON may contain: freeText, selections, fieldValues, files, date, state.',
   ].join('\n');
@@ -212,11 +240,21 @@ async function main() {
     throw new Error('Direct submitted state is disabled. Record manual submission through application-submission.mjs.');
   }
   const reportPath = resolve(args.report);
-  const updated = upsertApplicationAnswersSection(readFileSync(reportPath, 'utf-8'), snapshot);
+  const claimOptions = {
+    root: ROOT,
+    manifestPath: args.manifest ? resolve(args.manifest) : join('data', 'cv-claim-anchors.json'),
+    cvPath: args.cv ? resolve(args.cv) : 'cv.md',
+  };
+  const checkedSnapshot = validateApplicationAnswersSnapshot(snapshot, claimOptions);
+  const updated = upsertApplicationAnswersSection(readFileSync(reportPath, 'utf-8'), checkedSnapshot, claimOptions);
   writeFileSync(reportPath, updated, 'utf-8');
 
-  const normalized = normalizeApplicationAnswersSnapshot(snapshot);
-  console.log(JSON.stringify({ report: reportPath, date: normalized.date, state: normalized.state }, null, 2));
+  console.log(JSON.stringify({
+    report: reportPath,
+    date: checkedSnapshot.date,
+    state: checkedSnapshot.state,
+    freeTextClaimReviews: checkedSnapshot.freeText.filter((entry) => entry.claimValidation?.status === 'review_required').length,
+  }, null, 2));
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
