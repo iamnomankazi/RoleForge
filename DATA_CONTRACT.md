@@ -24,6 +24,7 @@ These files contain your personal data, customizations, and work product. Update
 | `data/applications.md` | Your application tracker (source of truth) |
 | `data/applications.db` | Derived query index over `applications.md` (SQLite, rebuilt by `node tracker.mjs sync` — safe to delete) |
 | `data/pipeline.md` | Your URL inbox |
+| `data/cv-claim-anchors.json` | Your CV claim anchors and factual-source references; refreshed CV drafts are reviewed separately and never overwrite this manifest |
 | `data/scan-history.tsv` | Your scan history |
 | `data/scan-runs.tsv` | Your per-run scan counters (appended by `scan.mjs`, read by `stats.mjs`) |
 | `data/follow-ups.md` | Your follow-up history |
