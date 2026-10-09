@@ -10,7 +10,20 @@ test('reverse ATS scan persists canonical immutable schema-v3 candidates compati
   const root = mkdtempSync(join(tmpdir(), 'career-ops-full-ats-'));
   try {
     const offers = [
-      { company: 'Acme', title: 'Engineer', source: 'greenhouse-full', url: 'https://job-boards.greenhouse.io/acme/jobs/123?utm_source=x' },
+      {
+        company: 'Acme', title: 'Engineer', source: 'greenhouse-full',
+        url: 'https://job-boards.greenhouse.io/acme/jobs/123?utm_source=x',
+        prescreen: {
+          blockers: [{ code: 'language_required', evidence: 'C1 German required.', detail: 'Synthetic test fixture' }],
+          flags: [{ code: 'sponsorship_unknown', evidence: '' }],
+          language_requirements: [{ language: 'german', level: 'C1', required: true, evidence: 'C1 German required.' }],
+          work_authorization: { country: 'de', status: 'unknown', evidence: '' },
+          graduation_window: null,
+          experience: null,
+        },
+        languageRequirements: [{ language: 'german', level: 'C1', required: true, evidence: 'C1 German required.' }],
+        hardBlockers: ['language_required: C1 German required.'],
+      },
       { company: 'Acme', title: 'Engineer', source: 'greenhouse-full', url: 'https://job-boards.greenhouse.io/acme/jobs/124' },
       { company: 'Other', title: 'Engineer', source: 'workday-full', url: 'https://other.wd5.myworkdayjobs.com/site/job/Helsinki/Engineer_R123' },
     ];
@@ -20,6 +33,10 @@ test('reverse ATS scan persists canonical immutable schema-v3 candidates compati
     assert.equal(result.manifest.artifact_authority, 'review_only');
     assert.equal(result.candidates.length, 3);
     assert.notEqual(result.candidates[0].candidate_id, result.candidates[1].candidate_id);
+    const screenedCandidate = result.candidates.find(candidate => candidate.requisition_id === '123');
+    assert.deepEqual(screenedCandidate.prescreen, offers[0].prescreen);
+    assert.deepEqual(screenedCandidate.language_requirements, offers[0].languageRequirements);
+    assert.equal(screenedCandidate.hard_blockers[0], 'language_required: C1 German required.');
     const tracked = result.candidates.find((row) => row.requisition_id === '123');
     assert.ok(tracked.url_aliases.some((url) => url.includes('utm_source')));
     for (const file of ['manifest.json', 'candidates.json', 'candidates.tsv', 'review.csv', 'review.md']) assert.ok(existsSync(join(result.runDir, file)));

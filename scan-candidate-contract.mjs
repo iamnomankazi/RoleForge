@@ -26,6 +26,22 @@ function list(value) {
   return clean(value) ? [clean(value)] : [];
 }
 
+function languageList(value) {
+  const values = Array.isArray(value) ? value : value == null ? [] : [value];
+  const result = [];
+  const seen = new Set();
+  for (const item of values) {
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      const key = JSON.stringify(item);
+      if (!seen.has(key)) { seen.add(key); result.push(item); }
+      continue;
+    }
+    const text = clean(item);
+    if (text && !seen.has(text)) { seen.add(text); result.push(text); }
+  }
+  return result;
+}
+
 function first(...values) {
   return values.map(clean).find(Boolean) || '';
 }
@@ -150,7 +166,7 @@ export function normalizeCanonicalCandidate(row, {
   const blockers = list(row?.hardBlockers ?? row?.hard_blockers ?? row?.blockers);
   const cautions = list(row?.cautions ?? row?.warnings ?? row?.trustFlags);
   const seniority = list(row?.seniority ?? row?.structuredSeniority ?? row?.structured_seniority);
-  const languages = list(row?.languageRequirements ?? row?.language_requirements ?? row?.languages);
+  const languages = languageList(row?.languageRequirements ?? row?.language_requirements ?? row?.languages);
   const source = first(row?.source, row?.provider, inputName);
   const sourceId = first(row?.sourceId, row?.source_id) || null;
   const sourceUrl = first(row?.sourceUrl, row?.source_url) || null;
@@ -200,6 +216,7 @@ export function normalizeCanonicalCandidate(row, {
     employment_type: first(row?.employmentType, row?.employment_type) || null,
     seniority,
     experience_metadata: normalizeExperience(row),
+    ...(row?.prescreen && typeof row.prescreen === 'object' ? { prescreen: row.prescreen } : {}),
     language_requirements: languages,
     salary: normalizeSalary(row?.salary ?? row?.compensation),
     match_bucket: first(row?.matchBucket, row?.match_bucket) || null,
@@ -361,6 +378,11 @@ export function mergeCanonicalCandidates(inputs, {
       if (existing.experience_metadata == null && row.experience_metadata != null) {
         existing.experience_metadata = row.experience_metadata;
       }
+      if (existing.prescreen == null && row.prescreen != null) existing.prescreen = row.prescreen;
+      existing.language_requirements = languageList([
+        ...existing.language_requirements,
+        ...row.language_requirements,
+      ]);
       existing.description ||= row.description;
       const livenessRank = { active: 0, uncertain: 1, unverified: 2 };
       if ((livenessRank[row.liveness_status] ?? 9) < (livenessRank[existing.liveness_status] ?? 9)) {
@@ -459,7 +481,7 @@ export const CANDIDATE_TSV_COLUMNS = Object.freeze([
   'location', 'location_eligibility', 'location_eligibility_code', 'location_eligibility_match',
   'location_eligibility_source', 'remote_restriction',
   'finland_hiring_eligibility', 'posted_at', 'expires_at',
-  'employment_type', 'seniority', 'experience_metadata', 'language_requirements', 'salary',
+  'employment_type', 'seniority', 'experience_metadata', 'prescreen', 'language_requirements', 'salary',
   'match_bucket', 'match_reason', 'recommended_cv_variant', 'cautions', 'hard_blockers', 'status',
   'liveness_status', 'liveness_code', 'liveness_reason',
   'notes', 'provenance',

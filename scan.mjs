@@ -47,6 +47,7 @@ import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
 import { atsIdentityFromUrl, deriveCandidateId } from './candidate-identity.mjs';
 import { writeImmutableScanRun } from './scan-candidate-contract.mjs';
 import { appendPortalHealth, loadPortalHealth, computeConsecutiveFailures } from './portal-health.mjs';
+import { prescreenJob, loadPrescreenProfile } from './prescreen.mjs';
 import {
   classifyExperienceRequirements,
   isNumericExperienceKeyword,
@@ -683,7 +684,7 @@ export function buildSalaryFilter(salaryFilter) {
  * content filtering so canonical review rows retain numeric requirements and
  * blockers.
  */
-export function buildScanRelevanceEvaluator(config = {}, { classifyTier = null, sinceMs = null } = {}) {
+export function buildScanRelevanceEvaluator(config = {}, { classifyTier = null, sinceMs = null, prescreenProfile = null } = {}) {
   const titleFilter = buildTitleFilter(config.title_filter);
   const skipTiers = Array.isArray(config.skip_tiers)
     ? config.skip_tiers.filter(value => typeof value === 'string').map(value => value.toLowerCase())
@@ -734,6 +735,41 @@ export function buildScanRelevanceEvaluator(config = {}, { classifyTier = null, 
 
     if (!contentFilter(job.description, matchedTitleKeywords(job.title, config.title_filter))) {
       return { eligible: false, reason: 'content', locationEligibility, experienceMetadata };
+    }
+
+    if (prescreenProfile) {
+      const prescreen = prescreenJob({
+        title: job.title,
+        description: job.description,
+        location: job.location,
+        country: job.country,
+      }, prescreenProfile, { experiencePolicy });
+      job.prescreen = prescreen;
+
+      const existingLanguages = job.languageRequirements ?? job.language_requirements;
+      const languages = Array.isArray(existingLanguages)
+        ? existingLanguages
+        : (existingLanguages == null ? [] : [existingLanguages]);
+      const languageKeys = new Set(languages.map(value => typeof value === 'string' ? value : JSON.stringify(value)));
+      for (const requirement of prescreen.language_requirements || []) {
+        const key = typeof requirement === 'string' ? requirement : JSON.stringify(requirement);
+        if (!languageKeys.has(key)) {
+          languages.push(requirement);
+          languageKeys.add(key);
+        }
+      }
+      if (languages.length) job.languageRequirements = languages;
+
+      const existingBlockers = job.hardBlockers ?? job.hard_blockers;
+      const blockers = Array.isArray(existingBlockers)
+        ? existingBlockers
+        : (existingBlockers == null ? [] : [existingBlockers]);
+      const uniqueBlockers = new Set(blockers);
+      for (const blocker of prescreen.blockers || []) {
+        const value = `${blocker.code}: ${blocker.evidence ?? ''}`;
+        uniqueBlockers.add(value);
+      }
+      if (uniqueBlockers.size) job.hardBlockers = [...uniqueBlockers];
     }
     return { eligible: true, reason: null, locationEligibility, experienceMetadata };
   };
@@ -1535,7 +1571,14 @@ async function main() {
   }
 
   const trustValidator = buildTrustValidator(config.trust_filter);
-  const evaluateScanRelevance = buildScanRelevanceEvaluator(config, { classifyTier, sinceMs });
+  const prescreenProfilePath = resolveProfilePath();
+  const prescreenProfile = existsSync(prescreenProfilePath)
+    ? loadPrescreenProfile(prescreenProfilePath)
+    : null;
+  if (!prescreenProfile) {
+    console.error(`Warning: prescreen profile not found at ${prescreenProfilePath}; candidate pre-screen annotations are disabled.`);
+  }
+  const evaluateScanRelevance = buildScanRelevanceEvaluator(config, { classifyTier, sinceMs, prescreenProfile });
   const enrichmentTitleFilter = buildTitleFilter(config.title_filter);
   const enrichmentLocationFilter = buildLocationFilter(config.location_filter);
 

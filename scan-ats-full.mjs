@@ -41,10 +41,11 @@ import ashby from './providers/ashby.mjs';
 import workday from './providers/workday.mjs';
 import icims from './providers/icims.mjs';
 import { providerCoverage } from './providers/_result.mjs';
-import { buildTitleFilter, buildLocationFilter, loadSeenUrls, appendToPipeline, appendToScanHistory, normalizeUrlForDedup, parseSinceDays } from './scan.mjs';
+import { buildTitleFilter, buildLocationFilter, buildScanRelevanceEvaluator, loadSeenUrls, appendToPipeline, appendToScanHistory, normalizeUrlForDedup, parseSinceDays } from './scan.mjs';
 import { SEED_SOURCES, toPortalEntry } from './seeds/vc-portfolios.mjs';
 import { writeImmutableScanRun } from './scan-candidate-contract.mjs';
 import { isResolverFailure } from './providers/_dns-cache.mjs';
+import { loadPrescreenProfile } from './prescreen.mjs';
 
 // ── Config ──────────────────────────────────────────────────────────
 
@@ -157,6 +158,7 @@ export const SOURCES = {
     // Dataset entries are "tenant|instance|site" triples.
     toEntry: (line) => {
       const [tenant, instance, site] = String(line).split('|');
+      if (/^wd\d+$/i.test(tenant || '')) return null;
       if (![tenant, instance, site].every(p => p && SLUG_RE.test(p))) return null;
       return entryOnHost(
         tenant,
@@ -375,24 +377,51 @@ export function classifyPostingDate(job, cutoff) {
   return 'keep';
 }
 
-async function eligibleProviderJobs(jobs, {
+export function isInvalidCatalogCoordinate(sourceName, row) {
+  return sourceName === 'workday' && /^wd\d+$/i.test(String(row ?? '').split('|')[0]);
+}
+
+export function countInvalidCatalogCoordinates(sourceName, rows) {
+  if (!Array.isArray(rows)) return 0;
+  return rows.reduce((count, row) => count + Number(isInvalidCatalogCoordinate(sourceName, row)), 0);
+}
+
+export async function eligibleProviderJobs(jobs, {
   provider,
   ctx,
   cutoff,
   includeUndated,
   titleFilter,
   locationFilter,
+  evaluateScanRelevance = null,
+  rejectionCounts = null,
   onUndatedDrop = null,
 }) {
+  const recordRejection = reason => {
+    if (!rejectionCounts || !reason) return;
+    rejectionCounts[reason] = (rejectionCounts[reason] || 0) + 1;
+  };
   const eligible = [];
   for (const job of jobs) {
     if (!job.url || !job.title) continue;
     let dateClass = classifyPostingDate(job, cutoff);
-    if (dateClass === 'stale') continue;
+    if (dateClass === 'stale') {
+      recordRejection('posting_age');
+      continue;
+    }
 
     const titleEligible = titleFilter(job.title, job.company);
     let locationEligible = locationFilter(job.location, job.url, job.title);
-    if (dateClass === 'undated' && titleEligible && locationEligible && typeof provider?.enrichDate === 'function') {
+    const shouldEnrich = dateClass === 'undated' && titleEligible && locationEligible
+      && typeof provider?.enrichDate === 'function';
+
+    // Date classification remains authoritative for the reverse scan. Run
+    // the shared policy after that gate; use a copy for an undated job that is
+    // about to be enriched so its preliminary metadata cannot survive a
+    // changed detail description. Re-evaluate the enriched job below.
+    let relevance = evaluateScanRelevance?.(shouldEnrich ? { ...job } : job) ?? null;
+
+    if (shouldEnrich) {
       const originalPostedAt = job.postedAt;
       try {
         await provider.enrichDate(job, ctx);
@@ -403,16 +432,29 @@ async function eligibleProviderJobs(jobs, {
       }
       dateClass = classifyPostingDate(job, cutoff);
       locationEligible = locationFilter(job.location, job.url, job.title);
-      if (dateClass === 'stale') continue;
+      if (dateClass === 'stale') {
+        recordRejection('posting_age');
+        continue;
+      }
+      relevance = evaluateScanRelevance?.(job) ?? null;
     }
 
     // Re-check location after a detail lookup, which may reveal a country
     // restriction that was not present on the search result card.
     if (dateClass === 'undated' && !includeUndated) {
       onUndatedDrop?.(job);
+      recordRejection('undated');
       continue;
     }
-    if (!titleEligible || !locationEligible) continue;
+    if (relevance) {
+      if (!relevance.eligible) {
+        recordRejection(relevance.reason);
+        continue;
+      }
+    } else if (!titleEligible || !locationEligible) {
+      recordRejection(!titleEligible ? 'title' : 'location');
+      continue;
+    }
     eligible.push({ job, dateStatus: dateClass === 'keep' ? 'dated' : 'unknown' });
   }
   return eligible;
@@ -535,6 +577,8 @@ export async function runSeedScan(seedId, opts, ctx, seenUrls, label) {
       includeUndated: opts.includeUndated,
       titleFilter: opts.titleFilter,
       locationFilter: opts.locationFilter,
+      evaluateScanRelevance: opts.evaluateScanRelevance,
+      rejectionCounts: opts.rejectionCounts,
       onUndatedDrop: () => { droppedNoDate++; },
     });
     if (jobs.providerDegraded) errors++;
@@ -624,9 +668,35 @@ async function main() {
     console.error('Error: portals.yml not found. Run onboarding first — the reverse scan reuses its title_filter/location_filter.');
     process.exit(1);
   }
-  const config = yaml.load(readFileSync(PORTALS_PATH, 'utf-8'));
+  const loadedConfig = yaml.load(readFileSync(PORTALS_PATH, 'utf-8'));
+  const config = loadedConfig && typeof loadedConfig === 'object' ? loadedConfig : {};
   const titleFilter = buildTitleFilter(config?.title_filter);
   const locationFilter = buildLocationFilter(config?.location_filter);
+  let classifyTier = null;
+  const skipTiers = Array.isArray(config.skip_tiers)
+    ? config.skip_tiers.filter(value => typeof value === 'string').map(value => value.toLowerCase())
+    : [];
+  if (skipTiers.length) {
+    const mod = await import('./classify-tier.mjs');
+    classifyTier = mod.classifyTier || mod.default;
+  }
+  const profilePath = process.env.CAREER_OPS_PROFILE || 'config/profile.yml';
+  const prescreenProfile = existsSync(profilePath) ? loadPrescreenProfile(profilePath) : null;
+  if (!prescreenProfile) {
+    console.error(`Warning: prescreen profile not found at ${profilePath}; candidate pre-screen annotations are disabled.`);
+  }
+  const evaluateScanRelevance = buildScanRelevanceEvaluator(config, { classifyTier, prescreenProfile });
+  const relevanceRejections = {
+    title: 0,
+    posting_age: 0,
+    tier: 0,
+    location: 0,
+    salary: 0,
+    content: 0,
+    undated: 0,
+  };
+  opts.evaluateScanRelevance = evaluateScanRelevance;
+  opts.rejectionCounts = relevanceRejections;
   if (!config?.title_filter?.positive?.length) {
     console.error('⚠️  portals.yml has no title_filter.positive — every fresh posting on every board will match. Consider adding keywords.');
   }
@@ -665,6 +735,8 @@ async function main() {
   let totalAttemptedTargets = checkpoint?.counters?.totalAttemptedTargets || 0;
   let totalSuccessfulTargets = checkpoint?.counters?.totalSuccessfulTargets || 0;
   let droppedNoDate = checkpoint?.counters?.droppedNoDate || 0;
+  let catalogCoordinateInvalid = checkpoint?.counters?.catalogCoordinateInvalid || 0;
+  Object.assign(relevanceRejections, checkpoint?.counters?.relevanceRejections || {});
   const degradedBoardDetails = Array.isArray(checkpoint?.degradedBoardDetails) ? checkpoint.degradedBoardDetails : [];
   const cappedBoardDetails = Array.isArray(checkpoint?.cappedBoardDetails) ? checkpoint.cappedBoardDetails : [];
   let capHit = false;
@@ -686,10 +758,17 @@ async function main() {
     datasetStatus[name] = status;
     if (list.length === 0) unavailableSources++;
     const resumingCurrent = checkpoint?.current?.name === name;
-    if (!resumingCurrent) totalCompaniesAvailable += list.length;
-    if (opts.limit < list.length) capHit = true;
+    const invalidCoordinates = countInvalidCatalogCoordinates(name, list);
+    const catalogEntries = name === 'workday'
+      ? list.filter(row => !isInvalidCatalogCoordinate(name, row))
+      : list;
+    if (!resumingCurrent || !Number.isFinite(checkpoint?.counters?.catalogCoordinateInvalid)) {
+      catalogCoordinateInvalid += invalidCoordinates;
+    }
+    if (!resumingCurrent) totalCompaniesAvailable += catalogEntries.length;
+    if (opts.limit < catalogEntries.length) capHit = true;
     const startAt = 0;
-    const sampledEntries = sampleCompanies(list, opts.limit, opts.shuffle).map(source.toEntry).filter(Boolean);
+    const sampledEntries = sampleCompanies(catalogEntries, opts.limit, opts.shuffle).map(source.toEntry).filter(Boolean);
     const entries = resumingCurrent && Array.isArray(checkpoint.current.pendingEntries)
       ? checkpoint.current.pendingEntries
       : resumingCurrent && Array.isArray(checkpoint.current.remainingEntries)
@@ -719,6 +798,8 @@ async function main() {
           includeUndated: opts.includeUndated,
           titleFilter,
           locationFilter,
+          evaluateScanRelevance,
+          rejectionCounts: relevanceRejections,
           onUndatedDrop: () => { droppedNoDate++; },
         });
         if (jobs.providerDegraded) errors++;
@@ -767,7 +848,7 @@ async function main() {
           completedSources: [...completedSources],
           counters: {
             totalCompaniesScanned, totalCompaniesAvailable, totalErrors, totalAttemptedTargets,
-            totalSuccessfulTargets, droppedNoDate,
+            totalSuccessfulTargets, droppedNoDate, catalogCoordinateInvalid, relevanceRejections,
             degradedBoards: degradedBoardDetails.length, cappedBoards: cappedBoardDetails.length,
           },
           degradedBoardDetails,
@@ -788,7 +869,7 @@ async function main() {
           completedSources: [...completedSources],
           counters: {
             totalCompaniesScanned, totalCompaniesAvailable, totalErrors, totalAttemptedTargets,
-            totalSuccessfulTargets, droppedNoDate,
+            totalSuccessfulTargets, droppedNoDate, catalogCoordinateInvalid, relevanceRejections,
             degradedBoards: degradedBoardDetails.length, cappedBoards: cappedBoardDetails.length,
           },
           degradedBoardDetails,
@@ -824,7 +905,7 @@ async function main() {
 
   const degradedDataset = Object.values(datasetStatus).some((status) => status !== 'ok');
   const resumeIncomplete = Boolean(checkpoint) && !checkpointCanClear;
-  const noExecutableTargets = !stoppedByOutage && totalAttemptedTargets === 0;
+  const noExecutableTargets = !stoppedByOutage && totalAttemptedTargets === 0 && catalogCoordinateInvalid === 0;
   const allUnavailable = !stoppedByOutage && totalAttemptedTargets > 0 && totalSuccessfulTargets === 0;
   const completionStatus = stoppedByOutage || resumeIncomplete
     ? 'paused'
@@ -845,6 +926,11 @@ async function main() {
   log(`Reverse ATS Scan — ${date}`);
   log(`${'━'.repeat(45)}`);
   log(`Companies scanned:  ${totalCompaniesScanned}${capHit ? ` of ${totalCompaniesAvailable} (capped)` : ''}`);
+  if (catalogCoordinateInvalid) log(`Catalog skipped:     ${catalogCoordinateInvalid} (catalog_coordinate_invalid)`);
+  const rejectionSummary = Object.entries(relevanceRejections)
+    .filter(([, count]) => count > 0)
+    .map(([stage, count]) => `${stage}=${count}`).join(', ');
+  if (rejectionSummary) log(`Relevance rejected:  ${rejectionSummary}`);
   log(`Targets succeeded:  ${totalSuccessfulTargets}/${totalAttemptedTargets}`);
   log(`Unreachable boards: ${totalErrors}`);
   if (degradedBoardDetails.length) log(`Degraded boards:     ${degradedBoardDetails.length}`);
@@ -886,6 +972,8 @@ async function main() {
         targets_attempted: totalAttemptedTargets, targets_succeeded: totalSuccessfulTargets,
         targets_degraded: degradedBoardDetails.length, targets_capped: cappedBoardDetails.length,
         degraded_boards: degradedBoardDetails, capped_boards: cappedBoardDetails,
+        catalog_coordinate_invalid: catalogCoordinateInvalid,
+        relevance_rejections: relevanceRejections,
       },
     });
     log(`\nImmutable canonical run: ${immutableRun.runDir}`);
@@ -934,6 +1022,8 @@ async function main() {
       sinceDays: opts.sinceDays,
       companiesAvailable: totalCompaniesAvailable,
       companiesScanned: totalCompaniesScanned,
+      catalog_coordinate_invalid: catalogCoordinateInvalid,
+      relevanceRejections,
       capHit,
       datasetStatus,
       degradedBoards: degradedBoardDetails.length,
