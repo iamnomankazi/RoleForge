@@ -123,3 +123,7 @@ plan/
 agent_docs/
 .codex_workflow_hidden_resources/
 AGENTS.md
+
+# Per-machine agent session handoff (never commit)
+HANDOFF.md
+CLAUDE.local.md
