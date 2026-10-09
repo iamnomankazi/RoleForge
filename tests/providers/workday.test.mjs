@@ -964,6 +964,44 @@ try {
   } else {
     fail(`workday repeated-page result mismatch: ${JSON.stringify({ requests: repeatedCalls, jobs: repeatedJobs.length, coverage: providerCoverage(repeatedJobs) })}`);
   }
+  // Later pages may report total=0 (first-page total is authoritative); empty
+  // later pages fail closed unless the board shrank to or below the offset.
+  const mkPaged = (secondPage) => async (_url, opts) => {
+    const offset = JSON.parse(opts.body).offset;
+    const rows = (prefix) => Array.from({ length: 20 }, (_, i) => ({ title: `${prefix} ${i}`, externalPath: `/job/${prefix}/Job_${i}` }));
+    return offset === 0 ? { total: 40, jobPostings: rows('First') } : secondPage(rows);
+  };
+  const laterZero = await workday.fetch({ name: 'LaterZero', careers_url: 'https://laterzero.wd5.myworkdayjobs.com/careers' },
+    mkWorkdayCtx(mkPaged((rows) => ({ total: 0, jobPostings: rows('Second') }))));
+  if (laterZero.length === 40 && providerCoverage(laterZero) === null) {
+    pass('workday accepts later pages that report total=0 with postings');
+  } else {
+    fail(`workday later total=0 page mismatch: ${JSON.stringify({ jobs: laterZero.length, coverage: providerCoverage(laterZero) })}`);
+  }
+  let firstZeroRejected = false;
+  try {
+    await workday.fetch({ name: 'FirstZero', careers_url: 'https://firstzero.wd5.myworkdayjobs.com/careers' },
+      mkWorkdayCtx(async () => ({ total: 0, jobPostings: [{ title: 'Zero', externalPath: '/job/Zero/Job_1' }] })));
+  } catch { firstZeroRejected = true; }
+  if (firstZeroRejected) {
+    pass('workday still rejects first page with postings and total=0');
+  } else {
+    fail('workday accepted first page with postings and total=0');
+  }
+  const laterEmptyZero = await workday.fetch({ name: 'LaterEmptyZero', careers_url: 'https://lateremptyzero.wd5.myworkdayjobs.com/careers' },
+    mkWorkdayCtx(mkPaged(() => ({ total: 0, jobPostings: [] }))));
+  if (laterEmptyZero.length === 20 && providerCoverage(laterEmptyZero)?.code === 'invalid_page') {
+    pass('workday fails closed on an empty later page with total=0 while rows remain');
+  } else {
+    fail(`workday empty later total=0 mismatch: ${JSON.stringify({ jobs: laterEmptyZero.length, coverage: providerCoverage(laterEmptyZero) })}`);
+  }
+  const shrunk = await workday.fetch({ name: 'Shrunk', careers_url: 'https://shrunk.wd5.myworkdayjobs.com/careers' },
+    mkWorkdayCtx(mkPaged(() => ({ total: 20, jobPostings: [] }))));
+  if (shrunk.length === 20 && providerCoverage(shrunk) === null) {
+    pass('workday completes cleanly when a later empty page reports a shrunken positive total');
+  } else {
+    fail(`workday shrinkage mismatch: ${JSON.stringify({ jobs: shrunk.length, coverage: providerCoverage(shrunk) })}`);
+  }
   const emptyBoard = await workday.fetch({ name: 'Empty', careers_url: 'https://empty.wd5.myworkdayjobs.com/careers' }, mkWorkdayCtx(async () => ({ total: 0, jobPostings: [] })));
   let deadBoardRejected = false;
   try {

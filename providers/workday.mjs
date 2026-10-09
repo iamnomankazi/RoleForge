@@ -326,7 +326,7 @@ export function parseWorkdayResponse(json, entry) {
   return jobs;
 }
 
-function validateWorkdayPage(json, entry, offset = 0) {
+function validateWorkdayPage(json, entry, offset = 0, authoritativeTotal = null) {
   if (!json || typeof json !== 'object' || Array.isArray(json)) {
     throw new Error('workday: malformed response (expected object)');
   }
@@ -337,11 +337,17 @@ function validateWorkdayPage(json, entry, offset = 0) {
     throw new Error('workday: malformed response (total must be a non-negative integer)');
   }
   const raw = requiredArray(json, 'jobPostings', 'workday');
-  if (raw.length > 0 && json.total === 0) {
+  // Only the first page's total is authoritative; later pages may report 0.
+  if (offset === 0 && raw.length > 0 && json.total === 0) {
     throw new Error('workday: malformed response (postings were returned with total=0)');
   }
-  if (raw.length === 0 && json.total > offset) {
-    throw new Error(`workday: malformed response (empty page at offset ${offset} while total is ${json.total})`);
+  // An empty page reporting a positive total uses it (board shrinkage); a zero or
+  // missing total falls back to the first-page total so truncation fails closed.
+  const emptyPageTotal = Number.isSafeInteger(json.total) && json.total > 0
+    ? json.total
+    : (Number.isSafeInteger(authoritativeTotal) ? authoritativeTotal : json.total);
+  if (raw.length === 0 && emptyPageTotal > offset) {
+    throw new Error(`workday: malformed response (empty page at offset ${offset} while total is ${emptyPageTotal})`);
   }
   return requireUsableRows(raw, parseWorkdayResponse(json, entry), 'workday');
 }
@@ -606,7 +612,7 @@ const provider = {
         let pageJobs;
         try {
           payload = payload && typeof payload === 'object' ? payload : {};
-          pageJobs = validateWorkdayPage(payload, entry, page * PAGE_SIZE);
+          pageJobs = validateWorkdayPage(payload, entry, page * PAGE_SIZE, plan.total);
         } catch (error) {
           stopReason = 'invalid-page';
           console.error(`⚠️  workday: ${entry.name} stopped at page ${page + 1} after an invalid response: ${error.message}`);
