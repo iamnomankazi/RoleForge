@@ -235,7 +235,6 @@ const SYSTEM_PATHS = [
   'reply-matcher.test.mjs',
   'reply-watch.mjs',
   'batch/batch-prompt.md',
-  'batch/batch-runner.sh',
   'batch/README.md',
   'dashboard/',
   'templates/',

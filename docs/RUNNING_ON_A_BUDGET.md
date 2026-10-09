@@ -109,21 +109,12 @@ Running 32B or 70B models locally requires substantial system resources:
 
 To prevent unnecessary API costs or hitting rate limits, implement the following practices:
 
-1. **Use the Batch Limit Flag**:
-   Instead of manually splitting `batch/batch-input.tsv`, use the `--limit <N>` flag to process only a small capped number of offers (e.g. 5-10) in a single run. This lets you inspect the output quality before committing to a larger run:
-   ```bash
-   ./batch/batch-runner.sh --limit 5
-   ```
-2. **Use the Dry Run Flag**:
-   Always run a dry run first to verify which offers will be processed:
-   ```bash
-   ./batch/batch-runner.sh --dry-run
-   ```
+1. **Plan Small Batches**:
+   With Hybrid Workflow, start with 5–10 offers and one Codex worker job per offer to inspect output quality before expanding the run.
+2. **Preview and Reserve Jobs**:
+   Review the selected URLs, then reserve report numbers with `node reserve-report-num.mjs --count N` before starting workers.
 3. **Resume Interrupted Runs**:
-   If a batch run is interrupted by a rate limit or network error, do not restart from scratch. Use the `--resume-paused` flag to continue from where it left off, skipping completed jobs and preventing wasted tokens:
-   ```bash
-   ./batch/batch-runner.sh --resume-paused
-   ```
+   Hybrid Workflow owns retries and resume. Keep completed artifacts and retry only unfinished jobs. Integrate worker TSVs into `batch/tracker-additions/`, then run `node merge-tracker.mjs`. See [batch/README.md](../batch/README.md).
 4. **Use `--verify` on Scans**:
    When running job board scans, use the liveness verifier to filter out expired postings before they enter your pipeline. This prevents wasting LLM tokens evaluating closed jobs:
    ```bash

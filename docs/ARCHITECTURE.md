@@ -12,7 +12,7 @@
             │                  │                       │
      ┌──────▼──────┐   ┌──────▼──────┐   ┌───────────▼────────┐
      │ Single Eval  │   │ Portal Scan │   │   Batch Process    │
-     │ (auto-pipe)  │   │  (scan.md)  │   │   (batch-runner)   │
+     │ (auto-pipe)  │   │  (scan.md)  │   │ (Hybrid Workflow) │
      └──────┬──────┘   └──────┬──────┘   └───────────┬────────┘
             │                  │                       │
             │           ┌──────▼──────┐          ┌────▼─────┐
@@ -56,19 +56,16 @@
 The batch system processes multiple offers in parallel:
 
 ```
-batch-input.tsv    →  batch-runner.sh  →  N × headless CLI workers
-(id, url, source)     (orchestrator)       (self-contained prompt)
-                           │
-                    batch-state.tsv
-                    (tracks progress)
+batch-input.tsv    →  Hybrid Workflow  →  N × Codex worker worktrees
+(id, url, source)     (Opus session)       (one offer per worker)
 ```
 
-Each worker is a headless AI CLI instance — the bundled `batch-runner.sh` supports multiple CLIs via the `--cli` flag (`--cli claude` or `--cli opencode`). See the Headless / Batch Mode table in `AGENTS.md`. Workers produce:
+An Opus session plans and integrates the batch; each Codex worker evaluates one offer in an isolated git worktree. Reserve report numbers first with `node reserve-report-num.mjs --count N`. Workers produce:
 - Report .md
 - PDF
 - Tracker TSV line
 
-The orchestrator manages parallelism, state, retries, and resume.
+Hybrid Workflow manages parallelism, state, retries, and resume. Integrate worker artifacts and tracker TSVs into the main workspace, then run `node merge-tracker.mjs`. See `batch/README.md`.
 
 ## Data Flow
 

@@ -14,7 +14,7 @@ Windows does not create symlinks by default, so Git checks out the CLI skill ent
 
 ## 3. How do I avoid hitting token or rate limits during a batch run?
 
-Pass `--limit <N>` to `batch-runner.sh` to cap the number of offers processed in a single run (e.g. `./batch/batch-runner.sh --limit 5`) — this lets you inspect output quality before committing to a larger run. If a run is interrupted mid-way by a rate limit or network error, do not restart from scratch; use `./batch/batch-runner.sh --resume-paused` to skip already-completed jobs and pick up where you left off, avoiding wasted tokens on work that finished successfully.
+Plan a small batch through Hybrid Workflow (for example, five offers) to inspect output quality before expanding it. Use one Codex worker job per offer and reserve report numbers first with `node reserve-report-num.mjs --count N`. After interruption, review completed artifacts and resume only unfinished jobs; integrate tracker TSVs from `batch/tracker-additions/` and run `node merge-tracker.mjs`. See [batch/README.md](../batch/README.md).
 
 ## 4. Can I run career-ops on a cheaper or local model?
 

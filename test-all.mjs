@@ -26,10 +26,10 @@
 
 import { execSync, execFileSync, spawn } from 'child_process';
 import { readFileSync, existsSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, statSync, unlinkSync, realpathSync, symlinkSync } from 'fs';
-import { join, dirname, delimiter } from 'path';
+import { join, dirname } from 'path';
 import { tmpdir } from 'os';
 import { fileURLToPath, pathToFileURL } from 'url';
-import { pass, fail, warn, run, formatRunFailure, fileExists, finish, ROOT, QUICK, NODE, getBash, toBashPath } from './tests/helpers.mjs';
+import { pass, fail, warn, run, formatRunFailure, fileExists, finish, ROOT, QUICK, NODE } from './tests/helpers.mjs';
 import { validateDiscoveredTestSources, parseTapSummary, discoveredRunFailed, collectChildOutput } from './test-runner-core.mjs';
 
 /**
@@ -584,7 +584,7 @@ console.log('\n5. Data contract validation');
 
 // Check system files exist
 const systemFiles = [
-  'CLAUDE.md', 'CODEX.md', 'OPENCODE.md', 'VERSION', 'DATA_CONTRACT.md', 'docs/CODEX.md',
+  'AGENTS.md', 'CLAUDE.md', 'CODEX.md', 'OPENCODE.md', 'VERSION', 'DATA_CONTRACT.md', 'docs/CODEX.md',
   'modes/_shared.md', 'modes/_profile.template.md',
   'modes/oferta.md', 'modes/pdf.md', 'modes/scan.md',
   'modes/heuristics/recruiter-side.md',
@@ -617,53 +617,6 @@ for (const f of userFiles) {
   } else {
     fail(`User file IS tracked (should be gitignored): ${f}`);
   }
-}
-
-const batchRunnerSource = readFile('batch/batch-runner.sh');
-const minScoreSkipIndex = batchRunnerSource.indexOf('update_state "$id" "$url" "skipped"');
-const minScoreReturnIndex = batchRunnerSource.indexOf('return 0', minScoreSkipIndex);
-const completedStateIndex = batchRunnerSource.indexOf('update_state "$id" "$url" "completed"', minScoreSkipIndex);
-if (
-  minScoreSkipIndex !== -1 &&
-  minScoreReturnIndex !== -1 &&
-  completedStateIndex !== -1 &&
-  minScoreSkipIndex < minScoreReturnIndex &&
-  minScoreReturnIndex < completedStateIndex
-) {
-  pass('Batch min-score gate returns before completed state update');
-} else {
-  fail('Batch min-score gate can fall through to completed state update');
-}
-
-if (/if \[\[ "\$status" == "completed" \|\| "\$status" == "skipped" \]\]/.test(batchRunnerSource)) {
-  pass('Batch resume treats min-score skipped offers as terminal');
-} else {
-  fail('Batch resume can reprocess min-score skipped offers');
-}
-
-if (/local total=0 completed=0 skipped=0 failed=0 pending=0/.test(batchRunnerSource) &&
-    /skipped\) skipped=\$\(\(skipped \+ 1\)\)/.test(batchRunnerSource) &&
-    /Completed: \$completed \| Skipped: \$skipped \| Failed: \$failed \| Pending: \$pending/.test(batchRunnerSource)) {
-  pass('Batch summary reports skipped offers separately from pending');
-} else {
-  fail('Batch summary can misreport skipped offers as pending');
-}
-
-if (!/\bbc\b/.test(batchRunnerSource)) {
-  pass('Batch runner does not depend on bc for score arithmetic');
-} else {
-  fail('Batch runner still depends on bc for score arithmetic');
-}
-
-if (
-  !/awk "BEGIN\{[^"]*\$MIN_SCORE/.test(batchRunnerSource) &&
-  !/awk "BEGIN\{[^"]*\$score/.test(batchRunnerSource) &&
-  !/awk "BEGIN\{[^"]*\$sscore/.test(batchRunnerSource) &&
-  /awk -v score="\$score" -v min="\$MIN_SCORE"/.test(batchRunnerSource)
-) {
-  pass('Batch runner passes score values to awk via -v');
-} else {
-  fail('Batch runner interpolates score values into awk programs');
 }
 
 // ── 6. PERSONAL DATA LEAK CHECK ─────────────────────────────────
@@ -726,7 +679,7 @@ console.log('\n7. Absolute path check');
 const absPathResult = run('git', ['grep', '-n', '/Users/', '--', '*.mjs', '*.sh', '*.md', '*.go', '*.yml']);
 const unexpectedAbsPaths = (absPathResult || '').split('\n').filter(Boolean).filter((line) => {
   const file = line.split(':')[0].replace(/\\/g, '/');
-  return !['README.md', 'LICENSE', 'CLAUDE.md', 'test-all.mjs'].includes(file);
+  return !['README.md', 'LICENSE', 'AGENTS.md', 'CLAUDE.md', 'test-all.mjs'].includes(file);
 });
 if (unexpectedAbsPaths.length === 0) {
   pass('No absolute paths in code files');
@@ -1322,13 +1275,9 @@ if (
   fail('router skill missing offer-prep registration (or offer-prep leaked into the subagent-delegated section)');
 }
 
-const claudeMdDoc = readFile('CLAUDE.md');
 const agentsMdDoc = readFile('AGENTS.md');
-if (
-  claudeMdDoc.includes('`offer-prep`') &&
-  agentsMdDoc.includes('`offer-prep`')
-) {
-  pass('CLAUDE.md and AGENTS.md document the offer-prep mode');
+if (agentsMdDoc.includes('`offer-prep`')) {
+  pass('AGENTS.md documents the offer-prep mode');
 } else {
   fail('agent docs missing offer-prep mode row');
 }
@@ -2207,7 +2156,7 @@ console.log('\n11. AGENTS.md integrity');
 
 const agents = readFile('AGENTS.md');
 const requiredSections = [
-  'Data Contract', 'Update Check', 'Ethical Use',
+  'Data Contract', 'Ethical Use',
   'Offer Verification', 'Canonical States', 'TSV Format',
   'First Run', 'Onboarding',
 ];
@@ -2246,6 +2195,13 @@ if (!fileExists('GEMINI.md')) {
   } else {
     pass('GEMINI.md is a no-op context guard for Antigravity');
   }
+}
+
+const claudeWrapper = fileExists('CLAUDE.md') ? readFile('CLAUDE.md') : '';
+if (/^@(?:\.\/)?AGENTS\.md/m.test(claudeWrapper)) {
+  pass('CLAUDE.md imports AGENTS.md');
+} else {
+  fail('CLAUDE.md does not import AGENTS.md');
 }
 
 const codexWrapper = fileExists('CODEX.md') ? readFile('CODEX.md') : '';
@@ -4660,18 +4616,16 @@ try {
   }
   rmSync(autoCopy, { recursive: true, force: true });
 
-  const claudeDoc = readFile('CLAUDE.md');
   const agentsDoc = readFile('AGENTS.md');
   if (
-    /node\s+doctor\.mjs\s+--json/.test(claudeDoc) &&
-    /"warnings"\s*:\s*\[\.\.\.\]/.test(claudeDoc) &&
-    /"autoCopied"\s*:\s*\[\.\.\.\]/.test(claudeDoc) &&
+    /node\s+doctor\.mjs\s+--json/.test(agentsDoc) &&
+    /"warnings"\s*:\s*\[\.\.\.\]/.test(agentsDoc) &&
     /"autoCopied"\s*:\s*\[\.\.\.\]/.test(agentsDoc) &&
-    !/Does\s+`cv\.md`\s+exist\?/i.test(claudeDoc)
+    !/Does\s+`cv\.md`\s+exist\?/i.test(agentsDoc)
   ) {
-    pass('CLAUDE.md and AGENTS.md delegate onboarding state and autoCopied to doctor --json');
+    pass('AGENTS.md delegates onboarding state and autoCopied to doctor --json');
   } else {
-    fail('CLAUDE.md or AGENTS.md still duplicates onboarding prerequisite checks or misses autoCopied doc');
+    fail('AGENTS.md still duplicates onboarding prerequisite checks or misses autoCopied doc');
   }
 } catch (e) {
   fail(`Cold-start trigger test crashed: ${e.message}`);
@@ -4912,122 +4866,6 @@ try {
   }
 } catch (e) {
   fail(`URL rediscovery tests crashed: ${e.message}`);
-}
-
-// ── 13. BATCH RATE-LIMIT PAUSE ──────────────────────────────────
-
-console.log('\n13. Batch rate-limit pause');
-
-try {
-  const tmp = mkdtempSync(join(tmpdir(), 'co-batch-rate-'));
-  const batchDir = join(tmp, 'batch');
-  const fakeBin = join(tmp, 'bin');
-  mkdirSync(batchDir, { recursive: true });
-  mkdirSync(join(tmp, 'reports'), { recursive: true });
-  mkdirSync(join(tmp, 'data'), { recursive: true });
-  mkdirSync(fakeBin, { recursive: true });
-
-  writeFileSync(join(batchDir, 'batch-runner.sh'), readFileSync(join(ROOT, 'batch/batch-runner.sh'), 'utf-8').replace(/\r\n/g, '\n'));
-  if (process.platform === 'win32') {
-    try { execFileSync(getBash(), ['-c', 'chmod +x batch/batch-runner.sh'], { cwd: tmp }); } catch {}
-  } else {
-    execFileSync('chmod', ['+x', join(batchDir, 'batch-runner.sh')]);
-  }
-  writeFileSync(join(tmp, 'merge-tracker.mjs'), 'console.log("merge fixture");\n');
-  writeFileSync(join(tmp, 'verify-pipeline.mjs'), 'console.log("verify fixture");\n');
-  writeFileSync(join(batchDir, 'batch-prompt.md'), 'URL={{URL}}\nJD={{JD_FILE}}\nREPORT={{REPORT_NUM}}\n');
-  writeFileSync(join(batchDir, 'batch-input.tsv'), [
-    'id\turl\tsource\tnotes',
-    '1\thttps://example.com/one\tfixture\t-',
-    '2\thttps://example.com/two\tfixture\t-',
-    '3\thttps://example.com/three\tfixture\t-',
-  ].join('\n') + '\n');
-  writeFileSync(join(fakeBin, 'claude'), [
-    '#!/usr/bin/env bash',
-    'echo "You\\x27ve hit your session limit · resets 12:30pm (Asia/Taipei)"',
-    'exit 1',
-  ].join('\n') + '\n');
-  if (process.platform === 'win32') {
-    try { execFileSync(getBash(), ['-c', 'chmod +x bin/claude'], { cwd: tmp }); } catch {}
-  } else {
-    execFileSync('chmod', ['+x', join(fakeBin, 'claude')]);
-  }
-
-  const env = { ...process.env, PATH: `${fakeBin}${delimiter}${process.env.PATH}` };
-  const out = run(getBash(), [toBashPath(join(batchDir, 'batch-runner.sh')), '--parallel', '1', '--max-retries', '3', '--rate-limit-sleep', '0'], {
-    cwd: tmp,
-    env,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  }) || '';
-  const state = readFileSync(join(batchDir, 'batch-state.tsv'), 'utf-8').trim().split('\n');
-  const first = state[1]?.split('\t') || [];
-
-  if (state.length === 2 && first[0] === '1' && first[2] === 'paused_rate_limit' && first[8] === '0') {
-    pass('session-limit pauses batch without consuming retry budget or scheduling more jobs');
-  } else {
-    fail(`session-limit pause wrong: lines=${state.length}, first=${JSON.stringify(first)}, out=${JSON.stringify(out.slice(-240))}`);
-  }
-
-  writeFileSync(join(batchDir, 'batch-state.tsv'), [
-    'id\turl\tstatus\tstarted_at\tcompleted_at\treport_num\tscore\terror\tretries',
-    '1\thttps://example.com/one\tpaused_rate_limit\t2026-01-01T00:00:00Z\t2026-01-01T00:00:01Z\t001\t-\tsession-limit; paused\t0',
-    '2\thttps://example.com/two\tfailed\t2026-01-01T00:00:00Z\t2026-01-01T00:00:01Z\t002\t-\tworker-crash\t1',
-  ].join('\n') + '\n');
-  const dry = run(getBash(), [toBashPath(join(batchDir, 'batch-runner.sh')), '--resume-paused', '--dry-run'], {
-    cwd: tmp,
-    env,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  }) || '';
-  if (dry.includes('#1: https://example.com/one') && !dry.includes('#2: https://example.com/two')) {
-    pass('--resume-paused dry-run selects paused jobs only');
-  } else {
-    fail(`--resume-paused selection wrong: ${dry}`);
-  }
-
-  rmSync(join(batchDir, 'batch-input.tsv'), { force: true });
-  rmSync(join(batchDir, 'batch-prompt.md'), { force: true });
-  rmSync(join(fakeBin, 'claude'), { force: true });
-  writeFileSync(join(batchDir, 'batch-state.tsv'), [
-    'id\turl\tstatus\tstarted_at\tcompleted_at\treport_num\tscore\terror\tretries',
-    '1\thttps://example.com/one\tcompleted\t2026-01-01T00:00:00Z\t2026-01-01T00:00:01Z\t001\t4.5\t-\t0',
-    '2\thttps://example.com/two\tcompleted\t2026-01-01T00:00:00Z\t2026-01-01T00:00:01Z\t002\tbad);system("oops")\t-\t0',
-    '3\thttps://example.com/three\tskipped\t2026-01-01T00:00:00Z\t2026-01-01T00:00:01Z\t003\t3.5\tbelow-min-score\t0',
-  ].join('\n') + '\n');
-  const statusOnly = run(getBash(), [toBashPath(join(batchDir, 'batch-runner.sh')), '--status'], {
-    cwd: tmp,
-    env,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  }) || '';
-  if (statusOnly.includes('Average score: 4.5/5 (1 scored)') && statusOnly.includes('bad);system("oops")')) {
-    pass('--status reads existing state without full batch prerequisites');
-  } else {
-    fail(`--status prerequisite/score handling wrong: ${statusOnly}`);
-  }
-
-  try { rmSync(tmp, { recursive: true, force: true }); } catch {}
-} catch (e) {
-  fail(`Batch rate-limit pause test crashed: ${e.message}`);
-}
-
-// ── 15. BATCH RUNNER MCP ISOLATION (#506) ───────────────────────
-
-console.log('\n15. Batch runner MCP isolation');
-
-try {
-  const batchRunner = readFileSync(join(ROOT, 'batch', 'batch-runner.sh'), 'utf-8');
-  // Workers must be spawned with --strict-mcp-config so they don't inherit the
-  // parent session's MCP servers (e.g. Playwright) and deadlock fighting over a
-  // single browser when --parallel > 1 (issue #506).
-  const claudeArgsLine = batchRunner
-    .split('\n')
-    .find(l => l.includes('claude_args=('));
-  if (claudeArgsLine && claudeArgsLine.includes('--strict-mcp-config')) {
-    pass('batch workers spawn with --strict-mcp-config (no inherited MCP)');
-  } else {
-    fail('batch-runner.sh worker spawn missing --strict-mcp-config (issue #506 regression)');
-  }
-} catch (e) {
-  fail(`Batch runner MCP isolation test crashed: ${e.message}`);
 }
 
 // ── 16. UPDATE-SYSTEM SEMVER PARSING (#923) ─────────────────────
@@ -6679,14 +6517,8 @@ for (const skillPath of ['.claude/skills/career-ops/SKILL.md', '.agents/skills/c
 }
 
 try {
-  const claudeMdDoc = readFile('CLAUDE.md');
   const agentsMdDoc = readFile('AGENTS.md');
   const titlesRow = '| Wants to broaden the search with adjacent job titles suggested from the CV | `titles` |';
-  if (claudeMdDoc.includes('* `titles` —') && claudeMdDoc.includes(titlesRow)) {
-    pass('CLAUDE.md registers the titles subcommand and Skill Modes row');
-  } else {
-    fail('CLAUDE.md missing the titles subcommand bullet or Skill Modes row');
-  }
   if (agentsMdDoc.includes(titlesRow)) {
     pass('AGENTS.md registers the titles Skill Modes row');
   } else {

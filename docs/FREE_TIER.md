@@ -54,17 +54,9 @@ a rate-limit error; career-ops will pause and suggest retrying tomorrow.
 
 ## Batch Mode Behavior
 
-- `batch-runner.sh` spawns `claude -p` workers by default (Claude Code
-  specific). To use Antigravity CLI workers instead, invoke them manually:
+Batch evaluation uses the external Hybrid Workflow orchestrator: an Opus session plans and integrates, with one Codex worker job per offer in an isolated git worktree. This workflow requires access to those agents; the Antigravity free tier alone does not provide them. See [batch/README.md](../batch/README.md) for report-number reservation and tracker merging.
 
-  ```bash
-  agy -p "evaluate <URL>"
-  ```
-
-- With free-tier limits, keep `--parallel 1` to avoid burning through
-  your daily quota on parallel requests.
-- Large batches (50+ offers) will likely span multiple days. Use
-  `--start-from` to resume where you left off.
+For individual evaluations with Antigravity, use `agy -p "evaluate <URL>"`. Keep runs small within your quota and retain completed reports when resuming after a limit reset.
 
 ## What Works Without Paying
 
