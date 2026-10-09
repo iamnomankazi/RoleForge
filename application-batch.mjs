@@ -35,6 +35,7 @@ import {
 } from './application-integrity.mjs';
 import { GENERIC_APPLICATION_CLASSIFICATION_SEMANTICS } from './application-reasoning.mjs';
 import { normalizeTextKey, parseTrackerRow, resolveColumns } from './tracker-parse.mjs';
+import { loadCanonicalStates, resolveCanonicalState } from './tracker-utils.mjs';
 
 export const ROOT = dirname(fileURLToPath(import.meta.url));
 export const APPLICATION_BATCH_MANIFEST_SCHEMA_VERSION = 2;
@@ -380,11 +381,13 @@ function assertNoDuplicateApplications(root, selected) {
   };
   const trackerPath = join(resolve(root), 'data', 'applications.md');
   if (existsSync(trackerPath)) {
+    const states = loadCanonicalStates(new URL('./templates/states.yml', import.meta.url));
     const lines = readFileSync(trackerPath, 'utf8').split('\n');
     const columns = resolveColumns(lines);
     for (const line of lines) {
       const row = parseTrackerRow(line, columns);
       if (!row) continue;
+      if (resolveCanonicalState(row.status, states) === 'Evaluated') continue;
       for (const candidate of selected) {
         if (matches(candidate, row)) refuse(candidate, `tracker row #${row.num} (${row.status}) in ${trackerPath}`);
       }

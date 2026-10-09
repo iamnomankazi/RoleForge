@@ -38,7 +38,11 @@ function withFixture(callback) {
   }
 }
 
-for (const status of ['Applied', 'Evaluated', 'Rejected', 'Discarded', 'Offer', 'Unknown']) {
+for (const status of [
+  'Applied', 'Responded', 'Interview', 'Offer', 'Rejected', 'Discarded', 'SKIP', 'Hired', 'Unknown',
+  'aPpLiEd', '**APPLIED**', 'sent', 'respondido', 'entrevista', 'oferta',
+  'RECHAZADA', 'descartada', 'no_aplicar', 'No Aplicar', 'monitor',
+]) {
   test(`tracker ${status} rows refuse duplicate creation regardless of submission evidence`, () => withFixture((f) => {
     f.writeTracker(status);
     const before = readFileSync(f.trackerPath, 'utf8');
@@ -50,6 +54,17 @@ for (const status of ['Applied', 'Evaluated', 'Rejected', 'Discarded', 'Offer', 
     });
     assert.equal(existsSync(join(f.root, 'output', 'application-batches', 'refused')), false);
     assert.equal(readFileSync(f.trackerPath, 'utf8'), before);
+  }));
+}
+
+for (const status of ['Evaluated', 'eVaLuAtEd', '**Evaluated**', 'EVALUADA']) {
+  test(`tracker ${status} rows allow batch creation without an override`, () => withFixture((f) => {
+    f.writeTracker(status);
+    const before = readFileSync(f.trackerPath, 'utf8');
+    const created = f.create('evaluated-batch');
+    assert.equal(created.manifest.duplicateOverride, undefined);
+    assert.equal(readFileSync(f.trackerPath, 'utf8'), before);
+    assert.throws(() => f.create('duplicate-evaluated-batch'), /application batch evaluated-batch.*--allow-duplicate/);
   }));
 }
 
@@ -140,6 +155,8 @@ test('CLI refuses duplicates, requires an override value, and persists the expli
   const script = readFileSync(sourceUrl, 'utf8').replace(/from '(\.\/[^']+)'/g, (_, path) => `from '${new URL(path, sourceUrl).href}'`);
   const entry = join(f.root, 'application-batch.mjs');
   writeFileSync(entry, script);
+  mkdirSync(join(f.root, 'templates'));
+  writeFileSync(join(f.root, 'templates', 'states.yml'), readFileSync(new URL('../templates/states.yml', import.meta.url)));
   const args = ['create', '--source-run', f.runId, '--batch-id', 'cli-batch', '--url', f.candidate.url];
   const run = (extra = []) => spawnSync(process.execPath, [entry, ...args, ...extra], { cwd: f.root, encoding: 'utf8' });
   const refused = run();

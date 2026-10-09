@@ -117,6 +117,7 @@ export function importLegacyQueue({
   rowNumbers = [],
   selectedUrls = [],
   selectedCandidateIds = [],
+  allowDuplicateReason = null,
   now = new Date(),
 } = {}) {
   if (!queueFile) throw new Error('Explicit --queue-file is required; no global queue fallback is available');
@@ -154,6 +155,7 @@ export function importLegacyQueue({
     batchId,
     selectedCandidateIds: candidateIds,
     legacyImport,
+    allowDuplicateReason,
     now,
   });
 }

@@ -92,7 +92,8 @@ test('rank changes cannot affect explicit URL selection', () => usingFixture((f)
   const first = importLegacyQueue({ root: f.root, queueFile: f.queue, sourceRunId: f.runId, batchId: 'rank-a', selectedUrls: [selectedUrl] });
   const changed = readFileSync(f.queue, 'utf8').replace('1,IMC', '500,IMC');
   writeFileSync(f.queue, changed);
-  const second = importLegacyQueue({ root: f.root, queueFile: f.queue, sourceRunId: f.runId, batchId: 'rank-b', selectedUrls: [selectedUrl] });
+  const second = importLegacyQueue({ root: f.root, queueFile: f.queue, sourceRunId: f.runId, batchId: 'rank-b', selectedUrls: [selectedUrl],
+    allowDuplicateReason: 'Re-import the same candidate to compare selection after a rank change.' });
   assert.equal(first.manifest.candidates[0].candidate_id, second.manifest.candidates[0].candidate_id);
 }));
 
