@@ -161,6 +161,7 @@ const SYSTEM_PATHS = [
   'application-shared-browser.mjs',
   'application-submission.mjs',
   'candidate-identity.mjs',
+  'candidate-liveness.mjs',
   'legacy-application-guard.mjs',
   'legacy-queue-importer.mjs',
   'merge-scan-results.mjs',
