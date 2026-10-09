@@ -13,10 +13,17 @@
  * Requires: tectonic (preferred, brew install tectonic) or pdflatex (MiKTeX / TeX Live) on PATH.
  */
 
-import { readFile, writeFile, stat, copyFile, rm } from 'fs/promises';
+import { readFile, writeFile, stat, copyFile, rm, mkdtemp } from 'fs/promises';
 import { resolve, basename, dirname, join } from 'path';
 import { execFileSync } from 'child_process';
 import { existsSync, mkdirSync } from 'fs';
+import { constants } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
+import { assertWritableOutput } from './output-safety.mjs';
+
+const PROJECT_ROOT = dirname(fileURLToPath(import.meta.url));
+const COPYFILE_EXCL = constants.COPYFILE_EXCL;
 
 // The template emits 4 sections (Education, Work Experience, Personal
 // Projects, Technical Skills). We count \section{} blocks rather than match
@@ -46,6 +53,17 @@ async function main() {
   }
 
   const absPath = resolve(inputPath);
+  const texDir = dirname(absPath);
+  const texBase = basename(absPath, '.tex');
+  const defaultPdf = join(texDir, `${texBase}.pdf`);
+  let targetPdf;
+  try {
+    targetPdf = assertWritableOutput(outputPath ? resolve(outputPath) : defaultPdf, { root: PROJECT_ROOT });
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
+
   let content;
   try {
     content = await readFile(absPath, 'utf-8');
@@ -131,17 +149,6 @@ async function main() {
   }
 
   // --- Compile .tex → .pdf ---
-  const texDir = dirname(absPath);
-  const texBase = basename(absPath, '.tex');
-  const defaultPdf = join(texDir, `${texBase}.pdf`);
-  const targetPdf = outputPath ? resolve(outputPath) : defaultPdf;
-
-  // Ensure output directory exists
-  const targetDir = dirname(targetPdf);
-  if (!existsSync(targetDir)) {
-    mkdirSync(targetDir, { recursive: true });
-  }
-
   // Detect available engine: prefer tectonic, fall back to pdflatex
   let engine = null;
   for (const candidate of ['tectonic', 'pdflatex']) {
@@ -161,20 +168,29 @@ async function main() {
 
   report.engine = engine;
 
-  // For tectonic: strip pdflatex-only primitives that cause crashes
-  let compilePath = absPath;
-  if (engine === 'tectonic') {
-    const patched = content
-      .replace(/\\pdfgentounicode\s*=\s*\d+[^\n]*\n?/g, '')
-      .replace(/\\input\{glyphtounicode\}[^\n]*\n?/g, '');
-    compilePath = join(texDir, `${texBase}._tectonic.tex`);
-    await writeFile(compilePath, patched, 'utf-8');
+  // Ensure the final output directory exists after its path has been checked.
+  const targetDir = dirname(targetPdf);
+  if (!existsSync(targetDir)) {
+    mkdirSync(targetDir, { recursive: true });
   }
 
+  // Compile in a fresh temporary directory so TeX auxiliary files cannot
+  // overwrite inputs or create side effects beside an approved CV source.
+  const compileDir = await mkdtemp(join(tmpdir(), 'roleforge-latex-'));
+  const compileBase = engine === 'tectonic' ? `${texBase}._tectonic` : texBase;
+  const compilePath = engine === 'tectonic' ? join(compileDir, `${compileBase}.tex`) : absPath;
+  const compiledPdf = join(compileDir, `${compileBase}.pdf`);
   try {
     if (engine === 'tectonic') {
-      // Tectonic handles multi-pass automatically; --outdir sets output location
-      execFileSync('tectonic', ['--outdir', texDir, compilePath], {
+      const patched = content
+        .replace(/\\pdfgentounicode\s*=\s*\d+[^\n]*\n?/g, '')
+        .replace(/\\input\{glyphtounicode\}[^\n]*\n?/g, '');
+      await writeFile(compilePath, patched, { encoding: 'utf-8', flag: 'wx' });
+    }
+
+    if (engine === 'tectonic') {
+      // Tectonic handles multi-pass automatically; --outdir isolates compiler output.
+      execFileSync('tectonic', ['--outdir', compileDir, compilePath], {
         cwd: texDir,
         stdio: 'pipe',
         timeout: 120_000,
@@ -184,7 +200,7 @@ async function main() {
         '-no-shell-escape',
         '-interaction=nonstopmode',
         '-halt-on-error',
-        `-output-directory=${texDir}`,
+        `-output-directory=${compileDir}`,
         absPath,
       ];
       // First pass
@@ -195,7 +211,7 @@ async function main() {
 
     report.compiled = true;
   } catch (err) {
-    const logPath = join(texDir, `${texBase}.log`);
+    const logPath = join(compileDir, `${compileBase}.log`);
     let latexError = err.message;
     try {
       const log = await readFile(logPath, 'utf-8');
@@ -209,18 +225,10 @@ async function main() {
     report.compileError = latexError;
   }
 
-  // Post-compile: move PDF and clean up (separate from compile errors)
+  // Post-compile: create the requested output exclusively.
   if (report.compiled) {
-    // Tectonic outputs PDF named after the patched temp file
-    const compileBase = basename(compilePath, '.tex');
-    const compiledPdf = join(texDir, `${compileBase}.pdf`);
-
     try {
-      await copyFile(compiledPdf, targetPdf);
-      if (resolve(compiledPdf) !== resolve(targetPdf)) {
-        await rm(compiledPdf).catch(() => {});
-      }
-
+      await copyFile(compiledPdf, targetPdf, COPYFILE_EXCL);
       const pdfStat = await stat(targetPdf);
       report.pdf = {
         path: targetPdf,
@@ -229,19 +237,12 @@ async function main() {
     } catch (err) {
       report.postCompileError = `Failed to finalize PDF: ${err.message}`;
     }
-
-    // Clean up auxiliary files and tectonic temp .tex (best-effort)
-    const auxExts = ['.aux', '.log', '.out', '.fls', '.fdb_latexmk', '.synctex.gz'];
-    for (const ext of auxExts) {
-      await rm(join(texDir, `${compileBase}${ext}`)).catch(() => {});
-    }
-    if (engine === 'tectonic') {
-      await rm(compilePath).catch(() => {});
-    }
   }
 
+  await rm(compileDir, { recursive: true, force: true }).catch(() => {});
+
   console.log(JSON.stringify(report, null, 2));
-  process.exit(report.compiled ? 0 : 1);
+  process.exit(report.compiled && !report.postCompileError ? 0 : 1);
 }
 
 main();

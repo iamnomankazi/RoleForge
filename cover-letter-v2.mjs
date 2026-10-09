@@ -420,7 +420,9 @@ export async function runCoverLetterV2(draft, {
   await mkdir(outputDir, { recursive: true });
   const reserved = [];
   try {
-    for (const path of Object.values(paths)) {
+    // The PDF renderer creates its own target exclusively, so only check it here.
+    if (existsSync(paths.pdf)) throw Object.assign(new Error('output exists'), { code: 'EEXIST' });
+    for (const path of [paths.text, paths.check]) {
       const handle = await open(path, 'wx');
       await handle.close();
       reserved.push(path);
@@ -437,6 +439,7 @@ export async function runCoverLetterV2(draft, {
   try {
     const renderer = renderHtmlToPdf || (await import('./generate-pdf.mjs')).renderHtmlToPdf;
     await renderer(buildHtml(draft), paths.pdf, { format: 'a4', recordManifest: false, baseDir: ROOT });
+    reserved.push(paths.pdf);
     const pdfBytes = await readFile(paths.pdf);
     const pdf = await PDFDocument.load(pdfBytes);
     const pageCount = pdf.getPageCount();

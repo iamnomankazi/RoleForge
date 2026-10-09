@@ -5,6 +5,8 @@ import { existsSync } from 'fs';
 import { resolve, dirname, basename, join } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
+import { randomUUID } from 'node:crypto';
+import { assertWritableOutput } from './output-safety.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEMPLATE_PATH = resolve(__dirname, 'templates', 'cv-template.tex');
@@ -120,7 +122,13 @@ async function main() {
   }
 
   const absInput = resolve(inputPath);
-  const absOutput = resolve(outputPath);
+  let absOutput;
+  try {
+    absOutput = assertWritableOutput(outputPath, { root: __dirname });
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
   const outDir = dirname(absOutput);
 
   if (!existsSync(absInput)) {
@@ -181,7 +189,7 @@ async function main() {
     mkdirSync(outDir, { recursive: true });
   }
 
-  await writeFile(absOutput, template, 'utf-8');
+  await writeFile(absOutput, template, { encoding: 'utf-8', flag: 'wx' });
 
   const fileInfo = await stat(absOutput);
   const sizeKB = (fileInfo.size / 1024).toFixed(1);
@@ -246,13 +254,14 @@ async function runSelfTest() {
     ],
   };
 
-  const testOutput = join(tmpdir(), 'build-cv-latex-test.tex');
+  const testId = randomUUID();
+  const testOutput = join(tmpdir(), `build-cv-latex-test-${testId}.tex`);
   const raw = JSON.stringify(sample, null, 2);
-  const tmpInput = join(tmpdir(), 'build-cv-latex-test-input.json');
-  await writeFile(tmpInput, raw, 'utf-8');
+  const tmpInput = join(tmpdir(), `build-cv-latex-test-input-${testId}.json`);
+  await writeFile(tmpInput, raw, { encoding: 'utf-8', flag: 'wx' });
 
   const absInput = resolve(tmpInput);
-  const absOutput = resolve(testOutput);
+  const absOutput = assertWritableOutput(testOutput, { root: __dirname });
 
   if (!existsSync(TEMPLATE_PATH)) {
     console.error(`Self-test failed: template not found at ${TEMPLATE_PATH}`);
@@ -299,7 +308,7 @@ async function runSelfTest() {
     mkdirSync(outDir, { recursive: true });
   }
 
-  await writeFile(absOutput, template, 'utf-8');
+  await writeFile(absOutput, template, { encoding: 'utf-8', flag: 'wx' });
 
   const fileInfo = await stat(absOutput);
   const sizeKB = (fileInfo.size / 1024).toFixed(1);

@@ -27,6 +27,7 @@ import { readFile } from 'fs/promises';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { randomUUID } from 'node:crypto';
+import { assertWritableOutput } from './output-safety.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PDF_PAGE_MARGIN = '0.6in';
@@ -327,6 +328,13 @@ async function generatePDF() {
     process.exit(1);
   }
 
+  try {
+    outputPath = assertWritableOutput(outputPath, { root: __dirname });
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
+
   // Validate format
   const validFormats = ['a4', 'letter'];
   if (!validFormats.includes(format)) {
@@ -421,6 +429,8 @@ export async function renderHtmlToPdf(html, outputPath, opts = {}) {
   const reportNum = opts.reportNum || '';
   const inputPath = opts.inputPath || '';
 
+  outputPath = assertWritableOutput(outputPath, { root: __dirname });
+
   mkdirSync(dirname(outputPath), { recursive: true });
 
   html = injectPrintPageCss(html, format);
@@ -429,8 +439,9 @@ export async function renderHtmlToPdf(html, outputPath, opts = {}) {
   // Write HTML to a temp file in baseDir so page.goto() gives a file://
   // origin that can load local images, fonts, and other resources.
   const tmpHtmlPath = resolve(baseDir, `.career-ops-render-${randomUUID()}.html`);
+  assertWritableOutput(tmpHtmlPath, { root: __dirname });
   const { writeFile, unlink } = await import('fs/promises');
-  await writeFile(tmpHtmlPath, html, 'utf-8');
+  await writeFile(tmpHtmlPath, html, { encoding: 'utf-8', flag: 'wx' });
 
   const browser = await chromium.launch({ headless: true });
   try {
@@ -457,7 +468,7 @@ export async function renderHtmlToPdf(html, outputPath, opts = {}) {
     });
 
     // Write PDF
-    await writeFile(outputPath, pdfBuffer);
+    await writeFile(outputPath, pdfBuffer, { flag: 'wx' });
 
     // Count pages (approximate from PDF structure)
     const pdfString = pdfBuffer.toString('latin1');

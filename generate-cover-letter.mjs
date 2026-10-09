@@ -17,6 +17,7 @@ import { readFileSync, existsSync, mkdirSync } from "fs";
 import { dirname, resolve, basename, join, relative, isAbsolute } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { parseArgs } from "util";
+import { assertWritableOutput } from './output-safety.mjs';
 
 const OUTPUT_ROOT = resolve("output");
 
@@ -28,19 +29,24 @@ export function safeOutputPath(raw) {
   if (/%20/i.test(filename) || !/\.pdf$/i.test(filename)) {
     throw new Error('Cover-letter filename must be a PDF filename and must not contain %20');
   }
-  return absolute;
+  return assertWritableOutput(absolute, { root: dirname(OUTPUT_ROOT) });
 }
 
-export function coverLetterFilename(company) {
-  const slug = String(company || 'company')
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 100)
-    .replace(/_+$/g, '') || 'company';
-  return `${slug}_cover_letter.pdf`;
+export function coverLetterFilename(company, roleTitle) {
+  const slugify = (value, fallback) => {
+    const slug = String(value || '')
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 100)
+      .replace(/_+$/g, '');
+    return slug || fallback;
+  };
+  const companySlug = slugify(company, 'company');
+  const roleSlug = roleTitle ? slugify(roleTitle, '') : '';
+  return `${companySlug}${roleSlug ? `_${roleSlug}` : ''}_cover_letter.pdf`;
 }
 
 function _require(obj, keys, context) {
@@ -196,8 +202,16 @@ Usage:
 
   const requestedOutput = args.out
     || payload.output_path
-    || join(OUTPUT_ROOT, coverLetterFilename(payload.letter?.company));
-  payload.output_path = safeOutputPath(requestedOutput);
+    || join(OUTPUT_ROOT, coverLetterFilename(
+      payload.letter?.company,
+      payload.letter?.role_title || payload.letter?.role || payload.role_title || payload.role,
+    ));
+  try {
+    payload.output_path = safeOutputPath(requestedOutput);
+  } catch (err) {
+    console.error(`ERROR generating cover letter PDF: ${err.message}`);
+    process.exit(1);
+  }
 
   if (!existsSync(OUTPUT_ROOT)) mkdirSync(OUTPUT_ROOT, { recursive: true });
   mkdirSync(dirname(resolve(payload.output_path)), { recursive: true });

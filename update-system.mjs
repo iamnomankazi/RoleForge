@@ -142,6 +142,7 @@ const SYSTEM_PATHS = [
   'lib/operational-cli.mjs',
   'generate-pdf.mjs',
   'generate-latex.mjs',
+  'output-safety.mjs',
   'archive-posting.mjs',
   'application-answers.mjs',
   '.gitattributes',
