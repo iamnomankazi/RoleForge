@@ -379,6 +379,31 @@ test('CV selection covers data, AI/ML, software/backend, and broad graduate role
     assert.equal(selectApprovedCv(profile, { title: 'Machine Learning Engineer' }, 'PyTorch computer vision model training').variant, 'ai_ml');
     assert.equal(selectApprovedCv(profile, { title: 'Backend Developer' }, 'Python Django REST APIs').variant, 'software_backend');
     assert.equal(selectApprovedCv(profile, { title: 'Graduate Technology Trainee' }, 'Python SQL machine learning software').variant, 'master');
+    assert.equal(profile.approvedCvs.frontend, undefined, 'optional variants are absent unless configured');
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('configured frontend and non-tech CVs are selectable; non-tech only on explicit recommendation', () => {
+  const f = fixture();
+  try {
+    for (const name of ['Frontend', 'Non Tech']) write(f.root, `output/cv-approved/Alex Example ${name} CV.pdf`, `%PDF-1.4 ${name}`);
+    const profilePath = join(f.root, 'config', 'profile.yml');
+    writeFileSync(profilePath, readFileSync(profilePath, 'utf8')
+      + '      frontend: output/cv-approved/Alex Example Frontend CV.pdf\n'
+      + '      non_tech: output/cv-approved/Alex Example Non Tech CV.pdf\n');
+    const profile = loadApplicationProfile(f.root);
+    assert.equal(selectApprovedCv(profile, { title: 'Frontend Developer' }, 'React TypeScript HTML/CSS interfaces').variant, 'frontend');
+    assert.equal(selectApprovedCv(profile, { title: 'Backend Developer' }, 'Python REST API; success means reliable access control').variant,
+      'software_backend', 'common words such as success/access do not score as frontend terms');
+    assert.equal(selectApprovedCv(profile, { title: 'Full Stack Developer' }, 'React, Django REST API').variant, 'software_backend');
+    assert.equal(selectApprovedCv(profile, { title: 'Data Engineer' }, 'Python SQL ETL warehouse').variant, 'data_engineering');
+    assert.equal(selectApprovedCv(profile, { title: 'Warehouse Worker' }, 'Part-time warehouse shifts').variant, 'data_engineering',
+      'keywords never pick the non-tech CV');
+    const nonTech = selectApprovedCv(profile, { title: 'Warehouse Worker', recommendedCvVariant: 'non_tech' }, 'Part-time shifts');
+    assert.equal(nonTech.variant, 'non_tech');
+    assert.equal(nonTech.path, profile.approvedCvs.non_tech);
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }

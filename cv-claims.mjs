@@ -289,7 +289,8 @@ function metricTokens(text) {
 function meaningfulWords(text) {
   const withoutDates = String(text).replace(DATE_RE, ' ').replace(/\s+[|·–—-]\s+/g, ' ');
   const withoutTech = withoutDates.replace(/[\w.+#-]+/g, (token) => technologyMatches(token).length ? ' ' : token);
-  return withoutTech.toLowerCase().match(/[a-z][a-z0-9'-]*/g)?.filter((word) => !STOP_WORDS.has(word) && !ACTION_LEMMAS.has(word)) || [];
+  // Unit suffixes glued to numbers (1.1M+, 50k, 37.3B) belong to the metric token, not to words.
+  return withoutTech.toLowerCase().match(/(?<![0-9.])[a-z][a-z0-9'-]*/g)?.filter((word) => !STOP_WORDS.has(word) && !ACTION_LEMMAS.has(word)) || [];
 }
 
 // Explicit inflections: changing an action must never be authorized by its object.

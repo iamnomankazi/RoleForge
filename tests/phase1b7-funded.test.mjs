@@ -16,34 +16,10 @@ const baselineText = evidenceAvailable ? readFileSync(resolve(EVIDENCE_DIR, 'C-p
 const currentText = evidenceAvailable ? readFileSync(resolve(ROOT, 'portals.yml'), 'utf8') : '';
 const baseline = evidenceAvailable ? yaml.load(baselineText) : null;
 const current = evidenceAvailable ? yaml.load(currentText) : null;
-const PHASE2_TITLE_POSITIVE_ALIASES = [
-  'Computer Vision Engineer',
-  'Fullstack Entwickler',
-  'Werkstudent*In Data & Automation',
-  'Working Student - AI Platform and Enablement',
-];
-
-function removeApprovedPhase2TitleAliases(text) {
-  const newline = text.includes('\r\n') ? '\r\n' : '\n';
-  const titleFilterAt = text.indexOf('title_filter:');
-  const positiveAt = text.indexOf(`  positive:${newline}`, titleFilterAt);
-  const negativeAt = text.indexOf(`  negative:${newline}`, positiveAt);
-  assert.notEqual(titleFilterAt, -1, 'title_filter must exist');
-  assert.notEqual(positiveAt, -1, 'title_filter.positive must exist');
-  assert.notEqual(negativeAt, -1, 'title_filter.negative must terminate the positive list');
-
-  let positiveBlock = text.slice(positiveAt, negativeAt);
-  for (const alias of PHASE2_TITLE_POSITIVE_ALIASES) {
-    const exactLine = `    - ${JSON.stringify(alias)}${newline}`;
-    const occurrences = positiveBlock.split(exactLine).length - 1;
-    assert.equal(occurrences, 1, `the exact approved alias line must appear once in title_filter.positive: ${alias}`);
-    positiveBlock = positiveBlock.replace(exactLine, '');
-  }
-  return `${text.slice(0, positiveAt)}${positiveBlock}${text.slice(negativeAt)}`;
-}
-
-const currentTextWithoutPhase2Aliases = evidenceAvailable ? removeApprovedPhase2TitleAliases(currentText) : '';
-const currentWithoutPhase2Aliases = evidenceAvailable ? yaml.load(currentTextWithoutPhase2Aliases) : null;
+// The approved Phase 2 portal update (2026-10-09) replaced these filters and appended tracked
+// companies after the Phase 1b7 Isar entry. Every other policy key must still equal the preimage.
+const PHASE2_REPLACED_FILTERS = ['title_filter', 'location_filter', 'content_filter'];
+const PRESERVED_POLICY_KEYS = ['experience_policy', 'search_queries', 'job_boards'];
 
 function normalizeName(value) {
   return String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -143,51 +119,29 @@ test('mandatory Germany-enrollment question is not confused with search relevanc
   assert.ok(applicationSoftware.applicationEligibilityAssessment.reasons.some(reason => /§13.*SÜG/i.test(reason)));
 });
 
-test('the one-entry delta preserves the complete portals preimage and search policy', (t) => {
+test('the Isar delta survives the approved Phase 2 portal update without losing preimage entries or policy', (t) => {
   if (skipIfEvidenceMissing(t)) return;
-  const baselineMarker = baselineText.indexOf('\njob_boards:');
-  const currentMarker = currentTextWithoutPhase2Aliases.indexOf('\njob_boards:');
-  assert.notEqual(baselineMarker, -1);
-  assert.notEqual(currentMarker, -1);
-  assert.equal(currentTextWithoutPhase2Aliases.indexOf('\njob_boards:', currentMarker + 1), -1);
-
-  assert.equal(currentTextWithoutPhase2Aliases.slice(0, baselineMarker), baselineText.slice(0, baselineMarker));
-  assert.equal(currentTextWithoutPhase2Aliases.slice(currentMarker), baselineText.slice(baselineMarker));
-  assert.equal(
-    currentTextWithoutPhase2Aliases.slice(baselineMarker, currentMarker),
-    evidence.portalsInsertionText,
-    'the sole byte delta must be the recorded Isar entry'
-  );
-
   const baselineCompanies = baseline.tracked_companies ?? [];
-  const currentCompanies = currentWithoutPhase2Aliases.tracked_companies ?? [];
-  assert.deepEqual(currentCompanies.slice(0, baselineCompanies.length), baselineCompanies);
-  assert.equal(currentCompanies.length, baselineCompanies.length + 1);
-  assert.deepEqual(currentCompanies.at(-1), evidence.portalsEntry);
-
-  for (const key of ['title_filter', 'location_filter', 'content_filter', 'experience_policy', 'search_queries', 'job_boards']) {
-    assert.deepEqual(currentWithoutPhase2Aliases[key], baseline[key], `${key} must remain unchanged after removing only approved Phase2 title aliases`);
+  const currentCompanies = current.tracked_companies ?? [];
+  assert.deepEqual(currentCompanies.slice(0, baselineCompanies.length), baselineCompanies,
+    'preimage tracked companies stay unchanged and in order');
+  assert.deepEqual(currentCompanies[baselineCompanies.length], evidence.portalsEntry,
+    'the recorded Isar entry directly follows the preimage');
+  const baselineNames = new Set([...baselineCompanies, evidence.portalsEntry].map(item => normalizeName(item.name)));
+  for (const item of currentCompanies.slice(baselineCompanies.length + 1)) {
+    assert.ok(!baselineNames.has(normalizeName(item.name)), `${item.name} is a later addition, not an edited preimage entry`);
   }
 
-  const expectedCurrent = structuredClone(currentWithoutPhase2Aliases);
-  expectedCurrent.title_filter.positive.push(...PHASE2_TITLE_POSITIVE_ALIASES);
-  assert.deepEqual(current, expectedCurrent, 'live config must equal the historical one-entry config plus exactly the four approved title positives');
-  assert.deepEqual(
-    current.title_filter.positive.slice(-PHASE2_TITLE_POSITIVE_ALIASES.length),
-    PHASE2_TITLE_POSITIVE_ALIASES,
-    'the exact approved aliases must remain the positive-list suffix'
-  );
-  assert.deepEqual(current.title_filter.negative, baseline.title_filter.negative, 'Phase2 aliases must not alter title negatives');
-
-  const newline = currentText.includes('\r\n') ? '\r\n' : '\n';
-  const negativeMarker = currentText.indexOf(`  negative:${newline}`);
-  assert.notEqual(negativeMarker, -1, 'title_filter.negative must exist for the mutation check');
-  const unauthorizedPositive = `${currentText.slice(0, negativeMarker)}    - "Unapproved Policy Change"${newline}${currentText.slice(negativeMarker)}`;
-  assert.notEqual(
-    removeApprovedPhase2TitleAliases(unauthorizedPositive),
-    currentTextWithoutPhase2Aliases,
-    'removing the four approved aliases must not conceal any other positive-list change'
-  );
+  for (const key of PRESERVED_POLICY_KEYS) {
+    assert.deepEqual(current[key], baseline[key], `${key} must remain unchanged`);
+  }
+  for (const key of PHASE2_REPLACED_FILTERS) {
+    assert.ok(current[key] && typeof current[key] === 'object', `${key} must exist after the Phase 2 replacement`);
+  }
+  assert.ok(Array.isArray(current.title_filter.positive) && current.title_filter.positive.length > 0);
+  assert.ok(Array.isArray(current.title_filter.negative) && current.title_filter.negative.length > 0);
+  assert.deepEqual(Object.keys(current).filter(key => !(key in baseline)), [],
+    'the Phase 2 update must not introduce unknown top-level portal keys');
 
   const trackedNames = currentCompanies.map(item => normalizeName(item.name));
   assert.equal(new Set(trackedNames).size, trackedNames.length, 'tracked company names must remain unique');
@@ -204,7 +158,10 @@ test('manual, excluded, and already tracked candidates are not added', (t) => {
   const additions = current.tracked_companies.filter(item => normalizeName(item.name) === 'isar aerospace');
   assert.equal(additions.length, 1);
 
-  const currentNames = new Set(current.tracked_companies.map(item => normalizeName(item.name)));
+  // The Phase 1b7 delta is the preimage plus Isar; companies appended later (the approved Phase 2
+  // Finnish employer catalog) were verified separately and are not Phase 1b7 additions.
+  const phase1b7Companies = current.tracked_companies.slice(0, (baseline.tracked_companies ?? []).length + 1);
+  const currentNames = new Set(phase1b7Companies.map(item => normalizeName(item.name)));
   for (const name of evidence.existingDuplicates) {
     assert.ok((baseline.tracked_companies ?? []).some(item => normalizeName(item.name) === normalizeName(name)));
   }

@@ -115,11 +115,20 @@ function parseVoiceDna(text) {
   if (heading < 0) return [];
   const section = [];
   for (let index = heading + 1; index < lines.length && !/^##\s/.test(lines[index]); index++) section.push(lines[index]);
-  const listLine = section.find(line => line.trim() && !/^Also banned:/i.test(line) && !/^###/.test(line)) || '';
-  const entries = listLine.split(',').map(item => item.trim().replace(/^['"`]|['"`]$/g, '')).filter(Boolean);
-  const alsoBanned = section.find(line => /^Also banned:/i.test(line))?.replace(/^Also banned:\s*/i, '') || '';
-  const constructions = [...alsoBanned.matchAll(/"([^"]+)"/g)].map(matchItem => matchItem[1]);
-  return [...entries, ...constructions];
+  // The word list is the comma-separated line (prose lines such as instructions are not phrases).
+  const commas = line => (line.match(/,/g) || []).length;
+  const listLine = section.filter(line => line.trim() && !/^Also banned:/i.test(line) && !/^#/.test(line) && commas(line))
+    .sort((a, b) => commas(b) - commas(a))[0] || '';
+  const entries = listLine.split(',')
+    .map(item => item.trim().replace(/\s*\([^)]*\)\s*/g, ' ').replace(/[.;:]+$/, '').trim().replace(/^['"`]|['"`]$/g, ''))
+    .flatMap(item => item.split('/').map(part => part.trim()))
+    .filter(Boolean);
+  // "Also banned" lists constructions before its explanation ("... when used to avoid "is" ..."); the
+  // words recommended instead are not banned.
+  const alsoBanned = (section.find(line => /^Also banned:/i.test(line))?.replace(/^Also banned:\s*/i, '') || '')
+    .split(/\bwhen used\b/i)[0];
+  const constructions = [...alsoBanned.matchAll(/"([^"]+)"/g)].map(matchItem => matchItem[1].replace(/[,.;:]+$/, '').trim());
+  return [...entries, ...constructions].filter(Boolean);
 }
 
 function parseProfileAvoid(text) {

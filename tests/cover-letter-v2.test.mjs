@@ -277,6 +277,26 @@ test('user phrase lists are read at runtime and the legacy HTML template accepts
   }
 });
 
+test('voice banned list skips instruction prose and the words it recommends instead', async () => {
+  const userLayerDir = await mkdtemp(join(tmpdir(), 'cover-letter-voice-list-'));
+  try {
+    await writeFile(join(userLayerDir, 'voice-dna.md'), [
+      '## 3. BANNED LIST', '', 'If even ONE of these appears, the output fails.', '', '### 3A. Words', '',
+      'delve, landscape (abstract), intricate/intricacies, leverage, synergy', '',
+      'Also banned: "serves as," "stands as," when used to avoid "is" or "has." Just say "is."', '', '## 4. Next', '',
+    ].join('\n'));
+    const phrases = await loadBannedPhrases({ userLayerDir });
+    for (const phrase of ['delve', 'landscape', 'intricate', 'intricacies', 'leverage', 'serves as', 'stands as']) {
+      assert.ok(phrases.includes(phrase), phrase);
+    }
+    for (const phrase of ['is', 'has', 'has.', 'is.', 'If even ONE of these appears', 'the output fails.']) {
+      assert.ok(!phrases.includes(phrase), phrase);
+    }
+  } finally {
+    await rm(userLayerDir, { recursive: true, force: true });
+  }
+});
+
 function factualDraft() {
   const sentence = 'I built API services for 30 users.';
   const draft = makeDraft({ sentence, sentences: 26, closing: 'Thank you for considering my application.' });

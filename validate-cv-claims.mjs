@@ -91,7 +91,7 @@ Options:
   --activate <draft>      Explicitly move a reviewed draft to the active manifest path
   --replace-active        Back up the current active manifest before activation
   --drift                 Compare approved PDF facts with canonical cv.md
-  --approved-dir <dir>    PDF directory (defaults to output/cv-approved)
+  --approved-dir <dir>    PDF directory (defaults to cv.approved_system.source_dir in config/profile.yml, else output/cv-approved)
   --check-document <file> Check generated HTML, TXT, or TeX content against current claims
   --json                  Print full JSON output where supported
   --strict                Exit nonzero when checked segments fail
@@ -448,6 +448,16 @@ async function extractPdfText(path) {
   }
 }
 
+async function defaultApprovedDir() {
+  try {
+    const { default: yaml } = await import('js-yaml');
+    const profile = yaml.load(await readFile('config/profile.yml', 'utf8')) || {};
+    return profile.cv?.approved_system?.source_dir || 'output/cv-approved';
+  } catch {
+    return 'output/cv-approved';
+  }
+}
+
 async function driftReport({ cvText, cvPath, activePath, approvedDir, json }) {
   let manifestComparison = { status: 'missing' };
   try {
@@ -548,7 +558,7 @@ async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (options.command === 'drift') {
-    try { await driftReport({ cvText, cvPath, activePath, approvedDir: resolve(options.approvedDir || 'output/cv-approved'), json: options.json }); }
+    try { await driftReport({ cvText, cvPath, activePath, approvedDir: resolve(options.approvedDir || await defaultApprovedDir()), json: options.json }); }
     catch (error) { console.error(error.message); process.exitCode = 1; }
     return;
   }

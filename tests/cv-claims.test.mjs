@@ -103,6 +103,15 @@ test('approximate metrics do not authorize a precise number', () => {
   assert.equal(result.results[0].reasonCode, 'unsupported_metric');
 });
 
+test('unit suffixes glued to numbers are checked as metrics, not as stray words', () => {
+  const cv = BASE_CV.replace('for 30 users', 'from 1.1M+ synthetic records in 50k-row batches');
+  const manifest = anchoredManifest(cv);
+  const check = (text) => validateClaims({ claims: [{ id: 'm', text }], manifest, cv }).results[0];
+  assert.equal(check('Built API services in JavaScript from 1.1M+ synthetic records in 50k-row batches.').status, 'pass');
+  assert.equal(check('Built API services in JavaScript from 2.5M+ synthetic records.').reasonCode, 'unsupported_metric');
+  assert.equal(check('Built API services in JavaScript from 1.1M synthetic records.').reasonCode, 'unsupported_metric');
+});
+
 test('currency markers are part of exact metric support', () => {
   const budgetCv = BASE_CV.replace('30 users', 'EUR 30 users');
   const manifest = anchoredManifest(budgetCv);

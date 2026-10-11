@@ -48,6 +48,14 @@ export function loadApplicationProfile(root) {
     if (!existsSync(path)) throw new Error(`Approved ${variant} CV is missing: ${path}`);
     approvedCvs[variant] = realpathSync(path);
   }
+  // Optional variants: used only when configured.
+  for (const variant of OPTIONAL_CV_VARIANTS) {
+    const configured = cv.role_pdfs?.[variant];
+    if (!configured) continue;
+    const path = resolve(projectRoot, configured);
+    if (!existsSync(path)) throw new Error(`Approved ${variant} CV is missing: ${path}`);
+    approvedCvs[variant] = realpathSync(path);
+  }
   const sourceFiles = Object.fromEntries(Object.entries(paths)
     .filter(([, path]) => existsSync(path))
     .map(([key, path]) => [key, { path: realpathSync(path), ...hashFile(path) }]));
@@ -85,10 +93,20 @@ const ROLE_TERMS = Object.freeze({
     'software engineer', 'software developer', 'backend', 'python developer', 'django', 'api',
     'full stack', 'full-stack', 'react', 'next.js', 'typescript',
   ],
+  frontend: [
+    'frontend', 'front-end', 'front end', 'ui developer', 'ui engineer', 'web developer', 'react',
+    'next.js', 'typescript', 'javascript', 'html', 'tailwind',
+  ],
 });
+
+// Optional variants are loaded only when configured. non_tech is never chosen by keywords
+// (terms such as "warehouse" overlap with data roles); it needs an explicit recommendation.
+const OPTIONAL_CV_VARIANTS = Object.freeze(['frontend', 'non_tech']);
 
 function normalizeVariant(value) {
   const text = String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+  if (/\bnon ?tech(nical)?\b/.test(text)) return 'non_tech';
+  if (/\b(frontend|front end)\b/.test(text)) return 'frontend';
   if (/data|analytics|etl|warehouse|bi/.test(text)) return 'data_engineering';
   if (/ai|ml|machine|data scientist|vision/.test(text)) return 'ai_ml';
   if (/software|backend|full stack|python|django/.test(text)) return 'software_backend';
@@ -98,12 +116,17 @@ function normalizeVariant(value) {
 
 export function selectApprovedCv(profile, candidate, jdText) {
   const text = `${candidate.title || ''}\n${jdText || ''}`.toLowerCase();
-  const scores = Object.fromEntries(Object.entries(ROLE_TERMS).map(([variant, terms]) => [
-    variant,
-    terms.reduce((score, term) => score + (text.includes(term) ? (candidate.title?.toLowerCase().includes(term) ? 4 : 1) : 0), 0),
-  ]));
   const advisory = normalizeVariant(candidate.recommendedCvVariant);
-  if (advisory && advisory !== 'master') scores[advisory] += 2;
+  if (advisory === 'non_tech' && profile.approvedCvs.non_tech) {
+    return { variant: 'non_tech', path: profile.approvedCvs.non_tech, scores: {}, advisory, decision: 'reuse_approved' };
+  }
+  const scores = Object.fromEntries(Object.entries(ROLE_TERMS)
+    .filter(([variant]) => profile.approvedCvs[variant])
+    .map(([variant, terms]) => [
+      variant,
+      terms.reduce((score, term) => score + (text.includes(term) ? (candidate.title?.toLowerCase().includes(term) ? 4 : 1) : 0), 0),
+    ]));
+  if (advisory && advisory !== 'master' && advisory in scores) scores[advisory] += 2;
   const ranked = Object.entries(scores).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   const broadGraduate = /graduate|trainee|intern|early career|early-career/.test(text)
     && ranked[0][1] - ranked[1][1] <= 1;
