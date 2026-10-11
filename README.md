@@ -8,6 +8,15 @@ It is designed around a simple principle: automate repetitive job-search work wi
 
 RoleForge is a standalone project originally based on [Career Ops](https://github.com/santifer/career-ops) by Santiago Fernández de Valderrama and its contributors. Inherited code remains under the MIT license with upstream attribution. See [UPSTREAM.md](UPSTREAM.md) for reconstruction and provenance details.
 
+## RoleForge-specific improvements
+
+This project extends the upstream job-search workflow with additional engineering work, including:
+
+- Improved multi-ATS discovery, location/title/content matching, and deduplication, with filter changes replayed against 468,916 historical ATS records.
+- Added API-first posting liveness and job-description retrieval, explicit-requirement eligibility checks, and evidence-backed assessment decisions and ranked shortlists.
+- Strengthened application preparation with exact-candidate validation, persistent browser sessions, and human handoff for login/CAPTCHA; final submission remains manual.
+- Added CV claim checks and user-approved cover-letter handling to prevent unsupported candidate statements from entering new application documents.
+
 ## What RoleForge does
 
 RoleForge brings the main parts of a technical job-search workflow into one repository:
