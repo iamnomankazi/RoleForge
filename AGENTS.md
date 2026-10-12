@@ -324,21 +324,31 @@ the final Submit, Send, or Apply control.
 
 For up to six independently confirmed one-candidate batches,
 `application-shared-browser.mjs` may own one visible Chromium process using the
-dedicated persistent candidate profile and one task-created page for the active
-exact candidate. It must verify every batch before launch, acquire the exclusive
-profile lock before launch, call the locked canonical executor sequentially,
-keep batch evidence and application state scoped to the exact candidate, continue
-after a local candidate failure, and leave the browser open while a human handoff
-is pending or until the user closes it. It never accepts queue rows, arbitrary
-URLs, multi-candidate batches, submission authority, or tracker authority. The
-human may complete login, account creation, MFA, email verification, and CAPTCHA
-only in the visible task-created page for the exact active candidate; the tool
-never types credentials or solves CAPTCHA. A user completion signal or detected
-gate clearance authorizes revalidation only, not navigation to an arbitrary URL
-or a final action. A previously `blocked`, `review_required`, `login_required`,
+dedicated persistent candidate profile and one task-created page per exact
+candidate, retained for the user's review and manual submission. It must verify
+every batch before launch, acquire the exclusive profile lock before launch, call
+the locked canonical executor sequentially, keep batch evidence and application
+state scoped to the exact candidate, close only a failing candidate's own pages,
+continue after a local candidate failure, and leave the browser open until the
+user closes it. In the first pass a blocking human check is recorded as
+`human_action_required` and deferred so later candidates still run; afterwards
+each deferred candidate is revisited only on its own existing page and only while
+that page still matches the persisted gate destination, otherwise it is left for
+manual review without navigation. It never accepts queue rows, arbitrary URLs,
+multi-candidate batches, submission authority, or tracker authority. The human
+may complete login, account creation, MFA, email verification, and CAPTCHA only
+in the visible task-created page for that exact candidate; the tool never types
+credentials or solves CAPTCHA. A user completion signal or detected gate
+clearance authorizes revalidation only, not navigation to an arbitrary URL or a
+final action. A previously `blocked`, `review_required`, `login_required`,
 `human_action_required`, or `actual_form_reached` exact candidate may resume only
 through the canonical exact-candidate preparation contract with fresh liveness,
 identity, destination, login/challenge, and form revalidation.
+
+`application-wave.mjs` may review up to six such batches together and, only after
+the user approves the printed wave hash in chat, run the existing per-candidate
+cover-letter approval, document plan, preparation, and preflight confirmation. It
+adds no other authority, never opens a browser, and never submits.
 
 From `listing_verified`, a visible listing-page Apply CTA may be activated only
 when DOM context proves it is an application-entry action: no candidate form
