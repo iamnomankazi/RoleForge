@@ -430,6 +430,19 @@ test('company and role equal independently supplied complete names bound to JD p
   const boundary = await checkDraft(makeDraft(), { jdText: 'Northstar LabsX hires Backend Engineers.' });
   assert.equal(boundary.checks.find(item => item.id === 'company_matches_jd').status, 'fail');
   assert.equal(boundary.checks.find(item => item.id === 'role_matches_jd').status, 'fail');
+  const gluedSuffix = await checkDraft(makeDraft(), { jdText: 'Northstar Labs hires a Backend EngineerX now.' });
+  assert.equal(gluedSuffix.checks.find(item => item.id === 'role_matches_jd').status, 'fail');
+});
+
+test('a role glued to neighbouring words by a scraped page still matches its exact title', async () => {
+  const glued = await checkDraft(makeDraft(), { jdText: `Back to jobs${role}Helsinki, Finland. Join ${company} today.` });
+  assert.equal(glued.checks.find(item => item.id === 'role_matches_jd').status, 'pass');
+  const bracketRole = `${role} (Platform)`;
+  const bracketDraft = makeDraft({ roleName: bracketRole });
+  const bracket = await checkDraft(bracketDraft, { jdText: `Back to jobs${bracketRole}Helsinki. Join ${company} today.`, jdRole: bracketRole });
+  assert.equal(bracket.checks.find(item => item.id === 'role_matches_jd').status, 'pass');
+  const wrongRole = await checkDraft(makeDraft(), { jdText: `Back to jobsSenior ${role}Helsinki. Join ${company} today.`, jdRole: `Staff ${role}` });
+  assert.equal(wrongRole.checks.find(item => item.id === 'role_matches_jd').status, 'fail');
 });
 
 test('optional and negated language skills do not impose a language requirement', async () => {

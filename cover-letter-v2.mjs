@@ -296,8 +296,12 @@ export async function checkCoverLetterDraft(draft, {
   const role = String(normalizedDraft.role ?? '').trim();
   const companyMatches = Boolean(company && typeof jdCompany === 'string' && jdCompany.trim()
     && normalizeSpace(company) === normalizeSpace(jdCompany) && phrasePattern(jdCompany).test(jdText));
+  // Scraped pages often glue the title to its neighbours ("jobsSmartly Launchpad", "ContextHelsinki"), so a role may
+  // also match where a lowercase letter runs into a capitalized word. The role must still equal the canonical role.
+  const degluedJd = String(jdText ?? '').replace(/([\p{Ll})\]])(?=\p{Lu}\p{Ll}{2,})/gu, '$1 ');
   const roleMatches = Boolean(role && typeof jdRole === 'string' && jdRole.trim()
-    && normalizeSpace(role) === normalizeSpace(jdRole) && phrasePattern(jdRole).test(jdText));
+    && normalizeSpace(role) === normalizeSpace(jdRole)
+    && (phrasePattern(jdRole).test(jdText) || phrasePattern(jdRole).test(degluedJd)));
   checks.push(check('company_matches_jd', companyMatches ? 'pass' : 'fail', { reasonCode: 'company_mismatch' }));
   checks.push(check('role_matches_jd', roleMatches ? 'pass' : 'fail', { reasonCode: 'role_mismatch' }));
 
