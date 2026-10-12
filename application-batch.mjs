@@ -23,6 +23,7 @@ import { hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  candidateIdFromAliases,
   collectCandidateIdentityAliases,
   deriveCandidateId,
   isCandidateId,
@@ -253,21 +254,36 @@ function normalizeSourceCandidate(row, runId, index) {
   if (rowRunId && rowRunId !== runId) {
     throw new Error(`Source candidate belongs to another run: ${rowRunId}`);
   }
-  const aliases = collectCandidateIdentityAliases(row);
-  const urlAliases = uniqueUrls([listingUrl, ...aliases.aliases]);
   const persistedId = inline(row?.candidate_id ?? row?.candidateId);
+  let aliases;
   let candidateId;
   let identityStatus;
   if (persistedId) {
     candidateId = requireCandidateId(persistedId, `source candidate ${index + 1} candidate_id`);
     if (candidateId.startsWith('legacy_')) throw new Error('Merged scan artifacts may not persist legacy candidate IDs');
-    const expected = deriveCandidateId(row);
-    if (candidateId !== expected) throw new Error(`Source candidate_id does not match deterministic identity: ${candidateId}`);
-    identityStatus = 'stable';
+    let currentError = null;
+    try {
+      aliases = collectCandidateIdentityAliases(row);
+      if (candidateIdFromAliases(aliases) === candidateId) identityStatus = 'stable';
+    } catch (error) { currentError = error; }
+    if (!identityStatus) {
+      // Historical scan runs persisted Workday IDs derived by the pre-fix rule. Accept such a row only when the
+      // old rule reproduces its exact persisted ID; it stays readable but is never selectable for a new batch.
+      let previous = null;
+      try { previous = collectCandidateIdentityAliases(row, { workdayRule: 'prefix_v1' }); } catch { previous = null; }
+      if (!previous || candidateIdFromAliases(previous) !== candidateId) {
+        if (currentError) throw currentError;
+        throw new Error(`Source candidate_id does not match deterministic identity: ${candidateId}`);
+      }
+      aliases = previous;
+      identityStatus = 'stable_prefix_workday';
+    }
   } else {
+    aliases = collectCandidateIdentityAliases(row);
     candidateId = deriveCandidateId(row, { legacy: true });
     identityStatus = 'legacy_derived';
   }
+  const urlAliases = uniqueUrls([listingUrl, ...aliases.aliases]);
   const applyRaw = inline(row?.applyUrl ?? row?.apply_url);
   return {
     sourceIndex: index,
@@ -416,6 +432,9 @@ function selectSourceCandidates(context, selectedCandidateIds, selectedUrls) {
         : `Selected URL is not a member of source run ${context.runId}: ${selector}`);
     }
     if (matches.length > 1) throw new Error(`Candidate selector is ambiguous in source run ${context.runId}: ${selector}`);
+    if (matches[0].identityStatus === 'stable_prefix_workday') {
+      throw new Error(`Candidate ${matches[0].candidate_id} carries a pre-fix Workday identity; create the batch from a corrected derived run (see output/identity-corrections/)`);
+    }
     return matches[0];
   });
   const selectedIds = selected.map((candidate) => candidate.candidate_id);

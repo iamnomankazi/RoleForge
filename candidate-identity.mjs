@@ -59,7 +59,22 @@ function normalizeIdentityPart(value) {
   return clean(value).normalize('NFKC').toLowerCase();
 }
 
-export function atsIdentityFromUrl(value) {
+// `slug` is the current Workday rule. `prefix_v1` reproduces the pre-2026-10-12 rule (first "_token/" in the
+// path) and exists only to verify candidate IDs persisted in historical scan runs; never use it for new identities.
+export const WORKDAY_IDENTITY_RULES = Object.freeze(['slug', 'prefix_v1']);
+
+function workdayRequisition(path, segments, rule) {
+  if (rule === 'prefix_v1') return path.match(/_([A-Za-z0-9-]+)(?:[/?]|$)/)?.[1];
+  // The requisition is the suffix of the job slug (".../job/<location>/<Title>_<REQ>[/apply...]").
+  // Site names may contain underscores ("external_career_page", "GEHC_ExternalSite"), so never
+  // read the requisition from earlier path segments.
+  const jobAt = segments.indexOf('job');
+  const slug = (jobAt >= 0 ? segments.slice(jobAt + 1) : segments).filter((part) => !/^apply/i.test(part)).at(-1);
+  return slug?.match(/_([A-Za-z0-9-]+)$/)?.[1];
+}
+
+export function atsIdentityFromUrl(value, { workdayRule = 'slug' } = {}) {
+  if (!WORKDAY_IDENTITY_RULES.includes(workdayRule)) throw new Error(`Unknown Workday identity rule: ${workdayRule}`);
   let url;
   try {
     url = new URL(clean(value));
@@ -89,12 +104,7 @@ export function atsIdentityFromUrl(value) {
 
   if (host.endsWith('.myworkdayjobs.com')) {
     const segments = path.split('/').filter(Boolean);
-    // The requisition is the suffix of the job slug (".../job/<location>/<Title>_<REQ>[/apply...]").
-    // Site names may contain underscores ("external_career_page", "GEHC_ExternalSite"), so never
-    // read the requisition from earlier path segments.
-    const jobAt = segments.indexOf('job');
-    const slug = (jobAt >= 0 ? segments.slice(jobAt + 1) : segments).filter((part) => !/^apply/i.test(part)).at(-1);
-    const requisition = slug?.match(/_([A-Za-z0-9-]+)$/)?.[1];
+    const requisition = workdayRequisition(path, segments, workdayRule);
     if (segments[0] && requisition) {
       return `ats:workday:${normalizeIdentityPart(host)}:${normalizeIdentityPart(segments[0])}:${normalizeIdentityPart(requisition)}`;
     }
@@ -175,12 +185,12 @@ function candidateUrls(row) {
   return { originalUrl, resolvedUrl, aliases };
 }
 
-export function collectCandidateIdentityAliases(row) {
+export function collectCandidateIdentityAliases(row, { workdayRule = 'slug' } = {}) {
   const { originalUrl, resolvedUrl, aliases } = candidateUrls(row);
   const urls = unique(aliases.map(canonicalListingUrl));
   const ats = unique([
     explicitAtsIdentity(row),
-    ...aliases.map(atsIdentityFromUrl),
+    ...aliases.map((alias) => atsIdentityFromUrl(alias, { workdayRule })),
   ]).sort();
   if (ats.length > 1) {
     throw new Error(`Conflicting ATS identities for one candidate: ${ats.join(', ')}`);
@@ -209,8 +219,8 @@ export function candidateIdFromAliases({ ats = [], urls = [], primaryUrl = '' },
   return `${prefix}${sha256(`${namespace}\0${primary}`)}`;
 }
 
-export function deriveCandidateId(row, { legacy = false } = {}) {
-  return candidateIdFromAliases(collectCandidateIdentityAliases(row), { legacy });
+export function deriveCandidateId(row, { legacy = false, workdayRule = 'slug' } = {}) {
+  return candidateIdFromAliases(collectCandidateIdentityAliases(row, { workdayRule }), { legacy });
 }
 
 export function isCandidateId(value) {
