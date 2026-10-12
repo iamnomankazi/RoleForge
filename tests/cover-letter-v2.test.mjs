@@ -297,6 +297,30 @@ test('voice banned list skips instruction prose and the words it recommends inst
   }
 });
 
+test('cited paraphrases and job-description context pass through the gate; JD-backed experience claims fail', async () => {
+  const cv = '# Projects\n## Alpha - Job Platform\n- Built a Next.js and PostgreSQL application with saved jobs.\n';
+  const manifest = createDraftManifest(cv);
+  const bullet = manifest.claims.find(claim => claim.text.startsWith('Built a Next.js')).id;
+  const jdText = `Company: ${company}. Role: ${role}. We build with React and TypeScript and welcome applications.`;
+  const motivation = "I'm applying because React and TypeScript work with a product team is the start I want.";
+  const project = 'I built Alpha, my own Next.js and PostgreSQL application with saved jobs.';
+  const draft = { ...makeDraft(), jd: { text: jdText }, paragraphs: [{ text: `${motivation} ${project}`, claims: [
+    { id: 'm', evidence: ['jd'], text: motivation },
+    { id: 'p', evidence: [bullet], text: project },
+  ] }] };
+  const options = { jdText, cv, manifest, validateClaims: realValidator };
+  const passing = await checkDraft(draft, options);
+  assert.equal(passing.checks.find(item => item.id === 'claim_coverage').status, 'pass');
+  assert.equal(passing.checks.find(item => item.id === 'claim_validation').status, 'pass');
+
+  const fabricated = 'I have built React dashboards for customers.';
+  draft.paragraphs = [{ text: fabricated, claims: [{ id: 'f', evidence: ['jd'], text: fabricated }] }];
+  const failing = await checkDraft(draft, options);
+  const validation = failing.checks.find(item => item.id === 'claim_validation');
+  assert.equal(validation.status, 'fail');
+  assert.equal(validation.failedResults[0].reasonCode, 'jd_context_candidate_claim');
+});
+
 function factualDraft() {
   const sentence = 'I built API services for 30 users.';
   const draft = makeDraft({ sentence, sentences: 26, closing: 'Thank you for considering my application.' });

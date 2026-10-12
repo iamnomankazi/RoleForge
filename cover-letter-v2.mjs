@@ -362,7 +362,7 @@ export async function checkCoverLetterDraft(draft, {
     }));
   } else {
     try {
-      const result = await validateClaims({ claims, manifest, cv });
+      const result = await validateClaims({ claims, manifest, cv, jdText });
       const results = Array.isArray(result?.results) ? result.results : [];
       const byId = new Map(results.map(item => [item?.claimId, item]));
       const duplicateResults = results.filter((item, index) => results.findIndex(other => other?.claimId === item?.claimId) !== index)

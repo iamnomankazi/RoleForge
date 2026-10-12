@@ -307,7 +307,10 @@ const ACTION_LEMMAS = new Map([
 ].flatMap(([lemma, ...forms]) => [lemma, `${lemma}s`, ...forms].map(form => [form, lemma])));
 
 function actionLemmas(text) {
-  return new Set((normalizeText(text).match(/[a-z]+/g) || []).map(word => ACTION_LEMMAS.get(word)).filter(Boolean));
+  const words = normalizeText(text).match(/[a-z]+/g) || [];
+  // "my own project" is possession, not the action "own".
+  return new Set(words.filter((word, index) => !(word === 'own' && /^(?:my|your|its|our|their|his|her)$/.test(words[index - 1] || '')))
+    .map(word => ACTION_LEMMAS.get(word)).filter(Boolean));
 }
 
 function normalizeRoleHeading(text) {
@@ -421,7 +424,7 @@ function currentAllowedEntries(manifest, cv) {
     return Boolean(current && current.textHash === entry.textHash && current.type === entry.type);
   }).filter((entry) => entry.state !== 'supported' || hasCurrentIndependentEvidence(entry))
     .map((entry) => ({ ...entry, text: byId.get(entry.id).text, occurrences: byId.get(entry.id).occurrences,
-      sectionType: classifySection(byId.get(entry.id).section) }));
+      section: byId.get(entry.id).section, sectionType: classifySection(byId.get(entry.id).section) }));
 }
 
 function hasCurrentIndependentEvidence(entry) {
@@ -446,7 +449,146 @@ function hasCurrentIndependentEvidence(entry) {
  * asserted/supported states are eligible. Exact tokens and words are required;
  * paraphrases deliberately fail closed for human review.
  */
-export function validateClaims({ claims, manifest, cv } = {}) {
+// Words that change what a claim asserts (seniority, authority, proficiency, quantity, recognition). In a
+// paraphrase they must come from the cited evidence.
+const RISK_WORDS = new Set(('lead led leading leader manager managed managing senior principal staff head expert expertise '
+  + 'fluent fluently native proficient proficiency year years month months decade award awarded awards winner won published '
+  + 'publication publications patent patents founded founder cofounder owner owned sole certified certification certificate '
+  + 'phd doctorate million millions billion thousand thousands hundred hundreds dozen dozens one two three four five six seven '
+  + 'eight nine ten eleven twelve first top best '
+  + 'english finnish swedish german dutch danish norwegian spanish french italian portuguese hindi gujarati arabic chinese japanese russian').split(' '));
+const APOSTROPHES = /[’‘`´]/g;
+// Connecting vocabulary a cited paraphrase may add without evidence. None of these words names a responsibility,
+// domain, audience or outcome; every other content word must come from the cited evidence.
+const PARAPHRASE_WORDS = new Set(('m s ve d ll re t also both especially earlier then during into together reliably '
+  + 'strongest example part putting making went completing studying skills code practical challenge software '
+  + 'engineering familiar own projects project interface features feature application platform tool including').split(' '));
+// STOP_WORDS entries that assert a contribution or outcome; a cited paraphrase needs them in the evidence.
+const CLAIM_STOP_WORDS = new Set(('led developed designed implemented created authored wrote founded launched responsible '
+  + 'delivered managed improved helped support supporting').split(' '));
+// The only things a sentence citing the job description may say "I" do: apply, want, hope, welcome, look forward.
+const JD_FIRST_PERSON_FILLER = new Set('am m d ll would will could can also really very be'.split(' '));
+const JD_FIRST_PERSON_VERBS = new Set(('applying apply want hope hoping welcome like love look looking keen eager '
+  + 'excited interested drawn glad happy believe see find appreciate enjoy').split(' '));
+
+function wordStem(word) {
+  return word.replace(/y$/, 'i').replace(/(?:ions|ion|ings|ing|ship|ers|er|ed|es|s|ly)$/, '');
+}
+
+function wordInEvidence(word, evidenceWords) {
+  const stem = wordStem(word);
+  return evidenceWords.some((other) => {
+    const otherStem = wordStem(other);
+    if (other === word || otherStem === stem) return true;
+    const [short, long] = stem.length <= otherStem.length ? [stem, otherStem] : [otherStem, stem];
+    return short.length >= 4 && long.startsWith(short) && long.length - short.length <= 2;
+  });
+}
+
+function unsupportedWords(text, evidenceText) {
+  const evidenceWords = evidenceText.match(/[a-z]+/g) || [];
+  return (comparableEntity(text).match(/[a-z]+/g) || [])
+    .filter((word) => (!STOP_WORDS.has(word) || CLAIM_STOP_WORDS.has(word)) && !PARAPHRASE_WORDS.has(word)
+      && !wordInEvidence(word, evidenceWords));
+}
+
+function jdFirstPersonActivity(text) {
+  const words = comparableEntity(text).match(/[a-z]+/g) || [];
+  return words.some((word, index) => {
+    if (word !== 'i') return false;
+    let next = index + 1;
+    while (JD_FIRST_PERSON_FILLER.has(words[next])) next += 1;
+    return !JD_FIRST_PERSON_VERBS.has(words[next]);
+  });
+}
+
+function riskWords(text) {
+  return [...new Set((normalizeText(text).replace(APOSTROPHES, "'").match(/[a-z]+/g) || []).filter((word) => RISK_WORDS.has(word)))];
+}
+
+function comparableEntity(text) {
+  return normalizeText(text).replace(APOSTROPHES, "'").replace(/\s+/g, ' ').trim();
+}
+
+// Names, brands and unlisted technologies (Kotlin, Saki, Node.js) are facts: every capitalized or dotted token
+// except the sentence-initial word and "I" must occur in the evidence (possessive and plural forms tolerated).
+function properNounTokens(text) {
+  return String(text).replace(APOSTROPHES, "'").split(/\s+/).slice(1)
+    .map((token) => token.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}.+#]+$/gu, '').replace(/\.$/, ''))
+    .flatMap((token) => token.split(/[-/]/))
+    .filter((token) => /^\p{Lu}/u.test(token) || /\p{L}\.\p{L}/u.test(token))
+    .filter((token) => !/^I(?:'(?:m|ve|d|ll))?$/.test(token))
+    .map((token) => token.toLowerCase().replace(/'s$/, ''))
+    .filter((token) => /\p{L}/u.test(token));
+}
+
+function tokenInEvidence(token, evidenceText) {
+  const words = new Set(evidenceText.match(/[\p{L}\p{N}.+#']+/gu)?.map((word) => word.replace(/\.$/, '').replace(/'s$/, '')) || []);
+  return words.has(token) || words.has(token.replace(/s$/, '')) || evidenceText.includes(token);
+}
+
+// A claim object (as in "I built X") must name something more than a bare technology or skill.
+function creationObjectIsBareTechnology(text) {
+  let canonical = normalizeText(text);
+  for (const match of technologyMatches(canonical).reverse()) canonical = canonical.slice(0, match.start) + ' ' + canonical.slice(match.end);
+  // Keep "Node.js" and "1.1M+" intact so a dot inside a name or number never ends the object.
+  const safe = canonical.replace(/(?<=[\p{L}\p{N}])\.(?=[\p{L}\p{N}])/gu, '');
+  return [...safe.matchAll(CREATION_RE)].some((match) => !(match[2].match(/[a-z][a-z'-]*/g) || [])
+    .some((word) => !STOP_WORDS.has(word) && !ACTION_LEMMAS.has(word)));
+}
+
+/**
+ * A paraphrased claim that names its evidence. `evidence` lists manifest claim IDs from one CV item, or "jd"
+ * for employer/job context. Hard facts (technologies, metrics, dates, named entities, action verbs, risk words)
+ * must come from that evidence, and every other content word must be in the evidence (any word form) or in
+ * PARAPHRASE_WORDS. Cross-item evidence, unknown or stale
+ * evidence, and candidate-experience statements backed only by the job description all fail.
+ */
+function validateCitedClaim(claim, claimId, evidence, allowed, jdText) {
+  const fail = (reasonCode, anchorIds = []) => ({ claimId, status: 'fail', reasonCode, anchorIds });
+  const text = claim.text;
+  const units = claimedUnits(text).filter((unit) => unit.kind !== 'word');
+  const names = properNounTokens(text);
+  if (evidence.length === 1 && evidence[0] === 'jd') {
+    const jd = comparableEntity(jdText || '');
+    if (!jd) return fail('jd_context_missing');
+    if (actionLemmas(text).size || creationRelationships(text).length || riskWords(text).length || jdFirstPersonActivity(text)
+        || /\b(?:I(?:['’]ve| have| had)|my (?:experience|skills?|background|work|projects?|internship))\b/i.test(text)) {
+      return fail('jd_context_candidate_claim');
+    }
+    const missing = units.filter((unit) => (unit.kind === 'technology'
+      ? !technologyMatches(jdText).some((match) => match.canonical === unit.value)
+      : !jd.includes(comparableEntity(unit.value))));
+    if (missing.length || names.some((name) => !tokenInEvidence(name, jd))) return fail('unsupported_jd_context');
+    return { claimId, status: 'pass', anchorIds: ['jd'] };
+  }
+  if (evidence.some((id) => typeof id !== 'string' || id === 'jd')) return fail('evidence_invalid');
+  const cited = evidence.map((id) => allowed.find((entry) => entry.id === id));
+  if (cited.some((entry) => !entry)) return fail('evidence_not_allowed');
+  const ids = cited.map((entry) => entry.id);
+  if (new Set(cited.map((entry) => entry.section)).size !== 1) return fail('evidence_spans_items', ids);
+  const itemHeading = String(cited[0].section || '').split(' / ').at(-1);
+  const evidenceText = comparableEntity([...cited.map((entry) => entry.text), itemHeading].join(' \n '));
+  const missing = units.filter((unit) => unitCovered(unit, cited).length === 0);
+  if (missing.length) {
+    return fail(missing.some((unit) => unit.kind === 'technology') ? 'unsupported_technology'
+      : missing.some((unit) => unit.kind === 'metric') ? 'unsupported_metric' : 'unsupported_date', ids);
+  }
+  if (names.some((name) => !tokenInEvidence(name, evidenceText))) return fail('unknown_named_entity', ids);
+  const evidenceActions = new Set(cited.flatMap((entry) => [...actionLemmas(entry.text)]));
+  if ([...actionLemmas(text)].some((action) => !evidenceActions.has(action))) return fail('unsupported_action', ids);
+  const evidenceWords = new Set(evidenceText.match(/[a-z]+/g) || []);
+  if (riskWords(text).some((word) => !evidenceWords.has(word))) return fail('unsupported_risk_word', ids);
+  if (unsupportedWords(text, evidenceText).length) return fail('unsupported_wording', ids);
+  if (creationRelationships(text).length && (!cited.some((entry) => ['project', 'role'].includes(entry.type)
+      || (entry.type === 'authorship' && ['project', 'role'].includes(entry.sectionType)))
+      || creationObjectIsBareTechnology(text))) {
+    return fail('unsupported_relationship', ids);
+  }
+  return { claimId, status: 'pass', anchorIds: ids };
+}
+
+export function validateClaims({ claims, manifest, cv, jdText = '' } = {}) {
   try {
     if (validateManifest(manifest).length) throw new Error('manifest_invalid');
     if (typeof cv !== 'string') throw new Error('cv_missing');
@@ -459,6 +601,12 @@ export function validateClaims({ claims, manifest, cv } = {}) {
       const claimId = typeof claim?.id === 'string' ? claim.id : `claim-${index + 1}`;
       if (!claim || typeof claim.text !== 'string' || !claim.text.trim()) {
         return { claimId, status: 'fail', reasonCode: 'claim_text_missing', anchorIds: [] };
+      }
+      if (claim.evidence !== undefined) {
+        if (!Array.isArray(claim.evidence) || claim.evidence.length === 0) {
+          return { claimId, status: 'fail', reasonCode: 'evidence_invalid', anchorIds: [] };
+        }
+        return validateCitedClaim(claim, claimId, claim.evidence, allowed, jdText);
       }
       const units = claimedUnits(claim.text);
       if (units.length === 0) return { claimId, status: 'fail', reasonCode: 'no_anchorable_facts', anchorIds: [] };
