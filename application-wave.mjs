@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -296,11 +297,21 @@ function buildReviewMarkdown(waveId, items, waveHash) {
   return lines.join('\n');
 }
 
+function assertDirectoryInsideRoot(root, directory, label) {
+  const rootReal = realpathSync(resolve(root));
+  let ancestor = resolve(directory);
+  if (!within(resolve(root), ancestor)) throw new Error(`${label} escapes the project root`);
+  while (!existsSync(ancestor)) ancestor = dirname(ancestor);
+  if (!within(rootReal, realpathSync(ancestor))) throw new Error(`${label} escapes the project root`);
+}
+
 function makeWaveDirectory(root, waveId) {
   const wavesParent = join(resolve(root), 'output', 'application-waves');
+  assertDirectoryInsideRoot(root, wavesParent, 'Wave output directory');
   mkdirSync(wavesParent, { recursive: true });
   if (!within(realpathSync(resolve(root)), realpathSync(wavesParent))) throw new Error('Wave output directory escapes the project root');
   const waveDir = join(wavesParent, waveId);
+  assertDirectoryInsideRoot(root, waveDir, 'Wave directory');
   mkdirSync(waveDir);
   if (!within(realpathSync(resolve(root)), realpathSync(waveDir))) throw new Error('Wave directory escapes the project root');
   return waveDir;
@@ -382,6 +393,7 @@ function matchingApproval(root, checkPath, sidecar) {
 function writeOrReusePlan(root, manifestPath, candidateId, plan) {
   const planPath = join(dirname(manifestPath), 'documents', candidateId, 'plan.json');
   const planDir = dirname(planPath);
+  assertDirectoryInsideRoot(root, planDir, 'Document plan directory');
   mkdirSync(planDir, { recursive: true });
   if (!within(realpathSync(resolve(root)), realpathSync(planDir))) throw new Error('Document plan directory escapes the project root');
   if (existsSync(planPath)) {
@@ -395,24 +407,50 @@ function writeOrReusePlan(root, manifestPath, candidateId, plan) {
   return { plan, planPath };
 }
 
-async function approveOne(root, item, claimManifestPath) {
+function checkedWaveApproval(root, approvalPath, item) {
+  const path = rootFile(root, approvalPath, 'Cover-letter approval record');
+  const bytes = readFileSync(path);
+  const record = JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, ''));
+  for (const key of ['draftHash', 'textHash', 'pdfHash', ...(Object.hasOwn(record, 'jdHash') ? ['jdHash'] : [])]) {
+    if (record[key] !== item[key]) throw new Error(`Cover-letter approval ${key} changed since review`);
+  }
+  return { path, record, sha256: `${HASH_PREFIX}${createHash('sha256').update(bytes).digest('hex')}` };
+}
+
+function assertReviewedCoverPlan(plan, item, approval) {
+  const source = plan.coverLetter?.v2Source;
+  const binding = source?.approval;
+  for (const key of ['draftHash', 'textHash', 'pdfHash']) {
+    if (binding?.[key] !== item[key] || binding[key] !== approval.record[key]) {
+      throw new Error(`Document plan cover-letter ${key} does not match the reviewed letter`);
+    }
+  }
+  if (!samePath(source.approvedPath, approval.path) || binding.approvalRecordSha256 !== approval.sha256) {
+    throw new Error('Document plan cover-letter approval record changed after verification');
+  }
+}
+
+async function approveOne(root, item, claimManifestPath, { approveLetter, createPlan }) {
   const current = assertNoReviewChanges(root, item);
   const approvedPath = join(dirname(current.checkPath), `${basename(current.checkPath, '.check.json')}.approved.json`);
   const approval = existsSync(approvedPath)
     ? matchingApproval(root, current.checkPath, current.letter.sidecar)
-    : (await approveCoverLetterV2(current.checkPath)).approvedPath;
-  const plan = createDocumentPlan({
+    : (await approveLetter(current.checkPath)).approvedPath;
+  const checkedApproval = checkedWaveApproval(root, approval, item);
+  const plan = createPlan({
     manifestPath: current.manifestPath,
     candidateId: item.candidateId,
     coverV2Approved: approval,
     claimManifestPath,
     root,
   });
+  assertReviewedCoverPlan(plan, item, checkedApproval);
   // The reviewed CV preview must be the CV the document plan actually binds.
   if (basename(plan.cv.path) !== item.cvFilename || plan.cv.sha256 !== item.cvSha256) {
     throw new Error(`Document plan selected ${basename(plan.cv.path)}, not the reviewed CV ${item.cvFilename}`);
   }
   const saved = writeOrReusePlan(root, current.manifestPath, item.candidateId, plan);
+  assertReviewedCoverPlan(saved.plan, item, checkedApproval);
   const prepared = await prepareAndBindDocuments({
     manifestPath: current.manifestPath,
     candidateId: item.candidateId,
@@ -430,7 +468,11 @@ function resolveClaimManifest(root, claimManifestPath) {
   return existsSync(defaultPath) ? rootFile(root, defaultPath, 'Claim manifest') : null;
 }
 
-export async function approveWave({ waveId, confirm, claimManifestPath = null }, { root = ROOT } = {}) {
+export async function approveWave({ waveId, confirm, claimManifestPath = null }, {
+  root = ROOT,
+  approveLetter = approveCoverLetterV2,
+  createPlan = createDocumentPlan,
+} = {}) {
   validateWaveId(waveId);
   const wave = checkCurrentWave(root, waveId, confirm);
   const waveDir = join(resolve(root), 'output', 'application-waves', waveId);
@@ -445,7 +487,7 @@ export async function approveWave({ waveId, confirm, claimManifestPath = null },
       continue;
     }
     try {
-      outcomes.push({ batchId: item.batchId, candidateId: item.candidateId, ...await approveOne(root, item, claims) });
+      outcomes.push({ batchId: item.batchId, candidateId: item.candidateId, ...await approveOne(root, item, claims, { approveLetter, createPlan }) });
     } catch (error) {
       outcomes.push({ batchId: item.batchId, candidateId: item.candidateId, outcome: 'failed', error: error.message || String(error) });
     }

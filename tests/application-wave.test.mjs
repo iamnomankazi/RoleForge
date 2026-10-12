@@ -5,13 +5,16 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createDraftManifest } from '../cv-claims.mjs';
 import { createApplicationBatch, loadBatchState } from '../application-batch.mjs';
+import { createDocumentPlan } from '../application-documents.mjs';
 import { approveCoverLetterV2, runCoverLetterV2 } from '../cover-letter-v2.mjs';
 import { sha256Canonical } from '../application-integrity.mjs';
 import { writeImmutableScanRun } from '../scan-candidate-contract.mjs';
@@ -86,10 +89,13 @@ function draft(company, role, jdText) {
   };
 }
 
-async function makeCheckedLetter(f, index, { jdText = descriptions[index], preapprove = false } = {}) {
+async function makeCheckedLetter(f, index, {
+  jdText = descriptions[index], preapprove = false, signature = 'Synthetic Candidate',
+} = {}) {
   const company = candidates[index].company;
   const role = candidates[index].title;
-  const result = await runCoverLetterV2(draft(company, role, jdText), {
+  const letterDraft = { ...draft(company, role, jdText), signature };
+  const result = await runCoverLetterV2(letterDraft, {
     jdText,
     jdCompany: company,
     jdRole: role,
@@ -111,6 +117,36 @@ function livenessStub(calls = []) {
     calls.push(url);
     return { result: 'active', reason: 'fixture listing is active' };
   };
+}
+
+function replaceCheckedPair(checkPath, replacementPath) {
+  const sidecar = JSON.parse(readFileSync(replacementPath, 'utf8'));
+  for (const [key, extension] of [['text', '.txt'], ['pdf', '.pdf']]) {
+    const target = checkPath.replace(/\.check\.json$/, extension);
+    writeFileSync(target, readFileSync(sidecar.files[key]));
+    sidecar.files[key] = target;
+  }
+  writeFileSync(checkPath, JSON.stringify(sidecar, null, 2));
+}
+
+function assertNothingBound(f, index = 0) {
+  const loaded = loadBatchState(f.batches[index].manifestPath, { root: f.root });
+  assert.equal(loaded.state.preflight.status, 'unconfirmed');
+  for (const key of ['cv', 'coverLetter', 'coverLetterText']) {
+    assert.ok(!loaded.state.candidates[0].artifacts[key]);
+  }
+  assert.equal(existsSync(join(dirname(f.batches[index].manifestPath), 'documents', f.candidateIds[index])), false);
+}
+
+function linkDirectory(t, target, path) {
+  try {
+    symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir');
+    return true;
+  } catch (error) {
+    if (!['EPERM', 'EACCES', 'ENOTSUP', 'ENOSYS'].includes(error.code)) throw error;
+    t.skip(`Directory links are unavailable: ${error.code}`);
+    return false;
+  }
 }
 
 test('review writes the full review and a stable canonical wave hash', async () => {
@@ -214,5 +250,143 @@ test('review flags a letter checked against a different immutable candidate JD',
     assert.match(readFileSync(join(f.root, 'output', 'application-waves', wave.waveId, 'review.md'), 'utf8'), /NOT APPROVABLE/);
   } finally {
     rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('a valid replacement swapped after review checks fails before planning or binding', async () => {
+  const f = fixture();
+  try {
+    const reviewedCheck = await makeCheckedLetter(f, 0);
+    const replacementCheck = await makeCheckedLetter(f, 0, { signature: 'Another Synthetic Candidate' });
+    f.checkPaths[0] = reviewedCheck;
+    await makeCheckedLetter(f, 1);
+    const wave = await reviewWave({ waveId: 'approval-race-wave', items: entries(f) }, { root: f.root, liveness: livenessStub() });
+    let replacementApproval;
+    const result = await approveWave({ waveId: wave.waveId, confirm: wave.waveHash }, {
+      root: f.root,
+      approveLetter: async (checkPath) => {
+        if (checkPath === reviewedCheck) {
+          replaceCheckedPair(checkPath, replacementCheck);
+          const approved = await approveCoverLetterV2(checkPath);
+          replacementApproval = readFileSync(approved.approvedPath, 'utf8');
+          return approved;
+        }
+        return approveCoverLetterV2(checkPath);
+      },
+    });
+    assert.equal(result.items[0].outcome, 'failed');
+    assert.match(result.items[0].error, /approval draftHash changed since review/);
+    const record = JSON.parse(replacementApproval);
+    for (const key of ['draftHash', 'textHash', 'pdfHash']) assert.notEqual(record[key], wave.items[0][key]);
+    assert.equal(readFileSync(reviewedCheck.replace(/\.check\.json$/, '.approved.json'), 'utf8'), replacementApproval);
+    assertNothingBound(f);
+    assert.equal(result.items[1].outcome, 'prepared');
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('existing approval hashes must match the reviewed item, including an optional JD hash', async () => {
+  const f = fixture();
+  try {
+    const checkPath = await makeCheckedLetter(f, 0, { preapprove: true });
+    const approvalPath = checkPath.replace(/\.check\.json$/, '.approved.json');
+    const original = JSON.parse(readFileSync(approvalPath, 'utf8'));
+    for (const key of ['draftHash', 'textHash', 'pdfHash', 'jdHash']) {
+      const wave = await reviewWave({ waveId: `mismatch-${key}`, items: entries(f, [0]) }, { root: f.root, liveness: livenessStub() });
+      const changed = JSON.stringify({ ...original, [key]: '0'.repeat(64) });
+      writeFileSync(approvalPath, changed);
+      const result = await approveWave({ waveId: wave.waveId, confirm: wave.waveHash }, { root: f.root });
+      assert.equal(result.items[0].outcome, 'failed', key);
+      assert.match(result.items[0].error, /approval.*(?:does not match|changed since review)/i);
+      assert.equal(readFileSync(approvalPath, 'utf8'), changed);
+      assertNothingBound(f);
+    }
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('a plan for a valid replacement pair cannot bind under the reviewed wave hash', async () => {
+  const f = fixture();
+  try {
+    const reviewedCheck = await makeCheckedLetter(f, 0, { preapprove: true });
+    const replacementCheck = await makeCheckedLetter(f, 0, { signature: 'Another Synthetic Candidate', preapprove: true });
+    f.checkPaths[0] = reviewedCheck;
+    const wave = await reviewWave({ waveId: 'plan-race-wave', items: entries(f, [0]) }, { root: f.root, liveness: livenessStub() });
+    let replacementPlan;
+    const result = await approveWave({ waveId: wave.waveId, confirm: wave.waveHash }, {
+      root: f.root,
+      createPlan: (options) => {
+        replacementPlan = createDocumentPlan({
+          ...options, coverV2Approved: replacementCheck.replace(/\.check\.json$/, '.approved.json'),
+        });
+        return replacementPlan;
+      },
+    });
+    assert.equal(replacementPlan.documentState, 'ready');
+    assert.equal(result.items[0].outcome, 'failed');
+    assert.match(result.items[0].error, /Document plan cover-letter draftHash does not match the reviewed letter/);
+    assertNothingBound(f);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('a plan must reference the exact approval record verified for the wave', async () => {
+  const f = fixture();
+  try {
+    await makeCheckedLetter(f, 0, { preapprove: true });
+    const wave = await reviewWave({ waveId: 'plan-record-wave', items: entries(f, [0]) }, { root: f.root, liveness: livenessStub() });
+    const result = await approveWave({ waveId: wave.waveId, confirm: wave.waveHash }, {
+      root: f.root,
+      createPlan: (options) => {
+        // Simulate replacing the record after wave verification while keeping the same letter hashes.
+        const record = JSON.parse(readFileSync(options.coverV2Approved, 'utf8'));
+        record.approvedAt = '2020-01-01T00:00:00.000Z';
+        writeFileSync(options.coverV2Approved, JSON.stringify(record));
+        return createDocumentPlan(options);
+      },
+    });
+    assert.equal(result.items[0].outcome, 'failed');
+    assert.match(result.items[0].error, /approval record changed after verification/);
+    assertNothingBound(f);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('review rejects an external output link before creating application-waves', async (t) => {
+  const container = mkdtempSync(join(tmpdir(), 'career-ops-wave-link-'));
+  const root = join(container, 'root');
+  const outside = join(container, 'outside');
+  try {
+    mkdirSync(root);
+    mkdirSync(outside);
+    if (!linkDirectory(t, outside, join(root, 'output'))) return;
+    await assert.rejects(reviewWave({
+      waveId: 'escape-wave', items: [{ batchId: 'missing-batch', checkPath: 'missing.check.json' }],
+    }, { root, liveness: livenessStub() }), /Wave output directory escapes the project root/);
+    assert.deepEqual(readdirSync(outside), []);
+  } finally {
+    rmSync(container, { recursive: true, force: true });
+  }
+});
+
+test('approval rejects an external documents link before creating the candidate directory', async (t) => {
+  const f = fixture();
+  const outside = mkdtempSync(join(tmpdir(), 'career-ops-wave-outside-'));
+  try {
+    await makeCheckedLetter(f, 0, { preapprove: true });
+    const wave = await reviewWave({ waveId: 'plan-link-wave', items: entries(f, [0]) }, { root: f.root, liveness: livenessStub() });
+    if (!linkDirectory(t, outside, join(dirname(f.batches[0].manifestPath), 'documents'))) return;
+    const result = await approveWave({ waveId: wave.waveId, confirm: wave.waveHash }, { root: f.root });
+    assert.equal(result.items[0].outcome, 'failed');
+    assert.match(result.items[0].error, /Document plan directory escapes the project root/);
+    assertNothingBound(f);
+    assert.deepEqual(readdirSync(outside), []);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });
