@@ -115,6 +115,23 @@ test('invalid and contradictory reports never enter Apply or Review', (t) => {
   assert.match(renderShortlist(result, out), /## Invalid reports \(5\)/);
 });
 
+test('a report with a Supersedes header removes the named report from the active lists', (t) => {
+  const { reports, add, out } = fixture(t);
+  add('010-acme-2026-10-12.md', { company: 'Acme', role: 'Working Student', candidate_id: 'cand-acme', date: '2026-10-12' });
+  add('020-acme-2026-10-12.md', {
+    company: 'Acme', role: 'Working Student', candidate_id: 'cand-acme', date: '2026-10-12',
+    blockers: [{ code: 'work_auth_restricted', evidence: 'Form asks: enrolled in Germany?' }],
+  }, '**Supersedes:** [010](reports/010-acme-2026-10-12.md)');
+  add('030-other.md', { company: 'Other' }, '**Supersedes:** [999](reports/999-missing.md)');
+  const result = collectReports({ reports });
+  assert.deepEqual(result.apply.map((entry) => entry.company), ['Other'], 'a missing supersede target changes nothing');
+  assert.deepEqual(result.skip.map((entry) => entry.report.split(/[\\/]/).at(-1)), ['020-acme-2026-10-12.md']);
+  assert.equal(result.superseded.length, 1);
+  assert.match(result.superseded[0].report, /010-acme/);
+  assert.match(result.superseded[0].superseded_by, /020-acme/);
+  assert.match(renderShortlist(result, out), /Superseded reports \(kept for audit, not listed\): 1\./);
+});
+
 test('since filters inclusively by summary date, Date/Fecha header, or filename', (t) => {
   const { reports, add } = fixture(t);
   add('older-2026-10-01.md', { company: 'Older' });
@@ -194,7 +211,7 @@ test('CLI writes Markdown and emits JSON counts; unknown flags and missing value
   const run = (...args) => spawnSync(process.execPath, [join(root, 'shortlist.mjs'), ...args], { cwd: root, encoding: 'utf8' });
   const result = run('--reports', reports, '--out', out, '--json');
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout).counts, { apply: 1, review: 0, skip: 0, legacy: 0, invalid: 0, excluded: 0 });
+  assert.deepEqual(JSON.parse(result.stdout).counts, { apply: 1, review: 0, skip: 0, legacy: 0, invalid: 0, superseded: 0, excluded: 0 });
   assert.match(readFileSync(out, 'utf8'), /## Apply \(1\)/);
   assert.equal(run('--help').status, 0);
   assert.match(run('--help').stdout, /Usage: node shortlist.mjs/);

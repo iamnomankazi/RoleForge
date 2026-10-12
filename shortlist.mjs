@@ -110,12 +110,28 @@ function deduplicateCandidates(candidates) {
   return unique;
 }
 
+// A re-assessment names the report it replaces in a `**Supersedes:** [num](reports/<file>)` header.
+// The replaced report stays on disk for audit but leaves the active lists.
+function supersededReports(root, files) {
+  const superseded = new Map();
+  for (const file of files) {
+    const header = readFileSync(join(root, file.name), 'utf8').match(/^\*\*Supersedes:\*\*\s*\[[^\]]*\]\(([^)]+)\)/m);
+    if (!header) continue;
+    const target = header[1].split(/[\\/]/).at(-1);
+    if (target !== file.name && files.some((entry) => entry.name === target)) superseded.set(target, file.name);
+  }
+  return superseded;
+}
+
 export function collectReports({ reports = 'reports', since = null } = {}) {
-  const result = { apply: [], review: [], skip: [], legacy: [], invalid: [], excluded: 0 };
+  const result = { apply: [], review: [], skip: [], legacy: [], invalid: [], superseded: [], excluded: 0 };
   const candidates = [];
   const root = resolve(reports);
-  for (const file of readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isFile() && /\.md$/i.test(entry.name)).sort((a, b) => a.name.localeCompare(b.name, 'en'))) {
+  const files = readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isFile() && /\.md$/i.test(entry.name)).sort((a, b) => a.name.localeCompare(b.name, 'en'));
+  const superseded = supersededReports(root, files);
+  for (const file of files) {
     const report = join(root, file.name);
+    if (superseded.has(file.name)) { result.superseded.push({ report, superseded_by: join(root, superseded.get(file.name)) }); continue; }
     const markdown = readFileSync(report, 'utf8');
     const summary = parseReportMachineSummary(markdown);
     const date = reportDate(summary, markdown, file.name);
@@ -162,7 +178,9 @@ export function renderShortlist(result, out = 'data/shortlist.md') {
     }
     lines.push('');
   }
-  lines.push(`## Skip (${result.skip.length})`, '', `Count: ${result.skip.length}.`, '', `## Needs re-assessment (legacy format) (${result.legacy.length})`, '');
+  lines.push(`## Skip (${result.skip.length})`, '', `Count: ${result.skip.length}.`, '');
+  if (result.superseded?.length) lines.push(`Superseded reports (kept for audit, not listed): ${result.superseded.length}.`, '');
+  lines.push(`## Needs re-assessment (legacy format) (${result.legacy.length})`, '');
   if (!result.legacy.length) lines.push('None.', '');
   for (const entry of result.legacy) lines.push(`- ${reportLink(entry.report, out)} — ${cell(entry.company)} — ${cell(entry.role)}`);
   if (result.invalid.length) {
@@ -178,10 +196,10 @@ export function main(args = process.argv.slice(2)) {
   const result = collectReports(options);
   mkdirSync(dirname(resolve(options.out)), { recursive: true });
   writeFileSync(resolve(options.out), renderShortlist(result, options.out), 'utf8');
-  const counts = Object.fromEntries(['apply', 'review', 'skip', 'legacy', 'invalid'].map((key) => [key, result[key].length]));
+  const counts = Object.fromEntries(['apply', 'review', 'skip', 'legacy', 'invalid', 'superseded'].map((key) => [key, result[key].length]));
   counts.excluded = result.excluded;
   if (options.json) console.log(JSON.stringify({ out: resolve(options.out), counts, ...result }, null, 2));
-  else console.log(`Shortlist written to ${options.out}: Apply ${counts.apply}, Review ${counts.review}, Skip ${counts.skip}, Legacy ${counts.legacy}, Invalid ${counts.invalid}, Excluded ${counts.excluded}`);
+  else console.log(`Shortlist written to ${options.out}: Apply ${counts.apply}, Review ${counts.review}, Skip ${counts.skip}, Legacy ${counts.legacy}, Invalid ${counts.invalid}, Superseded ${counts.superseded}, Excluded ${counts.excluded}`);
   if (counts.invalid) process.exitCode = 1;
 }
 

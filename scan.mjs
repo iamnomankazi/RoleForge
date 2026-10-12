@@ -316,7 +316,8 @@ function createExplicitNonTargetLocationMatcher(targetEntries) {
     // comma-separated location fields, never as arbitrary short words.
     const fields = text.split(',').slice(1).map((field) => normalizeLocationText(field).trim());
     for (const field of fields) {
-      const code = field.match(/^([a-z]{2})(?:\s+\d{5}(?:-\d{4})?)?$/)?.[1];
+      // A code may carry a ZIP or a suffix such as "DE (ICD) - R&D - Customer Processes".
+      const code = field.match(/^([a-z]{2})(?:\s+\d{5}(?:-\d{4})?)?(?:\s*(?:\(|-\s).*)?$/)?.[1];
       if (!code) continue;
       if (US_STATE_CODES.has(code)) {
         // Delaware's code is also Germany's ISO alias. Keep the established
