@@ -161,6 +161,7 @@ const SYSTEM_PATHS = [
   'application-reasoning-provider.mjs',
   'application-reasoning.mjs',
   'application-shared-browser.mjs',
+  'application-wave.mjs',
   'application-submission.mjs',
   'candidate-identity.mjs',
   'candidate-liveness.mjs',

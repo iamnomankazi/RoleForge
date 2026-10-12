@@ -142,7 +142,7 @@ function loadApprovedCoverLetterV2(approvedPath, candidate) {
   };
 }
 
-function immutableCandidateJdHash(sourceCandidate) {
+export function immutableCandidateJdHash(sourceCandidate) {
   const sourceRow = sourceCandidate?.sourceRow || {};
   const value = sourceRow.description ?? sourceRow.jobDescription;
   if (typeof value !== 'string' || value.trim().length < 120) return null;
