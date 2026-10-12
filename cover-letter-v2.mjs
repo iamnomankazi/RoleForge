@@ -517,7 +517,7 @@ export async function runCoverLetterV2(draft, {
   }
 }
 
-export async function approveCoverLetterV2(checkPath, { now = new Date() } = {}) {
+export async function approveCoverLetterV2(checkPath, { now = new Date(), expected = null } = {}) {
   const sidecarPath = resolve(checkPath);
   if (!sidecarPath.endsWith('.check.json')) throw new Error('Approval requires a .check.json sidecar');
   const sidecar = JSON.parse((await readFile(sidecarPath, 'utf8')).replace(/^\uFEFF/, ''));
@@ -540,6 +540,12 @@ export async function approveCoverLetterV2(checkPath, { now = new Date() } = {})
   const [textBytes, pdfBytes] = await Promise.all([readFile(textPath), readFile(pdfPath)]);
   if (sha256(textBytes) !== sidecar.textHash || sha256(pdfBytes) !== sidecar.pdfHash) {
     throw new Error('Cover-letter v2 pair hash mismatch; refusing approval');
+  }
+  // A caller that reviewed specific hashes (e.g. a wave) gets no approval record for any other letter.
+  for (const key of ['draftHash', 'jdHash', 'textHash', 'pdfHash']) {
+    if (expected && expected[key] !== undefined && sidecar[key] !== expected[key]) {
+      throw new Error(`Cover-letter v2 ${key} differs from the reviewed letter; refusing approval`);
+    }
   }
   const approvedPath = join(dirname(sidecarPath), `${stem}.approved.json`);
   const approval = {

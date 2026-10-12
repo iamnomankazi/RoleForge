@@ -261,24 +261,19 @@ test('a valid replacement swapped after review checks fails before planning or b
     f.checkPaths[0] = reviewedCheck;
     await makeCheckedLetter(f, 1);
     const wave = await reviewWave({ waveId: 'approval-race-wave', items: entries(f) }, { root: f.root, liveness: livenessStub() });
-    let replacementApproval;
     const result = await approveWave({ waveId: wave.waveId, confirm: wave.waveHash }, {
       root: f.root,
-      approveLetter: async (checkPath) => {
+      approveLetter: async (checkPath, options) => {
         if (checkPath === reviewedCheck) {
           replaceCheckedPair(checkPath, replacementCheck);
-          const approved = await approveCoverLetterV2(checkPath);
-          replacementApproval = readFileSync(approved.approvedPath, 'utf8');
-          return approved;
+          return approveCoverLetterV2(checkPath, options);
         }
-        return approveCoverLetterV2(checkPath);
+        return approveCoverLetterV2(checkPath, options);
       },
     });
     assert.equal(result.items[0].outcome, 'failed');
-    assert.match(result.items[0].error, /approval draftHash changed since review/);
-    const record = JSON.parse(replacementApproval);
-    for (const key of ['draftHash', 'textHash', 'pdfHash']) assert.notEqual(record[key], wave.items[0][key]);
-    assert.equal(readFileSync(reviewedCheck.replace(/\.check\.json$/, '.approved.json'), 'utf8'), replacementApproval);
+    assert.match(result.items[0].error, /differs from the reviewed letter; refusing approval/);
+    assert.equal(existsSync(reviewedCheck.replace(/.check.json$/, '.approved.json')), false, 'no approval record for the unreviewed replacement');
     assertNothingBound(f);
     assert.equal(result.items[1].outcome, 'prepared');
   } finally {

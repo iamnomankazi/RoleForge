@@ -435,7 +435,9 @@ async function approveOne(root, item, claimManifestPath, { approveLetter, create
   const approvedPath = join(dirname(current.checkPath), `${basename(current.checkPath, '.check.json')}.approved.json`);
   const approval = existsSync(approvedPath)
     ? matchingApproval(root, current.checkPath, current.letter.sidecar)
-    : (await approveLetter(current.checkPath)).approvedPath;
+    : (await approveLetter(current.checkPath, {
+      expected: { draftHash: item.draftHash, jdHash: item.jdHash, textHash: item.textHash, pdfHash: item.pdfHash },
+    })).approvedPath;
   const checkedApproval = checkedWaveApproval(root, approval, item);
   const plan = createPlan({
     manifestPath: current.manifestPath,
