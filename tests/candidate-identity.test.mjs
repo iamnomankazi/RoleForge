@@ -48,6 +48,45 @@ test('ATS tenant prevents numeric requisition collisions', () => {
   assert.notEqual(deriveCandidateId({ url: first }), deriveCandidateId({ url: second }));
 });
 
+test('Workday requisition comes from the job slug even when the site name contains underscores', () => {
+  const bi = 'https://abb.wd3.myworkdayjobs.com/external_career_page/job/Bangalore-Karnataka-India/Business-Intelligence-Specialist_JR00044784';
+  const twincat = 'https://abb.wd3.myworkdayjobs.com/external_career_page/job/Heidelberg-Baden-Wurttemberg-Germany/SOFTWARE-DEVELOPER--F-M-D----SPECIAL-PURPOSE-MACHINES_JR00042690';
+  assert.equal(atsIdentityFromUrl(bi), 'ats:workday:abb.wd3.myworkdayjobs.com:external_career_page:jr00044784');
+  assert.equal(atsIdentityFromUrl(twincat), 'ats:workday:abb.wd3.myworkdayjobs.com:external_career_page:jr00042690');
+  assert.notEqual(deriveCandidateId({ url: bi }), deriveCandidateId({ url: twincat }));
+  assert.equal(
+    atsIdentityFromUrl('https://gehc.wd5.myworkdayjobs.com/GEHC_ExternalSite/job/FIN03-01-Helsinki-Kuortaneenkatu-2/Algorithm-Developer_R4047162-2'),
+    'ats:workday:gehc.wd5.myworkdayjobs.com:gehc_externalsite:r4047162-2',
+  );
+});
+
+test('Workday apply suffixes keep the same identity and sites without underscores keep their IDs', () => {
+  const base = 'https://acme.wd3.myworkdayjobs.com/Careers/job/Helsinki/Backend-Engineer_R123';
+  assert.equal(deriveCandidateId({ url: `${base}/apply` }), deriveCandidateId({ url: base }));
+  assert.equal(deriveCandidateId({ url: `${base}/apply/applyManually` }), deriveCandidateId({ url: base }));
+  // Unchanged identity string for the common case keeps historical candidate IDs stable.
+  assert.equal(atsIdentityFromUrl('https://alpha.wd3.myworkdayjobs.com/Alpha/job/Helsinki/Engineer_R-100'), 'ats:workday:alpha.wd3.myworkdayjobs.com:alpha:r-100');
+});
+
+test('two openings on an underscore-named Workday site are never merged', () => {
+  const result = mergeCandidates([{ name: 'reverse.json', rows: [
+    { company: 'PwC', title: 'Medior Backend Developer | Python', location: 'Amsterdam',
+      url: 'https://pwc.wd3.myworkdayjobs.com/crm_experienced_careers_site/job/Amsterdam/Medior-Backend-Developer---Python_741045WD-3' },
+    { company: 'PwC', title: 'Forward Deployed AI Engineer', location: 'Amsterdam',
+      url: 'https://pwc.wd3.myworkdayjobs.com/crm_experienced_careers_site/job/Amsterdam/Forward-Deployed-AI-Engineer_758239WD-4' },
+  ] }]);
+  assert.equal(result.candidates.length, 2);
+  assert.equal(result.duplicates, 0);
+});
+
+test('a stale worker requisition field conflicts loudly instead of re-identifying a Workday URL', () => {
+  const url = 'https://abb.wd3.myworkdayjobs.com/external_career_page/job/Bangalore-Karnataka-India/Business-Intelligence-Specialist_JR00044784';
+  assert.throws(
+    () => deriveCandidateId({ url, provider: 'workday', ats_tenant: 'abb.wd3.myworkdayjobs.com:external_career_page', requisition_id: 'page' }),
+    /Conflicting ATS identities/,
+  );
+});
+
 test('original and resolved URLs are retained as aliases without changing ATS identity', () => {
   const original = 'https://careers.example.test/redirect/42?utm_campaign=x';
   const resolved = 'https://jobs.ashbyhq.com/acme/12345678-abcd-1234-abcd-1234567890ab';

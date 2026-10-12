@@ -89,7 +89,12 @@ export function atsIdentityFromUrl(value) {
 
   if (host.endsWith('.myworkdayjobs.com')) {
     const segments = path.split('/').filter(Boolean);
-    const requisition = path.match(/_([A-Za-z0-9-]+)(?:[/?]|$)/)?.[1];
+    // The requisition is the suffix of the job slug (".../job/<location>/<Title>_<REQ>[/apply...]").
+    // Site names may contain underscores ("external_career_page", "GEHC_ExternalSite"), so never
+    // read the requisition from earlier path segments.
+    const jobAt = segments.indexOf('job');
+    const slug = (jobAt >= 0 ? segments.slice(jobAt + 1) : segments).filter((part) => !/^apply/i.test(part)).at(-1);
+    const requisition = slug?.match(/_([A-Za-z0-9-]+)$/)?.[1];
     if (segments[0] && requisition) {
       return `ats:workday:${normalizeIdentityPart(host)}:${normalizeIdentityPart(segments[0])}:${normalizeIdentityPart(requisition)}`;
     }
