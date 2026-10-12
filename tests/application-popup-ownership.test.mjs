@@ -143,3 +143,23 @@ test('unverifiable, cyclic and overlong opener chains fail closed without inspec
   assert.equal(distant.openerCalls, 1);
   assertIgnored(unavailable, cyclic, distant, f.retained);
 });
+
+test('a popup proven owned stays owned after its intermediate opener closes before the form loads', async () => {
+  const f = fixture();
+  const intermediate = mockPage({ url: 'about:blank', opener: f.active, form: false });
+  const nested = mockPage({ url: 'about:blank', opener: intermediate, form: false });
+  const loadedForm = mockPage();
+  f.createOnClick(intermediate, nested);
+  let waits = 0;
+  f.active.waitForTimeout = async () => {
+    if (++waits !== 1) return;
+    // The intermediate tab closes; Playwright then reports no opener, and the nested popup loads the form.
+    nested.opener = async () => null;
+    nested.url = loadedForm.url;
+    nested.evaluate = async function () { this.snapshotCalls += 1; return loadedForm.evaluate(); };
+  };
+
+  assert.equal(await f.follow(1_000), nested);
+  assert.equal(nested.closeCalls, 0);
+  assertIgnored(f.retained);
+});

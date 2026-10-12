@@ -932,11 +932,15 @@ async function inspectContinuationAttempt(context, page, before, beforeUrl, expe
   const observedUrls = new Set([beforeUrl]);
   let created = [];
   let snapshots = [];
+  // Ownership proven once stays proven for this attempt, even if an intermediate opener later closes.
+  const provenOwned = new Set();
   do {
     const newPages = context.pages().filter((candidatePage) => !before.has(candidatePage));
     // Shared contexts retain other candidates' tabs; only proven descendants are ours.
-    const owned = await Promise.all(newPages.map((candidatePage) => isOwnedContinuationPopup(candidatePage, page)));
+    const owned = await Promise.all(newPages.map(async (candidatePage) => provenOwned.has(candidatePage)
+      || isOwnedContinuationPopup(candidatePage, page)));
     created = newPages.filter((candidatePage, index) => owned[index]);
+    for (const candidatePage of created) provenOwned.add(candidatePage);
     const pages = [page, ...created];
     snapshots = await Promise.all(pages.map(async (candidatePage) => {
       await candidatePage.waitForLoadState('domcontentloaded', { timeout: 500 }).catch(() => {});
