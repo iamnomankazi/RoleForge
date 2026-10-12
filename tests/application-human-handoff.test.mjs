@@ -254,7 +254,7 @@ test('gate appearing during preparation uses the same page and resumes the real 
   } finally { f.cleanup(); modes.clear(); }
 });
 
-test('shared runner waits for first timeout before preparing second exact candidate', async () => {
+test('shared runner defers the first CAPTCHA, prepares the next candidate, then revisits the paused tab', async () => {
   const f = fixture(2);
   modes.set('/apply/1', 'captcha');
   const e = environment(f);
@@ -266,13 +266,14 @@ test('shared runner waits for first timeout before preparing second exact candid
       executorDependencies: async () => e.dependencies,
       onCandidateComplete: (entry) => completed.push(entry.result.state),
       waitForBrowserClose: async () => {
-        assert.deepEqual(completed, ['human_action_required', 'form_prepared']);
-        assert.equal(session.context.pages().length, 1);
-        assert.equal(await session.context.pages()[0].evaluate(() => window.finalClicks), 0);
+        assert.deepEqual(completed, ['human_action_required', 'form_prepared'], 'the CAPTCHA did not block the second candidate');
+        assert.equal(session.context.pages().length, 2, 'both candidate tabs stay open for review');
+        for (const page of session.context.pages()) assert.equal(await page.evaluate(() => window.finalClicks), 0);
         await session.close();
       },
     });
     assert.deepEqual(result.completed.map((row) => row.state), ['human_action_required', 'form_prepared']);
+    assert.equal(result.completed[0].pass1State, 'human_action_required');
     assert.equal(f.state().state, 'human_action_required');
     assert.equal(f.state(1).state, 'form_prepared');
     assertSafe(e);
@@ -390,21 +391,28 @@ test('posting revalidation transport failure blocks the cleared candidate', asyn
   } finally { f.cleanup(); modes.clear(); }
 });
 
-test('last shared candidate timeout closes the profile and returns without waiting for browser review', async () => {
+test('a deferred shared CAPTCHA cleared by the human finishes preparation on the same tab', async () => {
   const f = fixture();
   modes.set('/apply/1', 'captcha');
-  const e = environment(f);
+  const e = environment(f, { onSleep: async ({ page }) => { modes.clear(); await page.reload(); } });
+  let session;
+  let pagesBeforeClose;
   try {
-    const result = await runSharedBrowserSession({ root: f.root, batchIds: ['handoff-1'], humanWaitMs: 1000 }, {
-      openBrowserProfile: e.dependencies.openBrowserProfile,
+    const result = await runSharedBrowserSession({ root: f.root, batchIds: ['handoff-1'], humanWaitMs: 5000 }, {
+      openBrowserProfile: async () => { session = await e.dependencies.openBrowserProfile(); return session; },
       executorDependencies: async () => e.dependencies,
-      waitForBrowserClose: async () => assert.fail('Timeout must exit instead of waiting for manual browser close'),
+      waitForBrowserClose: async () => {
+        pagesBeforeClose = session.context.pages().length;
+        assert.equal(await session.context.pages()[0].evaluate(() => window.finalClicks), 0);
+        await session.close();
+      },
     });
-    assert.equal(result.completed[0].state, 'human_action_required');
-    assert.equal(result.browserRemainsOpen, false);
+    assert.equal(result.completed[0].pass1State, 'human_action_required');
+    assert.equal(result.completed[0].state, 'form_prepared');
+    assert.equal(pagesBeforeClose, 1, 'the paused candidate resumed on its own tab without opening another');
     assert.equal(existsSync(join(f.root, 'output', 'application-batches', 'handoff-1', '.execution.lock')), false);
     assertSafe(e);
-  } finally { f.cleanup(); modes.clear(); }
+  } finally { await session?.close(); f.cleanup(); modes.clear(); }
 });
 
 for (const failure of [false, true]) {

@@ -1377,6 +1377,7 @@ function candidateResult(contract, state) {
     currentUrl: state.currentUrl,
     submissionAvailable: false,
     trackerUpdated: false,
+    ...(state.deferred === true ? { deferred: true } : {}),
   };
 }
 
@@ -1454,6 +1455,10 @@ async function handoffHumanGate(page, contract, gate, stage, options, { root, ex
   }
   const gateUrl = state.humanAction.currentUrl;
   const log = dependencies.log || console.log;
+  if (options.deferHumanHandoff === true) {
+    log(`Candidate ${contract.candidate.company} — ${contract.candidate.title} (${candidateId}) is paused for a human check in its own tab (${gate.cause}). Never click the final application button.`);
+    return { ...state, deferred: true };
+  }
   log(`Human action required: ${contract.candidate.company} — ${contract.candidate.title} (${candidateId}); cause: ${gate.cause}. Complete it in the open browser page for this candidate. Never click the final application button. Then press Enter here.`);
   const clock = dependencies.humanClock || Date.now;
   const waitMs = options.humanWaitMs ?? DEFAULT_HUMAN_WAIT_MS;
@@ -1886,6 +1891,7 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
       coverLetter: contract.candidate.artifacts.coverLetter?.intendedFilename || null,
       submissionAvailable: false,
       trackerUpdated: false,
+      ...(finalState?.deferred === true ? { deferred: true } : {}),
     };
   } catch (error) {
     if (['listing_verified', 'actual_form_reached', 'form_inspected', 'fields_filled', 'files_uploaded'].includes(finalState?.state)) {
@@ -1908,7 +1914,7 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
     if (dependencies.beforeBrowserClose) {
       await dependencies.beforeBrowserClose({ browser, context, contract, ownsBrowser });
     }
-    if (ownsBrowser) await closeOwnedBrowserSession(ownedBrowserSession, browser);
+    if (ownsBrowser && !finalState?.deferred) await closeOwnedBrowserSession(ownedBrowserSession, browser);
   }
 }
 
@@ -1991,8 +1997,35 @@ async function executePreparationResume(options, contract, { root, executionLock
     : null;
   const browser = sharedSession?.browser || ownedBrowserSession.browser;
   const context = sharedSession?.context || ownedBrowserSession.context;
+  let finalState = null;
   try {
     const listingPage = sharedSession?.page || await context.newPage();
+    if (options.continueOnPage === true && options.resumePreparation === true
+        && fromState === 'human_action_required' && sharedSession?.page) {
+      if (listingPage.isClosed()) {
+        return { ...candidateResult(contract, contract.candidateState), resumeSkipped: 'page_closed' };
+      }
+      let snapshot;
+      try {
+        snapshot = await collectPageSnapshot(listingPage);
+      } catch (error) {
+        if (!listingPage.isClosed()) throw error;
+        return { ...candidateResult(contract, contract.candidateState), resumeSkipped: 'page_closed' };
+      }
+      if (listingPage.isClosed()) {
+        return { ...candidateResult(contract, contract.candidateState), resumeSkipped: 'page_closed' };
+      }
+      const identity = verifyVisibleIdentity(snapshot, contract.candidate);
+      const gate = contract.candidateState.humanAction;
+      if (!compatibleHumanDestination(contract, snapshot.currentUrl, identity, gate.currentUrl)) {
+        return { ...candidateResult(contract, contract.candidateState), resumeSkipped: 'incompatible_destination' };
+      }
+      if (dependencies.onCandidatePage) await dependencies.onCandidatePage(listingPage, contract);
+      finalState = await finishHumanHandoff(listingPage, contract, gate,
+        gate.stage || 'application_entry', options, { root, executionLock, dependencies });
+      await waitForCandidateReview(browser, ownsBrowser, finalState, options, dependencies);
+      return candidateResult(contract, finalState);
+    }
     if (dependencies.onCandidatePage) await dependencies.onCandidatePage(listingPage, contract);
     const live = await (dependencies.checkUrlLiveness || checkUrlLiveness)(listingPage, listingUrl);
     const listingSnapshot = await collectPageSnapshot(listingPage);
@@ -2001,7 +2034,7 @@ async function executePreparationResume(options, contract, { root, executionLock
     const compatible = compatibleHumanDestination(contract, listingSnapshot.currentUrl, identity, null);
     if (compatible && (form.humanGate || form.loginRequired
         || (form.actualForm && ['human_action_required', 'login_required'].includes(fromState)))) {
-      const state = await finishHumanHandoff(listingPage, contract, form.humanGate
+      const state = finalState = await finishHumanHandoff(listingPage, contract, form.humanGate
         || contract.candidateState.humanAction || { cause: 'login', evidence: ['legacy_login_gate'] },
         'listing', options, { root, executionLock, dependencies });
       await waitForCandidateReview(browser, ownsBrowser, state, options, dependencies);
@@ -2030,7 +2063,7 @@ async function executePreparationResume(options, contract, { root, executionLock
     if ((entryFlow.form.humanGate || entryFlow.form.loginRequired) && entryFlow.compatible) {
       if (dependencies.onCandidatePage) await dependencies.onCandidatePage(page, contract);
       if (page !== listingPage) await listingPage.close().catch(() => {});
-      const state = await finishHumanHandoff(page, contract, entryFlow.form.humanGate
+      const state = finalState = await finishHumanHandoff(page, contract, entryFlow.form.humanGate
         || { cause: 'login', evidence: ['legacy_login_gate'] }, 'application_entry', options,
         { root, executionLock, dependencies });
       await waitForCandidateReview(browser, ownsBrowser, state, options, dependencies);
@@ -2051,7 +2084,7 @@ async function executePreparationResume(options, contract, { root, executionLock
     if (dependencies.onCandidatePage) await dependencies.onCandidatePage(page, contract);
     if (page !== listingPage) await listingPage.close().catch(() => {});
     if (['human_action_required', 'login_required'].includes(fromState)) {
-      const state = await finishHumanHandoff(page, contract, contract.candidateState.humanAction
+      const state = finalState = await finishHumanHandoff(page, contract, contract.candidateState.humanAction
         || { cause: 'login', evidence: ['legacy_login_gate'] }, 'application_entry', options,
         { root, executionLock, dependencies });
       await waitForCandidateReview(browser, ownsBrowser, state, options, dependencies);
@@ -2064,7 +2097,7 @@ async function executePreparationResume(options, contract, { root, executionLock
         fromState, executionLock.token, { entryActions: entryFlow.hops }, null, root,
       );
     }
-    const state = options.prepareForm
+    const state = finalState = options.prepareForm
       ? await prepareResumedForm(page, contract, root, executionLock, options, dependencies)
       : loadExecutionContract(contract.manifestPath, contract.candidate.candidate_id, { root }).candidateState;
     await waitForCandidateReview(browser, ownsBrowser, state, options, dependencies);
@@ -2075,6 +2108,7 @@ async function executePreparationResume(options, contract, { root, executionLock
       currentUrl: state.currentUrl,
       submissionAvailable: false,
       trackerUpdated: false,
+      ...(state.deferred === true ? { deferred: true } : {}),
     };
   } catch (error) {
     const current = loadExecutionContract(contract.manifestPath, contract.candidate.candidate_id, { root, requireCoverLetter: true }).candidateState.state;
@@ -2091,7 +2125,7 @@ async function executePreparationResume(options, contract, { root, executionLock
     if (dependencies.beforeBrowserClose) {
       await dependencies.beforeBrowserClose({ browser, context, contract, ownsBrowser });
     }
-    if (ownsBrowser) await closeOwnedBrowserSession(ownedBrowserSession, browser);
+    if (ownsBrowser && !finalState?.deferred) await closeOwnedBrowserSession(ownedBrowserSession, browser);
   }
 }
 function usage() {
