@@ -911,13 +911,32 @@ export async function clearBenignListingSiteChrome(page) {
   return { cleared: true, detected: true, actions: [opened, saved], reason: 'Privacy-minimal CMP preferences saved.' };
 }
 
+async function isOwnedContinuationPopup(candidatePage, page) {
+  const visited = new Set([candidatePage]);
+  let current = candidatePage;
+  for (let hop = 0; hop < 4; hop += 1) {
+    try {
+      current = await current.opener();
+    } catch {
+      return false;
+    }
+    if (current === page) return true;
+    if (!current || visited.has(current)) return false;
+    visited.add(current);
+  }
+  return false;
+}
+
 async function inspectContinuationAttempt(context, page, before, beforeUrl, expectedDestination, observationWindowMs, baselineSnapshot = null) {
   const deadline = Date.now() + observationWindowMs;
   const observedUrls = new Set([beforeUrl]);
   let created = [];
   let snapshots = [];
   do {
-    created = context.pages().filter((candidatePage) => !before.has(candidatePage));
+    const newPages = context.pages().filter((candidatePage) => !before.has(candidatePage));
+    // Shared contexts retain other candidates' tabs; only proven descendants are ours.
+    const owned = await Promise.all(newPages.map((candidatePage) => isOwnedContinuationPopup(candidatePage, page)));
+    created = newPages.filter((candidatePage, index) => owned[index]);
     const pages = [page, ...created];
     snapshots = await Promise.all(pages.map(async (candidatePage) => {
       await candidatePage.waitForLoadState('domcontentloaded', { timeout: 500 }).catch(() => {});
