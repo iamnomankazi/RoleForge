@@ -165,8 +165,17 @@ export async function openPersistentBrowserProfile({
       headless,
     });
     context.on('close', () => lock.release());
-    if (closeStartupPages) {
-      for (const page of context.pages()) await page.close().catch(() => {});
+    const startupPages = closeStartupPages ? context.pages() : [];
+    if (startupPages.length) {
+      // Closing the only window of a visible persistent Chromium makes it refuse new tabs ("Failed to open a new
+      // tab"), so startup pages are closed only after the first task page exists, before newPage() returns.
+      const newPage = context.newPage.bind(context);
+      context.newPage = async (...args) => {
+        const page = await newPage(...args);
+        context.newPage = newPage;
+        for (const startup of startupPages) await startup.close().catch(() => {});
+        return page;
+      };
     }
     return {
       context,

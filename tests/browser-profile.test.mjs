@@ -39,8 +39,8 @@ test('persistent profile retains a local HTTP cookie across close and relaunch',
   let second;
   try {
     first = await openPersistentBrowserProfile({ profileRoot, headless: true });
-    assert.equal(first.context.pages().length, 0, 'Chromium startup pages are closed before task pages are created');
     const initialPage = await first.context.newPage();
+    assert.deepEqual(first.context.pages(), [initialPage], 'Chromium startup pages are closed once the first task page exists');
     await initialPage.goto(`${origin}/set`);
     assert.match(await initialPage.locator('body').innerText(), /cookie set/);
     await first.close();
@@ -192,6 +192,20 @@ test('a dead recovery mutex is never read or unlinked during the replacement int
     fs.readFileSync = originalRead;
     fs.unlinkSync = originalUnlink;
     syncBuiltinESMExports();
+    rmSync(join(profileRoot, '..'), { recursive: true, force: true });
+  }
+});
+
+test('a visible persistent profile still opens a task page after its startup window is replaced', { skip: process.platform !== 'win32' && !process.env.DISPLAY }, async () => {
+  const profileRoot = temporaryProfileRoot();
+  let session;
+  try {
+    session = await openPersistentBrowserProfile({ profileRoot, headless: false });
+    const page = await session.context.newPage();
+    await page.goto('about:blank');
+    assert.deepEqual(session.context.pages(), [page]);
+  } finally {
+    if (session) await session.close();
     rmSync(join(profileRoot, '..'), { recursive: true, force: true });
   }
 });
