@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -26,7 +27,7 @@ const BATCH_IDS = [
   'eu4-2026-07-28-06-reonic-gtm-ai-data-intern',
 ];
 
-function fixtureAuthority(events, states = {}) {
+function fixtureAuthority(events, states = {}, preparations = {}) {
   const byId = new Map(BATCH_IDS.map((batchId, index) => {
     const candidateId = `cand_v1_fixture_${String(index + 1).padStart(2, '0')}`;
     const candidate = {
@@ -58,7 +59,11 @@ function fixtureAuthority(events, states = {}) {
           candidates: [{ candidate_id: fixture.candidateId }],
         },
         state: {
-          candidates: [{ candidate_id: fixture.candidateId, state: states[fixture.batchId] || 'not_opened' }],
+          candidates: [{
+            candidate_id: fixture.candidateId,
+            state: states[fixture.batchId] || 'not_opened',
+            ...(preparations[fixture.batchId] ? { formPreparation: preparations[fixture.batchId] } : {}),
+          }],
         },
       };
     },
@@ -83,22 +88,31 @@ function fixtureAuthority(events, states = {}) {
   };
 }
 
-function mockBrowser(events) {
+function mockBrowser(events, { startupPageCount = 0 } = {}) {
   let connected = true;
   let contextCount = 0;
   let closeCount = 0;
   const pages = [];
-  const context = {
+  let context;
+  const makePage = (id) => {
+    const page = {
+      id,
+      context: () => context,
+      close: async () => {
+        page.closed = true;
+        events.push(`close:${id}`);
+      },
+      isClosed: () => page.closed,
+      bringToFront: async () => {
+        events.push(`front:${id}`);
+      },
+      closed: false,
+    };
+    return page;
+  };
+  context = {
     newPage: async () => {
-      assert.equal(pages.filter((page) => !page.closed).length, 0, 'close the previous candidate page before creating another');
-      const page = {
-        id: pages.length + 1,
-        context: () => context,
-        close: async () => {
-          page.closed = true;
-        },
-        closed: false,
-      };
+      const page = makePage(pages.length + 1);
       pages.push(page);
       events.push(`page:${page.id}`);
       return page;
@@ -108,6 +122,9 @@ function mockBrowser(events) {
       throw new Error('Coordinator must not close the shared context');
     },
   };
+  for (let index = 0; index < startupPageCount; index += 1) {
+    pages.push(makePage(pages.length + 1));
+  }
   const browser = {
     isConnected: () => connected,
     newContext: async () => {
@@ -176,18 +193,25 @@ test('a previously blocked exact candidate is planned as preparation-resume, not
   assert.ok(plan.slice(1).every((entry) => entry.resumePreparation === false));
 });
 
-test('one shared browser creates one active page at a time, isolates evidence, survives one failure, and stays open', async () => {
+test('candidate tabs stay open, failures are isolated, human handoffs resume after pass one, and the summary persists', async () => {
   const root = mkdtempSync(join(tmpdir(), 'career-ops-shared-browser-'));
   try {
     const events = [];
-    const authority = fixtureAuthority(events, { [BATCH_IDS[0]]: 'blocked' });
-    const mock = mockBrowser(events);
+    const authority = fixtureAuthority(events, { [BATCH_IDS[0]]: 'blocked' }, {
+      [BATCH_IDS[0]]: {
+        unresolvedFields: [{ label: 'Work authorization' }],
+        captcha: { present: true, completed: false },
+        userActionRequired: true,
+      },
+    });
+    const mock = mockBrowser(events, { startupPageCount: 1 });
     let launches = 0;
     let active = 0;
     let maxActive = 0;
     let waited = false;
     const started = [];
     const completed = [];
+    const resumeLog = [];
 
     const summary = await runSharedBrowserSession({ batchIds: BATCH_IDS, root }, {
       ...authority,
@@ -200,13 +224,27 @@ test('one shared browser creates one active page at a time, isolates evidence, s
       executeCandidate: async (options, environment) => {
         active += 1;
         maxActive = Math.max(maxActive, active);
-        started.push({
+        const pass = options.continueOnPage ? 'resume' : 'prepare';
+        const row = {
           manifest: options.manifest,
           candidateId: options.candidateId,
           resumePreparation: options.resumePreparation,
+          deferHumanHandoff: options.deferHumanHandoff,
+          continueOnPage: options.continueOnPage,
           pageId: environment.page.id,
           pageCount: environment.context.pages().length,
-        });
+          pass,
+        };
+        started.push(row);
+        events.push(`execute:${row.candidateId}:${pass}`);
+        if (pass === 'resume') {
+          assert.equal(options.continueOnPage, true);
+          assert.equal(options.deferHumanHandoff, false);
+          assert.equal(started.filter((item) => item.pass === 'prepare').length, 6, 'all first passes finish before resume');
+          assert.equal(row.pageId, started.find((item) => item.candidateId === row.candidateId && item.pass === 'prepare').pageId);
+          active -= 1;
+          return { state: 'human_action_required', resumeSkipped: 'fixture unsafe' };
+        }
         const evidenceDir = join(
           dirname(options.manifest),
           'evidence',
@@ -221,7 +259,11 @@ test('one shared browser creates one active page at a time, isolates evidence, s
         }));
         await new Promise((resolveTurn) => setImmediate(resolveTurn));
         active -= 1;
-        if (environment.page.id === 3) throw new Error('fixture candidate failure');
+        if (options.candidateId === 'cand_v1_fixture_03') throw new Error('fixture candidate failure');
+        if (options.candidateId === 'cand_v1_fixture_01') {
+          assert.equal(options.deferHumanHandoff, true);
+          return { state: 'human_action_required', deferred: true };
+        }
         return {
           state: 'form_prepared',
           submissionAvailable: false,
@@ -231,6 +273,7 @@ test('one shared browser creates one active page at a time, isolates evidence, s
       onCandidateComplete: async (entry) => {
         completed.push(entry.batchId);
       },
+      log: (message) => resumeLog.push(message),
       waitForBrowserClose: async (browser) => {
         waited = true;
         assert.equal(browser.isConnected(), true);
@@ -239,23 +282,46 @@ test('one shared browser creates one active page at a time, isolates evidence, s
 
     assert.equal(launches, 1);
     assert.deepEqual(mock.metrics(), { contextCount: 1, closeCount: 0 });
-    assert.equal(mock.pages.length, 6);
-    assert.ok(mock.pages.slice(0, -1).every((page) => page.closed === true));
-    assert.equal(mock.pages.at(-1).closed, false, 'the final candidate page stays available for manual review');
-    assert.equal(started.length, 6);
-    assert.ok(started.every((row) => row.pageCount === 1));
-    assert.deepEqual(started.map((row) => row.pageId), [1, 2, 3, 4, 5, 6]);
-    assert.deepEqual(started.map((row) => row.resumePreparation), [true, false, false, false, false, false]);
+    assert.equal(mock.pages.length, 7);
+    assert.equal(mock.pages[0].closed, false, 'startup page is not closed by the coordinator');
+    assert.deepEqual(mock.pages.slice(1).map((page) => page.closed), [false, false, true, false, false, false]);
+    assert.equal(started.length, 7);
+    assert.deepEqual(started.slice(0, 6).map((row) => row.pageCount), [2, 3, 4, 4, 5, 6]);
+    assert.deepEqual(started.map((row) => row.pageId), [2, 3, 4, 5, 6, 7, 2]);
+    assert.deepEqual(started.slice(0, 6).map((row) => row.resumePreparation), [true, false, false, false, false, false]);
+    assert.ok(started.slice(0, 6).every((row) => row.deferHumanHandoff === true));
+    assert.equal(started[6].pass, 'resume');
+    assert.match(resumeLog[0], /\[1\/6\] Company 1 — Role 1: complete the check in this tab, then press Enter here/);
+    assert.ok(events.indexOf('execute:cand_v1_fixture_06:prepare') < events.indexOf('execute:cand_v1_fixture_01:resume'));
     assert.equal(maxActive, 1);
     assert.deepEqual(completed, BATCH_IDS);
     assert.match(summary.completed[2].error, /fixture candidate failure/);
-    assert.equal(summary.completed.filter((row) => row.state === 'form_prepared').length, 5);
+    assert.equal(summary.completed[0].state, 'human_action_required');
+    assert.equal(summary.completed[0].pass1State, 'human_action_required');
+    assert.equal(summary.completed[0].resumeSkipped, 'fixture unsafe');
+    assert.equal(summary.completed[0].tabOpen, true);
+    assert.deepEqual(summary.completed[0].needsHuman, {
+      unresolvedFieldLabels: ['Work authorization'],
+      captcha: true,
+      userActionRequired: true,
+    });
+    assert.equal(summary.completed[2].tabOpen, false);
+    assert.equal(summary.completed.filter((row) => row.state === 'form_prepared').length, 4);
     assert.equal(summary.browserRemainsOpen, true);
     assert.equal(summary.submissionAvailable, false);
     assert.equal(summary.trackerUpdated, false);
     assert.equal(waited, true);
 
-    const ledgers = started.map((row) => {
+    const sessionsRoot = join(root, 'output', 'application-sessions');
+    const sessionDirs = readdirSync(sessionsRoot);
+    assert.equal(sessionDirs.length, 1);
+    assert.match(sessionDirs[0], /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/);
+    const persistedSummary = JSON.parse(readFileSync(join(sessionsRoot, sessionDirs[0], 'summary.json'), 'utf8'));
+    assert.deepEqual(persistedSummary, summary);
+    assert.equal(persistedSummary.submissionAvailable, false);
+    assert.equal(persistedSummary.trackerUpdated, false);
+
+    const ledgers = started.slice(0, 6).map((row) => {
       const batchId = BATCH_IDS.find((value) => row.manifest.includes(value));
       const path = join(
         root,
@@ -270,7 +336,7 @@ test('one shared browser creates one active page at a time, isolates evidence, s
       return { path, value: JSON.parse(readFileSync(path, 'utf8')) };
     });
     assert.equal(new Set(ledgers.map((row) => relative(root, row.path))).size, 6);
-    assert.deepEqual(ledgers.map((row) => row.value.pageId), [1, 2, 3, 4, 5, 6]);
+    assert.deepEqual(ledgers.map((row) => row.value.pageId), [2, 3, 4, 5, 6, 7]);
     assert.ok(ledgers.every((row) => row.value.finalActionActivated === false));
     for (const { value } of ledgers) {
       const serialized = JSON.stringify(value);
@@ -318,4 +384,28 @@ test('shared coordinator exposes no queue, final-submission, or tracker authorit
   assert.doesNotMatch(`${source}\n${executorSource}`, /storageState|\.cookies\(/i);
   assert.match(source, /submissionAvailable: false/);
   assert.match(source, /trackerUpdated: false/);
+});
+
+test('an unexpected coordinator failure still closes the owned profile session and releases its lock', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'career-ops-shared-browser-'));
+  try {
+    const events = [];
+    const authority = fixtureAuthority(events);
+    const mock = mockBrowser(events);
+    let sessionCloses = 0;
+    await assert.rejects(runSharedBrowserSession({ batchIds: BATCH_IDS.slice(0, 1), root }, {
+      ...authority,
+      openBrowserProfile: async () => ({
+        browser: mock.browser,
+        context: await mock.browser.newContext(),
+        close: async () => { sessionCloses += 1; },
+      }),
+      executeCandidate: async () => ({ state: 'review_required' }),
+      writeSummary: async () => { throw new Error('summary disk full'); },
+      waitForBrowserClose: async () => {},
+    }), /summary disk full/);
+    assert.equal(sessionCloses, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

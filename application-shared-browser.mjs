@@ -10,6 +10,12 @@
  */
 
 import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  writeFileSync,
+} from 'node:fs';
+import {
   dirname,
   isAbsolute,
   join,
@@ -127,6 +133,8 @@ export function buildSharedBrowserPlan(batchIds, {
       page: null,
       result: null,
       error: null,
+      resumeResult: null,
+      resumeError: null,
     };
   });
 }
@@ -134,6 +142,56 @@ export function buildSharedBrowserPlan(batchIds, {
 function waitForDisconnect(browser) {
   if (!browser.isConnected()) return Promise.resolve();
   return new Promise((resolveDisconnected) => browser.once('disconnected', resolveDisconnected));
+}
+
+function pageIsOpen(page, context) {
+  if (!page) return false;
+  if (typeof page.isClosed === 'function') return !page.isClosed();
+  if (typeof page.closed === 'boolean') return !page.closed;
+  return context.pages().includes(page);
+}
+
+function writeSessionSummary(root, summary) {
+  const sessionsRoot = resolve(root, 'output', 'application-sessions');
+  mkdirSync(sessionsRoot, { recursive: true });
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  let suffix = 0;
+  let sessionDir;
+  while (true) {
+    const name = suffix ? `${timestamp}-${String(suffix).padStart(2, '0')}` : timestamp;
+    sessionDir = join(sessionsRoot, name);
+    try {
+      mkdirSync(sessionDir);
+      break;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      suffix += 1;
+    }
+  }
+  const summaryPath = join(sessionDir, 'summary.json');
+  const descriptor = openSync(summaryPath, 'wx');
+  try {
+    writeFileSync(descriptor, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
+  } finally {
+    closeSync(descriptor);
+  }
+  return summaryPath;
+}
+
+function readNeedsHuman(entry, root, loadState) {
+  try {
+    const loaded = loadState(entry.manifestPath, { root });
+    const preparation = loaded?.state?.candidates?.[0]?.formPreparation || {};
+    return {
+      unresolvedFieldLabels: Array.isArray(preparation.unresolvedFields)
+        ? preparation.unresolvedFields.map((field) => field?.label).filter((label) => typeof label === 'string')
+        : [],
+      captcha: Boolean(preparation.captcha?.present && !preparation.captcha?.completed),
+      userActionRequired: Boolean(preparation.userActionRequired),
+    };
+  } catch {
+    return { unresolvedFieldLabels: [], captcha: false, userActionRequired: false };
+  }
 }
 
 export async function runSharedBrowserSession({ batchIds, root = ROOT, humanWaitMs }, dependencies = {}) {
@@ -162,69 +220,99 @@ export async function runSharedBrowserSession({ batchIds, root = ROOT, humanWait
         : await browser.newContext(LIVENESS_CONTEXT_OPTIONS);
     }
     if (dependencies.configureContext) await dependencies.configureContext(context, plan);
-    for (const startupPage of context.pages()) await startupPage.close().catch(() => {});
 
     const execute = dependencies.executeCandidate || executeCandidateInBrowserContext;
-    let activeCandidatePage = null;
+    const ownedPages = new Map(plan.map((entry) => [entry, new Set()]));
+    const executorDependenciesByEntry = new Map();
+    const executorEnvironment = (entry, executorDependencies) => ({
+      root,
+      browser,
+      context,
+      page: entry.page,
+      dependencies: {
+        ...executorDependencies,
+        onCandidatePage: async (currentPage, contract) => {
+          ownedPages.get(entry).add(currentPage);
+          entry.page = currentPage;
+          if (executorDependencies.onCandidatePage) {
+            await executorDependencies.onCandidatePage(currentPage, contract);
+          }
+        },
+      },
+    });
+
+    // Pass one prepares every candidate independently and leaves successful tabs
+    // available for review while later candidates run.
     for (const entry of plan) {
-      if (activeCandidatePage) {
-        for (const previousPage of context.pages()) await previousPage.close().catch(() => {});
-        activeCandidatePage = null;
-      }
       if (!browser.isConnected()) {
         entry.error = 'Shared browser was closed by the user before this candidate started';
+        if (dependencies.onCandidateComplete) await dependencies.onCandidateComplete(entry);
         continue;
       }
       try {
         entry.page = await context.newPage();
+        ownedPages.get(entry).add(entry.page);
         const executorDependencies = dependencies.executorDependencies
           ? await dependencies.executorDependencies(entry)
           : {};
-        entry.result = await execute({
+        executorDependenciesByEntry.set(entry, executorDependencies);
+        const options = {
           manifest: entry.manifestPath,
           candidateId: entry.candidateId,
           headless: false,
           keepOpen: true,
           resumeLogin: false,
           resumePreparation: entry.resumePreparation,
+          deferHumanHandoff: true,
           prepareForm: true,
           ...(humanWaitMs == null ? {} : { humanWaitMs }),
-        }, {
-          root,
-          browser,
-          context,
-          page: entry.page,
-          dependencies: {
-            ...executorDependencies,
-            onCandidatePage: async (currentPage, contract) => {
-              entry.page = currentPage;
-              if (executorDependencies.onCandidatePage) {
-                await executorDependencies.onCandidatePage(currentPage, contract);
-              }
-            },
-          },
-        });
+        };
+        entry.result = await execute(options, executorEnvironment(entry, executorDependencies));
       } catch (error) {
-        // Candidate executor locks release in its own finally block. A local
-        // candidate failure cannot close this coordinator-owned browser/context.
+        // A local candidate failure only releases pages that this candidate owns.
         entry.error = String(error?.message || error);
-      }
-      if (entry.error) {
-        for (const activePage of context.pages()) {
-          if (!activePage.isClosed?.()) await activePage.close().catch(() => {});
+        for (const candidatePage of ownedPages.get(entry)) {
+          if (pageIsOpen(candidatePage, context)) await candidatePage.close().catch(() => {});
         }
         entry.page = null;
-      } else {
-        activeCandidatePage = entry.page;
       }
       if (dependencies.onCandidateComplete) await dependencies.onCandidateComplete(entry);
     }
 
-    const handoffTimedOut = plan.at(-1)?.result?.state === 'human_action_required';
-    if (handoffTimedOut) {
-      if (ownedSession.close) await ownedSession.close();
-      else if (browser.isConnected()) await browser.close();
+    // Human gates are revisited only after every candidate has had its first pass.
+    for (const entry of plan) {
+      if (entry.result?.state !== 'human_action_required' || !pageIsOpen(entry.page, context)) continue;
+      try {
+        await entry.page.bringToFront();
+      } catch {
+        // A fronting failure does not prevent the user from switching tabs.
+      }
+      (dependencies.log || console.log)(
+        `[${entry.order + 1}/${plan.length}] ${entry.company} — ${entry.title}: complete the check in this tab, then press Enter here (the final submit stays yours)`,
+      );
+      try {
+        const resumeOptions = {
+          manifest: entry.manifestPath,
+          candidateId: entry.candidateId,
+          headless: false,
+          keepOpen: true,
+          resumeLogin: false,
+          resumePreparation: true,
+          continueOnPage: true,
+          deferHumanHandoff: false,
+          prepareForm: true,
+          humanWaitMs,
+        };
+        entry.resumeResult = await execute(
+          resumeOptions,
+          executorEnvironment(entry, executorDependenciesByEntry.get(entry) || {}),
+        );
+      } catch (error) {
+        entry.resumeError = String(error?.message || error);
+      }
     }
+
+    const loadState = dependencies.loadState || loadBatchState;
     const summary = {
       browserMode: 'one_shared_headed_context',
       candidateCount: plan.length,
@@ -234,9 +322,14 @@ export async function runSharedBrowserSession({ batchIds, root = ROOT, humanWait
         candidateId: entry.candidateId,
         company: entry.company,
         title: entry.title,
-        state: entry.result?.state || null,
+        state: entry.resumeResult?.state || entry.result?.state || null,
+        pass1State: entry.result?.state || null,
         error: entry.error,
+        resumeError: entry.resumeError,
+        resumeSkipped: entry.resumeResult?.resumeSkipped || null,
+        tabOpen: pageIsOpen(entry.page, context),
         evidenceRoot: entry.evidenceRoot,
+        needsHuman: readNeedsHuman(entry, root, loadState),
         submissionAvailable: false,
         trackerUpdated: false,
       })),
@@ -244,8 +337,10 @@ export async function runSharedBrowserSession({ batchIds, root = ROOT, humanWait
       submissionAvailable: false,
       trackerUpdated: false,
     };
+    if (dependencies.writeSummary) await dependencies.writeSummary(root, summary);
+    else writeSessionSummary(root, summary);
     if (dependencies.onSessionPrepared) await dependencies.onSessionPrepared(summary, plan);
-    if (!handoffTimedOut) {
+    if (browser.isConnected()) {
       await (dependencies.waitForBrowserClose || waitForDisconnect)(browser);
     }
     return {
@@ -253,6 +348,7 @@ export async function runSharedBrowserSession({ batchIds, root = ROOT, humanWait
       browserRemainsOpen: browser.isConnected(),
     };
   } finally {
+    // Releases the persistent profile lock; on the normal path the user has already closed the browser.
     if (ownedSession.close) await ownedSession.close().catch(() => {});
   }
 }
@@ -274,8 +370,17 @@ async function main() {
     },
     onSessionPrepared(summary) {
       console.log(JSON.stringify(summary, null, 2));
+      console.table(summary.completed.map((entry) => ({
+        tab: entry.order,
+        company: entry.company,
+        title: entry.title,
+        state: entry.state || (entry.error ? `error: ${entry.error}` : 'unknown'),
+        tabOpen: entry.tabOpen,
+        needsHuman: entry.needsHuman.userActionRequired || entry.needsHuman.captcha
+          || entry.needsHuman.unresolvedFieldLabels.length > 0,
+      })));
       console.log(summary.browserRemainsOpen
-        ? 'Candidate pages close before the next candidate starts. Close the shared task browser to finish.'
+        ? 'All candidate tabs stay open for review. Close the shared task browser to finish.'
         : 'The task browser is closed. Persisted human handoffs can resume using the exact manifest and candidate command shown above.');
     },
   });
