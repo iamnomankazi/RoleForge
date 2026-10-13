@@ -1373,6 +1373,12 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
       activationMethod: page.__careerOpsEntryInteractionEvidence?.successfulMethod || null,
       siteChromeActions: [...siteChromeActions],
     });
+    // A verified Apply click that lands on the employer's ATS sign-in/account page (e.g. SuccessFactors) is a
+    // login step for the user; such pages never show the job title. The form is re-verified after sign-in.
+    if (!compatible && (form.loginRequired || form.humanGate) && identity.companyMatch
+        && isKnownApplicationHost(snapshot.currentUrl)) {
+      compatible = true;
+    }
     if (!compatible) {
       return {
         page,
