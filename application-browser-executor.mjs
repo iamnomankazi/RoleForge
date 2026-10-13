@@ -94,6 +94,7 @@ export async function prepareFormPassWithEvidence(page, browserContext, contract
   mkdirSync(evidenceDir);
   const beforePath = join(evidenceDir, 'before.png');
   const afterPath = join(evidenceDir, 'after.png');
+  await dismissCookieBanner(page);
   const beforeSnapshot = await inspectOperationalApplicationForm(page);
   const screenshotBefore = await safeScreenshot(page, beforePath);
   // Application sessions can contain authentication headers and tokens.
@@ -820,6 +821,8 @@ async function inspectBenignSiteChromeActions(page) {
       '[id*="cookie" i]', '[class*="cookie" i]', '[id*="consent" i]', '[class*="consent" i]',
       '[id*="cmp" i]', '[class*="cmp" i]', '[id*="privacy-prompt" i]', '[class*="privacy-prompt" i]',
       '#GDPRConsentManagerContainer', '#fixedfooter',
+      // Unbranded banners: any dialog whose own text is about cookies (checked below).
+      '[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]', 'dialog',
     ].join(',');
     globalThis.__careerOpsSiteChromeCounter = Number(globalThis.__careerOpsSiteChromeCounter || 0);
     return Array.from(document.querySelectorAll('button, a, [role="button"]'))
@@ -880,12 +883,19 @@ async function activateSiteChromeAction(page, expected) {
   return current;
 }
 
-export async function clearBenignListingSiteChrome(page) {
-  const before = await collectPageSnapshot(page);
-  const form = classifyFormSnapshot(before);
-  if (form.actualForm || form.humanGate || form.candidateFieldSignals > 0) {
-    return { cleared: false, detected: false, actions: [], reason: 'Application form is already present.' };
+// Best effort, before any gate or form check; never fails the application.
+export async function dismissCookieBanner(page) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const result = await clearBenignListingSiteChrome(page).catch(() => null);
+    if (!result?.cleared) return result;
+    await page.waitForLoadState('domcontentloaded').catch(() => null);
   }
+  return null;
+}
+
+export async function clearBenignListingSiteChrome(page) {
+  // Cookie banners are dismissed privacy-preservingly wherever they appear. A suspected login gate is never a
+  // reason to skip this: banners hide the page and their text and nav links cause false gates.
   let actions = await inspectBenignSiteChromeActions(page);
   const direct = actions.find((action) => action.kind === 'privacy_preserving_dismissal');
   if (direct) {
@@ -1781,6 +1791,7 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
     const listingPage = sharedSession?.page || await context.newPage();
     if (dependencies.onCandidatePage) await dependencies.onCandidatePage(listingPage, contract);
     const browserLiveness = await (dependencies.checkUrlLiveness || checkUrlLiveness)(listingPage, listingUrl);
+    await dismissCookieBanner(listingPage);
     const listingSnapshot = await collectPageSnapshot(listingPage);
     const listingCurrentUrl = safeCurrentUrl(listingSnapshot.currentUrl, listingUrl);
     latestUrl = listingCurrentUrl;
@@ -2091,6 +2102,7 @@ async function executePreparationResume(options, contract, { root, executionLock
     }
     if (dependencies.onCandidatePage) await dependencies.onCandidatePage(listingPage, contract);
     const live = await (dependencies.checkUrlLiveness || checkUrlLiveness)(listingPage, listingUrl);
+    await dismissCookieBanner(listingPage);
     const listingSnapshot = await collectPageSnapshot(listingPage);
     const identity = verifyVisibleIdentity(listingSnapshot, contract.candidate);
     const form = classifyFormSnapshot(listingSnapshot);

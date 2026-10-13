@@ -5,6 +5,7 @@ import {
   classifyApplicationEntryAction,
   classifyFormSnapshot,
   clearBenignListingSiteChrome,
+  dismissCookieBanner,
   collectPageSnapshot,
   followSafeApplicationEntryFlow,
   selectSafeApplyContinuation,
@@ -744,4 +745,31 @@ test('an Apply link returning to the listing hands off without consuming the ATS
     assert.equal(result.diagnostics.candidates[0].attempts.length, 1);
     assert.match(result.reason, /could not reach the application surface/i);
   });
+});
+
+test('cookie dialogs over a listing are dismissed (necessary only) before any gate check; nav "Login" is not a gate', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    for (const [button, other] of [['Use only necessary cookies', 'Allow all'], ['Decline all non-necessary cookies', 'Accept all cookies']]) {
+      const page = await browser.newPage();
+      await page.setContent(`<!doctype html><html><body>
+        <nav><a href="/profile">View Profile</a> <a href="/login">Employee Login</a></nav>
+        <h1>Acme Data Engineer</h1><p>Helsinki. Build data pipelines.</p>
+        <label>Search by Keyword <input type="search" name="q"></label>
+        <a href="/apply" id="apply">Apply now</a>
+        <div role="dialog" aria-modal="true" id="banner"><h2>This website uses cookies</h2>
+          <p>We use cookies and 3rd party solutions.</p>
+          <button onclick="window.choice='${other}'; banner.remove()">${other}</button>
+          <button onclick="window.choice='necessary'; banner.remove()">${button}</button></div>
+      </body></html>`);
+      await dismissCookieBanner(page);
+      assert.equal(await page.evaluate(() => window.choice), 'necessary', button);
+      const form = classifyFormSnapshot(await collectPageSnapshot(page));
+      assert.equal(form.humanGate, null);
+      assert.equal(form.loginRequired, false);
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+  }
 });
