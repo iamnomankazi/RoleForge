@@ -7,7 +7,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
-import { prepareOperationalApplicationForm } from '../application-form-engine.mjs';
+import { expectedDocuments, prepareOperationalApplicationForm } from '../application-form-engine.mjs';
 import {
   applicationSourceFromDiscovery,
   canonicalFieldValue,
@@ -206,4 +206,29 @@ test('"How did you hear" uses discovery provenance and salary respects trainee r
   assert.equal(canonicalFieldValue({ ...profile, compensation: { ...profile.compensation, trainee_answer: 'Per the trainee programme salary' } }, salary, { context }),
     'Per the trainee programme salary');
   assert.equal(canonicalFieldValue(profile, salary, { context: { candidate: { title: 'Data Engineer' } } }), 'EUR 55,000-60,000/year');
+});
+
+test('an optional combined-document field without a bound combined document keeps the CV and cover letter outstanding', async () => {
+  assert.deepEqual(expectedDocuments(artifacts, { mode: 'single_combined' }).map((doc) => doc.semantic), ['cv_upload', 'cover_letter_upload']);
+  const page = await browser.newPage();
+  await page.setContent(`<form><label for="fn">First name</label><input id="fn" required>
+    <label for="ln">Last name</label><input id="ln" required><label for="em">Email</label><input id="em" type="email" required>
+    <label for="docs">Application documents</label><input id="docs" type="file">
+    <button type="submit">Submit application</button></form>`);
+  const result = await prepareOperationalApplicationForm(page, profile, artifacts, { context });
+  assert.equal(result.evidence.uploadTopology.mode, 'single_combined');
+  assert.equal(result.evidence.uploadedArtifacts.length, 0);
+  const rows = result.evidence.unresolvedFields.filter((item) => item.manualUploadPath);
+  assert.deepEqual(rows.map((item) => item.manualUploadPath).sort(), [artifacts.cv.resolvedPath, artifacts.coverLetter.resolvedPath].sort());
+  assert.equal(result.evidence.reviewComplete, false);
+  await page.close();
+});
+
+test('conflicting job boards in discovery provenance leave "How did you hear" for review regardless of order', () => {
+  const linkedin = 'https://www.linkedin.com/jobs/view/1000000001';
+  const duunitori = 'https://duunitori.fi/tyopaikat/tyo/data-analyst-trainee-123';
+  for (const urls of [[linkedin, duunitori], [duunitori, linkedin]]) {
+    assert.equal(applicationSourceFromDiscovery({ discovery: { source: 'websearch-handoff', urls } }), null);
+  }
+  assert.equal(applicationSourceFromDiscovery({ discovery: { urls: [duunitori, `${duunitori}?ref=x`] } }), 'Duunitori');
 });

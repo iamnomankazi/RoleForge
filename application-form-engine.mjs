@@ -1272,9 +1272,10 @@ async function performAction(page, action, visibleOptions, { deadlineMs, clock }
 
 // Bound documents the form is expected to receive. A single combined upload covers both CV and cover letter.
 export function expectedDocuments(artifacts = {}, uploadTopology = null) {
-  if (uploadTopology?.mode === 'single_combined') {
-    return artifacts.combinedDocument ? [{ semantic: 'single_document_upload', artifact: artifacts.combinedDocument }] : [];
+  if (uploadTopology?.mode === 'single_combined' && artifacts.combinedDocument) {
+    return [{ semantic: 'single_document_upload', artifact: artifacts.combinedDocument }];
   }
+  // Without a bound combined document, the separately bound CV and cover letter stay outstanding.
   return [
     artifacts.cv && { semantic: 'cv_upload', artifact: artifacts.cv },
     artifacts.coverLetter && { semantic: 'cover_letter_upload', artifact: artifacts.coverLetter },

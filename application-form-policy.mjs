@@ -212,12 +212,15 @@ const COMPANY_BOARD_SOURCES = /^(?:greenhouse|ashby|lever|workday|smartrecruiter
 // source_url). Unknown stays for review.
 export function applicationSourceFromDiscovery(context = {}) {
   const discovery = context?.discovery || {};
+  const boards = new Set();
   for (const value of discovery.urls || []) {
     let host;
     try { host = new URL(value).hostname.toLowerCase(); } catch { continue; }
     const board = JOB_BOARDS.find(([pattern]) => pattern.test(host));
-    if (board) return board[1];
+    if (board) boards.add(board[1]);
   }
+  // Conflicting boards are not provenance; leave the answer for review rather than guess.
+  if (boards.size) return boards.size === 1 ? [...boards][0] : null;
   if (COMPANY_BOARD_SOURCES.test(cleanFormText(discovery.source).toLowerCase())) return 'Company website';
   return null;
 }
