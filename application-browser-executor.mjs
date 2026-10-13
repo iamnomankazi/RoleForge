@@ -1534,11 +1534,15 @@ async function handoffHumanGate(page, contract, gate, stage, options, { root, ex
   }
   const gateUrl = state.humanAction.currentUrl;
   const log = dependencies.log || console.log;
-  if (options.deferHumanHandoff === true) {
+  // Only defer when a gate is on the page now; a stale or cleared gate is revalidated straight away below.
+  const gateVisibleNow = options.deferHumanHandoff === true
+    ? Boolean((await collectPageSnapshot(page).catch(() => ({ humanGate: true }))).humanGate)
+    : true;
+  if (options.deferHumanHandoff === true && gateVisibleNow) {
     log(`Candidate ${contract.candidate.company} — ${contract.candidate.title} (${candidateId}) is paused for a human check in its own tab (${gate.cause}). Never click the final application button.`);
     return { ...state, deferred: true };
   }
-  log(`Human action required: ${contract.candidate.company} — ${contract.candidate.title} (${candidateId}); cause: ${gate.cause}. Complete it in the open browser page for this candidate. Never click the final application button. Then press Enter here.`);
+  if (gateVisibleNow) log(`Human action required: ${contract.candidate.company} — ${contract.candidate.title} (${candidateId}); cause: ${gate.cause}. Complete it in the open browser page for this candidate. Never click the final application button. Then press Enter here.`);
   const clock = dependencies.humanClock || Date.now;
   const waitMs = options.humanWaitMs ?? DEFAULT_HUMAN_WAIT_MS;
   if (!Number.isFinite(waitMs) || waitMs <= 0) throw new Error('Invalid human wait duration');
