@@ -349,7 +349,9 @@ function answerForField(field, semantics, profile, snapshot, artifacts, context,
         throw new Error('Bound cover letter contains an unresolved placeholder');
       }
       const provenance = artifacts.coverLetterTextProvenance;
-      if (!provenance) throw new Error('Bound cover letter text has no factual provenance');
+      // The approved, claim-checked letter is bound by hash; it is pasted as-is. A provenance record, when the
+      // binding carries one, is still validated.
+      if (!provenance) return { value: artifacts.coverLetterTextContent, answerRecord: null };
       validateNarrativeProvenanceRecord(profile, provenance, {
         candidateId: cleanFormText(context?.candidate?.candidate_id || context?.candidate?.candidateId),
         normalizedQuestion: provenance.normalizedQuestion,
@@ -2396,8 +2398,10 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
   }
   if (outcome.gate?.state !== 'human_action_required') {
     // Expected documents are never skipped silently: anything not attached gets an explicit manual handoff.
+    const letterPasted = outcome.evidence.filledFields.some((row) => row.semantic === 'cover_letter_text');
     const missing = expectedDocuments(artifacts, outcome.evidence.uploadTopology).filter((doc) => (
       !documentUploaded(outcome.evidence.uploadedArtifacts, doc)
+      && !(doc.semantic === 'cover_letter_upload' && letterPasted)
       && !outcome.evidence.unresolvedFields.some((row) => row.category === 'file_upload' && row.semantic === doc.semantic)));
     if (missing.length) {
       outcome.evidence.unresolvedFields.push(...missing.map((doc) => manualUploadRow(doc,

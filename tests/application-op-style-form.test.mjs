@@ -232,3 +232,18 @@ test('conflicting job boards in discovery provenance leave "How did you hear" fo
   }
   assert.equal(applicationSourceFromDiscovery({ discovery: { urls: [duunitori, `${duunitori}?ref=x`] } }), 'Duunitori');
 });
+
+test('a required cover-letter text box receives the approved letter, which then counts as the delivered cover letter', async () => {
+  const page = await browser.newPage();
+  await page.setContent(`<form><label for="fn">First name</label><input id="fn" required>
+    <label for="ln">Last name</label><input id="ln" required><label for="em">Email</label><input id="em" type="email" required>
+    <label for="cv">Upload CV*</label><input id="cv" type="file" required>
+    <label for="cl">Cover letter*</label><textarea id="cl" required></textarea>
+    <button type="submit">Submit application</button></form>`);
+  const letter = 'Dear Example team,\n\nI am applying for the role.\n\nKind regards,\nAlex Example';
+  const result = await prepareOperationalApplicationForm(page, profile, { ...artifacts, coverLetterTextContent: letter }, { context });
+  assert.equal(await page.inputValue('#cl'), letter);
+  assert.ok(result.evidence.uploadedArtifacts.some((row) => row.sha256 === artifacts.cv.sha256));
+  assert.equal(result.evidence.unresolvedFields.some((row) => /cover_letter/.test(row.semantic)), false);
+  await page.close();
+});
