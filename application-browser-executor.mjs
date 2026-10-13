@@ -400,13 +400,17 @@ export function classifyApplicationEntryAction(control, {
   if (!['a', 'button'].includes(tag) && normalized(control?.role) !== 'button' && !(tag === 'input' && type === 'button')) {
     return reject('control type is not an entry link or button');
   }
-  const text = inline(control?.text);
+  // Buttons repeat their label for screen readers and decorate it ("Apply now »", "Apply now!", "Hae nyt ›").
+  const text = inline(control?.text).replace(/^(.+?)\s+\1$/i, '$1').replace(/[\s»›→>!.…:]+$/u, '').trim();
   if (ONE_CLICK_ENTRY_LABEL.test(text)) return reject('one-click or saved-profile application controls may submit immediately; continue manually');
   if (FINAL_ACTION_LABEL.test(text)) return reject('final application actions require manual submission');
   if (!ENTRY_ACTION_LABEL.test(text)) {
     return reject('control label is not an unambiguous application-entry action');
   }
-  if (type === 'submit') return reject('submit controls are never listing continuations');
+  // <button> defaults to type=submit; outside any form it cannot submit anything (e.g. Teamtailor "Apply now!").
+  if (type === 'submit' && (tag !== 'button' || control?.associatedForm || control?.inForm || control?.formAction)) {
+    return reject('submit controls are never listing continuations');
+  }
   const target = inline(control?.target).toLowerCase();
   if (target && !['_self', '_blank'].includes(target)) return reject('named browsing targets are not candidate-tab isolated');
   const associatedForm = Boolean(control?.associatedForm || control?.inForm);
@@ -885,12 +889,14 @@ async function activateSiteChromeAction(page, expected) {
 
 // Best effort, before any gate or form check; never fails the application.
 export async function dismissCookieBanner(page) {
+  let dismissed = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const result = await clearBenignListingSiteChrome(page).catch(() => null);
-    if (!result?.cleared) return result;
+    if (!result?.cleared) break;
+    dismissed = result;
     await page.waitForLoadState('domcontentloaded').catch(() => null);
   }
-  return null;
+  return dismissed || { cleared: false, detected: false, actions: [], reason: 'No cookie banner was dismissed.' };
 }
 
 export async function clearBenignListingSiteChrome(page) {

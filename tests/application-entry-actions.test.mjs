@@ -199,7 +199,7 @@ test('form-associated entry controls and href-less anchors hand off without a cl
     { html: '<form method="get" action="/application"><button id="apply" type="button" data-apply-url="/application" onclick="window.applyClicks=(window.applyClicks||0)+1">Apply</button></form>', reason: /form-associated/ },
     { html: '<form id="application" method="get"></form><button form="application" type="button" onclick="window.applyClicks=(window.applyClicks||0)+1">Apply</button>', reason: /form-associated/ },
     { html: '<form method="post" action="/application"><button id="apply" type="button" onclick="window.applyClicks=(window.applyClicks||0)+1">Apply</button></form>', reason: /POST-associated/ },
-    { html: '<button id="apply" type="submit" data-apply-url="/application" onclick="window.applyClicks=(window.applyClicks||0)+1">Apply</button>', reason: /submit controls/ },
+    { html: '<form method="get" action="/application"><button id="apply" type="submit" onclick="window.applyClicks=(window.applyClicks||0)+1">Apply</button></form>', reason: /submit controls/ },
   ]) {
     await withFixture({ [listingUrl]: `<h1>Acme Data Engineer</h1>${fixture.html}` }, async ({ context, page }) => {
       await page.goto(listingUrl);
@@ -772,4 +772,17 @@ test('cookie dialogs over a listing are dismissed (necessary only) before any ga
   } finally {
     await browser.close();
   }
+});
+
+test('decorated or screen-reader-repeated Apply labels are application-entry actions; final actions stay blocked', () => {
+  const scope = { listingUrl: 'https://careers.acme.test/job/1', currentState: 'listing_verified' };
+  for (const text of ['Apply now »', 'Apply now!', 'Apply now Apply now', 'Hae nyt ›']) {
+    assert.equal(classifyApplicationEntryAction({ tag: 'button', text, visible: true }, scope).safe, true, text);
+  }
+  for (const text of ['Submit application', 'Easy apply!', 'HOW TO APPLY HOW TO APPLY']) {
+    assert.equal(classifyApplicationEntryAction({ tag: 'button', text, visible: true }, scope).safe, false, text);
+  }
+  // Teamtailor: <button> with the default type=submit outside any form only opens the application.
+  assert.equal(classifyApplicationEntryAction({ tag: 'button', type: 'submit', text: 'Apply now!', visible: true }, scope).safe, true);
+  assert.equal(classifyApplicationEntryAction({ tag: 'button', type: 'submit', text: 'Apply now!', visible: true, inForm: true }, scope).safe, false);
 });

@@ -271,6 +271,9 @@ export async function runSharedBrowserSession({ batchIds, root = ROOT, humanWait
       } catch (error) {
         // A local candidate failure only releases pages that this candidate owns.
         entry.error = String(error?.message || error);
+        // Closing the window's last tab would end the browser and fail every later candidate.
+        const remaining = context.pages().filter((page) => !ownedPages.get(entry).has(page));
+        if (!remaining.length) await context.newPage().catch(() => {});
         for (const candidatePage of ownedPages.get(entry)) {
           if (pageIsOpen(candidatePage, context)) await candidatePage.close().catch(() => {});
         }
