@@ -10,7 +10,7 @@
  */
 
 import { createInterface } from 'node:readline';
-import { applicationFormStateFingerprint, classifyHumanGate, inspectApplicationForm, sanitizeHumanGateUrl } from './application-form-core.mjs';
+import { applicationFormStateFingerprint, classifyHumanGate, inspectApplicationForm, isApplicationFormWithAccountCreation, sanitizeHumanGateUrl } from './application-form-core.mjs';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'path';
@@ -295,7 +295,7 @@ export function classifyFormSnapshot(snapshot) {
   const hasEmail = descriptors.some((descriptor) => /email|e-mail/.test(descriptor));
   const loginText = /(sign in to apply|log in to apply|login to apply|create an account to apply|sign in or create|login or register|weiter mit e-mail-adresse|weiter als gast|einloggen)/.test(body);
   const authenticationPath = /\/(?:application|apply)\/authentication(?:[/?#]|$)/i.test(snapshot?.currentUrl || '');
-  const loginRequired = hasPassword || loginText || (authenticationPath && hasEmail);
+  const loginRequired = (hasPassword && !isApplicationFormWithAccountCreation(snapshot)) || loginText || (authenticationPath && hasEmail);
 
   const candidatePatterns = [
     /first name|given name/,
@@ -827,7 +827,7 @@ async function inspectBenignSiteChromeActions(page) {
         if (!/(?:cookie|consent|cmp|gdpr|privacy prompt|datenschutz)/.test(rootEvidence)) return [];
         const label = normalize(element.getAttribute('aria-label') || element.innerText || element.getAttribute('value'));
         let kind = null;
-        if (/^(?:only the necessary cookies|reject all|reject non[- ]essential(?: cookies)?|decline all non[- ]necessary cookies|necessary only|continue without accepting|alle ablehnen|nur notwendige(?: cookies)?|nur erforderliche(?: cookies)?)$/.test(label)) {
+        if (/^(?:only the necessary cookies|reject all|reject non[- ]essential(?: cookies)?|decline all non[- ]necessary cookies|necessary only|continue without accepting|continue with necessary(?: cookies)?|(?:accept |allow |use )?only necessary(?: cookies)?|use necessary cookies only|(?:hyväksy )?vain välttämättömät(?: evästeet)?|alle ablehnen|nur notwendige(?: cookies)?|nur erforderliche(?: cookies)?)$/.test(label)) {
           kind = 'privacy_preserving_dismissal';
         } else if (/^(?:einstellungen oder ablehnen|cookie preferences|manage preferences|show details)$/.test(label)) {
           kind = 'open_privacy_preferences';
@@ -1062,13 +1062,13 @@ export async function followSafeContinuation(context, page, control, scope, {
   let acquired = null;
   let methodError = null;
   const before = new Set(context.pages());
+  const baselineForm = classifyFormSnapshot(baselineSnapshot);
+  const freshScope = {
+    ...scope,
+    actualFormReached: scope.actualFormReached || baselineForm.actualForm,
+    candidateFieldSignals: Math.max(Number(scope.candidateFieldSignals || 0), baselineForm.candidateFieldSignals),
+  };
   try {
-    const baselineForm = classifyFormSnapshot(baselineSnapshot);
-    const freshScope = {
-      ...scope,
-      actualFormReached: scope.actualFormReached || baselineForm.actualForm,
-      candidateFieldSignals: Math.max(Number(scope.candidateFieldSignals || 0), baselineForm.candidateFieldSignals),
-    };
     acquired = await reacquireSafeContinuation(page, control, freshScope);
     if (!acquired.control.attached || !acquired.control.enabled) {
       throw new Error('Verified entry link is detached or disabled; refusing to navigate');
@@ -1089,15 +1089,39 @@ export async function followSafeContinuation(context, page, control, scope, {
   } catch (error) {
     methodError = error;
   }
+  const attempts = [];
+  let usedMethod = method;
+  // Some career sites build the application in the link's click handler and send a plain GET of its href to their
+  // home page. When href navigation is redirected elsewhere, return to the listing and click the re-verified control.
+  if (method === 'verified_href_navigation' && !methodError && hrefNavigationRedirectedAway(page.url(), expectedDestination)) {
+    attempts.push({ method, control: acquired?.control || control, error: null, redirectedTo: page.url() });
+    usedMethod = 'playwright_click_after_href_redirect';
+    acquired = null;
+    try {
+      await page.goto(beforeUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      // Such links only work once the page's scripts have bound their click handlers.
+      await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {});
+      // A fresh snapshot re-tags controls on the reloaded listing so the exact control can be re-verified.
+      if (classifyFormSnapshot(await collectPageSnapshot(page)).humanGate) return page;
+      acquired = await reacquireSafeContinuation(page, control, freshScope);
+      if (!acquired.control.attached || !acquired.control.enabled) {
+        throw new Error('Verified entry link is detached or disabled; refusing to click');
+      }
+      await acquired.locator.scrollIntoViewIfNeeded({ timeout: 3_000 }).catch(() => {});
+      await acquired.locator.click({ timeout: 7_000 });
+    } catch (error) {
+      methodError = error;
+    }
+  }
   const outcome = await inspectContinuationAttempt(
     context, page, before, beforeUrl, expectedDestination, observationWindowMs, baselineSnapshot,
   );
-  const attempts = [{
-    method,
+  attempts.push({
+    method: usedMethod,
     control: acquired?.control || control,
     error: methodError ? inline(methodError.message).slice(0, 1_000) : null,
     observation: outcome.observation,
-  }];
+  });
   if (outcome.succeeded) {
     for (const extra of outcome.created) {
       if (extra !== outcome.destination) await extra.close().catch(() => {});
@@ -1105,7 +1129,7 @@ export async function followSafeContinuation(context, page, control, scope, {
     await outcome.destination.waitForTimeout(750).catch(() => {});
     Object.defineProperty(outcome.destination, '__careerOpsEntryInteractionEvidence', {
       configurable: true,
-      value: { successfulMethod: method, attempts },
+      value: { successfulMethod: usedMethod, attempts },
     });
     return outcome.destination;
   }
@@ -1123,6 +1147,17 @@ export async function followSafeContinuation(context, page, control, scope, {
     attempts,
   };
   throw error;
+}
+
+function hrefNavigationRedirectedAway(actualUrl, expectedUrl) {
+  try {
+    const actual = new URL(actualUrl);
+    const expected = new URL(expectedUrl);
+    const path = (value) => value.pathname.replace(/\/+$/, '') || '/';
+    return actual.origin !== expected.origin || path(actual) !== path(expected);
+  } catch {
+    return false;
+  }
 }
 
 function canonicalVisitedUrl(value) {

@@ -58,6 +58,38 @@ for (const fixture of humanGateFixtures) {
   });
 }
 
+test('an application form that creates the account is fillable but its password fields stay human-only', async () => {
+  const field = (label, name, type = 'text') => `<label>${label}<input type="${type}" name="${name}"></label>`;
+  const applicationWithAccount = `<form id="application"><h1>Career Opportunities: Data Engineer (79647)</h1>
+    ${field('Email Address', 'email', 'email')}${field('Retype Email Address', 'email2', 'email')}
+    ${field('Choose Password', 'pwd', 'password')}${field('Retype Password', 'pwd2', 'password')}
+    ${field('First Name', 'first')}${field('Last Name', 'last')}${field('Mobile phone', 'phone', 'tel')}
+    ${field('Current or Latest Employer', 'employer')}${field('Current or Latest Role', 'role')}
+    ${field('Notice period or when can you start', 'notice')}${field('LinkedIn profile link', 'linkedin')}
+    <button type="submit" onclick="window.finalClicks=(window.finalClicks||0)+1">Apply</button></form>`;
+  const page = await localPage(applicationWithAccount);
+  try {
+    assert.deepEqual(classifyHumanGate(await inspectApplicationForm(page)), { gate: null });
+    const prepared = await prepareOperationalApplicationForm(page, profile, {}, { context });
+    assert.notEqual(prepared.gate?.state, 'human_action_required');
+    assert.ok(prepared.evidence.filledFields.length > 0, 'applicant fields are filled');
+    assert.deepEqual(await page.$$eval('input[type=password]', (inputs) => inputs.map((input) => input.value)), ['', '']);
+    assert.ok(prepared.evidence.unresolvedFields.some((row) => /password/i.test(row.label || '')), 'passwords are left for the human');
+    assert.equal(prepared.evidence.finalAction.activated, false);
+    assert.equal(await page.evaluate(() => window.finalClicks || 0), 0);
+  } finally { await page.close(); }
+
+  const login = `<form id="login">${field('Email', 'email', 'email')}${field('Password', 'pwd', 'password')}<button>Sign in</button></form>`;
+  const signup = `<form id="signup">${field('First Name', 'first')}${field('Last Name', 'last')}${field('Email', 'email', 'email')}
+    ${field('Choose Password', 'pwd', 'password')}<button>Create account</button></form>`;
+  for (const html of [login, signup]) {
+    const gated = await localPage(html);
+    try {
+      assert.equal(classifyHumanGate(await inspectApplicationForm(gated)).gate?.cause, 'login');
+    } finally { await gated.close(); }
+  }
+});
+
 test('captcha completion and passive scripts without a form are not human gates', () => {
   assert.deepEqual(classifyHumanGate({ captcha: { present: true, completed: true, classification: 'active_blocking' } }), { gate: null });
   assert.deepEqual(classifyHumanGate({ captchaSignals: { present: true, scriptCount: 1, elements: [], totalNormalFields: 0 } }), { gate: null });

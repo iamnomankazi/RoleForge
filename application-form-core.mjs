@@ -61,6 +61,20 @@ export function sanitizePersistedUrls(value) {
   return value;
 }
 
+// Some ATSs (e.g. SuccessFactors) create the candidate account inside the application form itself. Its password
+// fields stay human-only and are never filled, but they are not a login wall in front of the form. Pure login and
+// bare sign-up pages have too few applicant fields to qualify and remain gated.
+export function isApplicationFormWithAccountCreation(pageSignals = {}) {
+  if (!pageSignals.applicationFormId) return false;
+  const fields = (pageSignals.fields || []).filter((field) => field.visible !== false);
+  if (!fields.some((field) => classifyHumanOnlyField(field) === 'password')) return false;
+  const applicantFields = fields.filter((field) => !classifyHumanOnlyField(field));
+  const describe = (field) => clean([field.type, field.label, field.text, field.name, field.placeholder].join(' ')).toLowerCase();
+  const signals = [/first name|given name/, /last name|family name|surname/, /e-?mail/, /phone|mobile/]
+    .filter((pattern) => applicantFields.some((field) => pattern.test(describe(field)))).length;
+  return signals >= 3 && applicantFields.length >= 8;
+}
+
 export function classifyHumanGate(pageSignals = {}) {
   const body = clean(pageSignals.bodyText).toLowerCase();
   const fields = (pageSignals.fields || []).filter((field) => field.visible !== false);
@@ -77,7 +91,8 @@ export function classifyHumanGate(pageSignals = {}) {
     if (captcha.classification === 'active_blocking') add('captcha', 'captcha_blocking');
     else if (captcha.classification === 'uncertain') add('uncertain', 'captcha_uncertain');
   }
-  if (fields.some((field) => classifyHumanOnlyField(field) === 'password')) add('login', 'password_field');
+  const accountCreationInForm = isApplicationFormWithAccountCreation(pageSignals);
+  if (!accountCreationInForm && fields.some((field) => classifyHumanOnlyField(field) === 'password')) add('login', 'password_field');
   if (/(?:sign|log)\s*in to (?:apply|continue)|login to (?:apply|continue)|einloggen|weiter mit e-mail-adresse|weiter als gast/.test(body)
       || (!pageSignals.applicationFormId && /\b(?:(?:sign|log)\s*in|login)\b/.test(body))) add('login', 'login_text');
   if (/\/(?:login|signin|sign-in|(?:application|apply)\/authentication)(?:[/?#]|$)/i.test(url)
@@ -89,7 +104,7 @@ export function classifyHumanGate(pageSignals = {}) {
   if (/\b(?:mfa|two[- ]factor|multi[- ]factor|one[- ]time (?:code|password)|enter (?:the |your )?(?:verification|security|authentication) code|authenticator (?:app|code))\b/.test(body)) add('mfa', 'mfa_text');
   if (/\b(?:verify (?:your |the )?(?:e-?mail|email address)|email verification|check your (?:e-?mail|inbox)|verification (?:e-?mail|link)|confirm your (?:e-?mail|email address))\b/.test(body)) add('email_verification', 'email_verification_text');
   if (!causes.size && /\b(?:verify (?:your identity|you are human)|verification required|checking your browser|just a moment|access denied|unusual traffic)\b/.test(body)) add('uncertain', 'human_verification_text');
-  if (!causes.size && pageSignals.loginGate) add('uncertain', 'legacy_login_gate');
+  if (!causes.size && pageSignals.loginGate && !accountCreationInForm) add('uncertain', 'legacy_login_gate');
   // A password is expected on registration and MFA can follow login. Those
   // combinations identify the more specific step; unrelated gates are ambiguous.
   if (causes.has('account_creation') || causes.has('mfa')) causes.delete('login');

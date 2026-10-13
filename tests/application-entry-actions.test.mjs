@@ -285,6 +285,51 @@ test('privacy-preserving cookie clearance resnapshots before Apply opens the app
   });
 });
 
+test('a "Continue with necessary" cookie banner is dismissed before Apply opens the application', async () => {
+  const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
+  const formUrl = `${listingUrl}/application`;
+  await withFixture({
+    [listingUrl]: `<style>#cmp { position: fixed; inset: 0; z-index: 100; background: white; }</style>
+      <h1>Acme Data Engineer</h1>
+      <a href="${formUrl}" id="apply">Apply now</a>
+      <div id="cmp" class="cookiePolicy cookiemanager"><p>Better services with cookies</p>
+        <button type="button">Accept All Cookies</button>
+        <button type="button" id="cookie-reject" class="cookiemanagerrejectall" onclick="cmp.remove()">Continue with necessary</button></div>`,
+    [formUrl]: FORM_HTML,
+  }, async ({ context, page }) => {
+    await page.goto(listingUrl);
+    const clearance = await clearBenignListingSiteChrome(page);
+    assert.equal(clearance.cleared, true);
+    assert.deepEqual(clearance.actions.map((row) => row.label), ['continue with necessary']);
+    const result = await followSafeApplicationEntryFlow(
+      context, page, await collectPageSnapshot(page), CANDIDATE, { listingUrl },
+    );
+    assert.equal(result.form.actualForm, true, JSON.stringify({ reason: result.reason, diagnostics: result.diagnostics }));
+  });
+});
+
+test('an Apply link whose plain navigation bounces to the home page is clicked instead', async () => {
+  const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
+  const homeUrl = 'https://careers.acme.test/';
+  const applyHref = 'https://careers.acme.test/talentcommunity/apply/79647/';
+  const formUrl = `${listingUrl}/application`;
+  await withFixture({
+    [listingUrl]: `<h1>Acme Data Engineer</h1>
+      <a href="${applyHref}" id="apply" onclick="event.preventDefault(); location.href = '${formUrl}'">Apply now</a>`,
+    [applyHref]: `<script>location.replace('${homeUrl}')</script>`,
+    [homeUrl]: '<h1>Careers at Acme</h1><p>Open positions</p>',
+    [formUrl]: FORM_HTML,
+  }, async ({ context, page }) => {
+    await page.goto(listingUrl);
+    const result = await followSafeApplicationEntryFlow(
+      context, page, await collectPageSnapshot(page), CANDIDATE, { listingUrl },
+    );
+    assert.equal(result.form.actualForm, true, JSON.stringify({ reason: result.reason, diagnostics: result.diagnostics }));
+    assert.equal(result.hops[0].activationMethod, 'playwright_click_after_href_redirect');
+    assert.equal(result.page.url(), formUrl);
+  });
+});
+
 test('asynchronously rendered privacy-minimal preferences are saved before Apply', async () => {
   const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
   const formUrl = `${listingUrl}/application`;
