@@ -309,3 +309,11 @@ test('all batch URLs are sanitized at creation and normal transitions, and legac
     assert.notEqual(state.formPreparation.evidenceHash, legacyPreparation.evidenceHash);
   } finally { fixture.close(); }
 });
+
+test('a "Sign in" nav link on a job listing without login fields is not a login gate', () => {
+  const listing = { bodyText: 'Careers Sign in Azure Data Engineer Helsinki Apply now', fields: [{ type: 'search', label: 'Search jobs' }] };
+  assert.equal(classifyHumanGate(listing).gate, null);
+  const loginPage = { bodyText: 'Sign in to your candidate account', fields: [{ type: 'email', label: 'Email' }, { type: 'password', label: 'Password' }] };
+  assert.equal(classifyHumanGate(loginPage).gate.cause, 'login');
+  assert.equal(classifyHumanGate({ bodyText: 'Please sign in to apply', fields: [] }).gate.cause, 'login');
+});

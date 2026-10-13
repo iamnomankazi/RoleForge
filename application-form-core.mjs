@@ -94,7 +94,9 @@ export function classifyHumanGate(pageSignals = {}) {
   const accountCreationInForm = isApplicationFormWithAccountCreation(pageSignals);
   if (!accountCreationInForm && fields.some((field) => classifyHumanOnlyField(field) === 'password')) add('login', 'password_field');
   if (/(?:sign|log)\s*in to (?:apply|continue)|login to (?:apply|continue)|einloggen|weiter mit e-mail-adresse|weiter als gast/.test(body)
-      || (!pageSignals.applicationFormId && /\b(?:(?:sign|log)\s*in|login)\b/.test(body))) add('login', 'login_text');
+      // A bare "Sign in" / "Log in" nav link on a job listing is not a wall; it needs a login-shaped field too.
+      || (!pageSignals.applicationFormId && /\b(?:(?:sign|log)\s*in|login)\b/.test(body)
+        && fields.some((field) => /e-?mail|user ?name|password/i.test(clean([field.type, field.label, field.text, field.name, field.placeholder].join(' ')))))) add('login', 'login_text');
   if (/\/(?:login|signin|sign-in|(?:application|apply)\/authentication)(?:[/?#]|$)/i.test(url)
       && fields.some((field) => /e-?mail/i.test(clean([field.type, field.label, field.text, field.name].join(' '))))) add('login', 'authentication_path');
   if (/\b(?:create (?:an? |your )?account|account creation|register to apply|sign up to (?:apply|continue))\b/.test(body)) add('account_creation', 'account_creation_text');
