@@ -156,6 +156,72 @@ function isNarrativeControl(field) {
     || (field?.type === 'text' && Number(field?.maxLength || 0) >= 120);
 }
 
+function isYesNoControl(field = {}) {
+  const type = cleanFormText(field.type).toLowerCase();
+  if (type === 'radio') return /^(?:yes|no|kyllä|kylla|ei)$/i.test(cleanFormText(field.optionLabel || field.value));
+  if (type === 'checkbox') return true;
+  const labels = (field.options || []).map((option) => normalizeFormQuestion(option?.label || option?.value));
+  return labels.includes('yes') && labels.includes('no');
+}
+
+// "Do you have experience with Python and SQL?" style questions. Returns the named skills, or null when the
+// question is not a plain skills question (years, levels, seniority, legal or permit wording stay manual).
+export function skillsAskedIn(question) {
+  const text = cleanFormText(question).toLowerCase().replace(/[?.!:*]+\s*$/, '').trim();
+  if (/\d|\byears?\b|\blevel\b|professional|commercial|production|expert|advanced|senior|lead|manag|certif|licen|degree|visa|permit|legal|criminal|clearance|citizen|driv/.test(text)) return null;
+  const match = text.match(/^(?:do|have|are) you (?:have |had |got )?(?:any |some |prior |previous |practical |hands-on |working |good |solid )?(?:experience|knowledge|skills?|familiarity|proficiency|competence) (?:with|in|of|using|on) (.+)$/)
+    || text.match(/^are you (?:familiar|proficient|experienced|skilled|comfortable) (?:with|in|using) (.+)$/)
+    || text.match(/^(?:can|do) you (?:use|work with|program in|code in) (.+)$/);
+  if (!match) return null;
+  const any = /\bor\b/.test(match[1]);
+  const skills = match[1].split(/,|\band\b|\bor\b|&|\//)
+    .map((part) => part.replace(/\b(?:the|programming|development|languages?|tools?|frameworks?|technolog(?:y|ies)|platforms?)\b/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  if (!skills.length || skills.length > 5 || skills.some((skill) => skill.split(' ').length > 3)) return null;
+  return { skills, any };
+}
+
+// Yes only when every named skill is listed in the CV's skills section (familiarity-only mentions do not count).
+// Never answers No automatically: an unlisted skill stays for the user.
+export function skillExperienceAnswer(profile, question) {
+  const asked = skillsAskedIn(question);
+  const section = String(profile?.cvText || '').match(/^##\s+(?:technical\s+)?skills\b[^\n]*\n([\s\S]*?)(?=^##\s|$(?![\s\S]))/im)?.[1];
+  if (!asked || !section) return null;
+  const listed = section.split('\n').flatMap((line) => line.split(';'))
+    .filter((segment) => !/familiar|concepts/i.test(segment)).join(' ').toLowerCase();
+  const found = asked.skills.map((skill) => new RegExp(`(?<![\\p{L}\\p{N}])${skill.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'u').test(listed));
+  return (asked.any ? found.some(Boolean) : found.every(Boolean)) ? 'Yes' : null;
+}
+
+const TRAINEE_ROLE = /(?<![\p{L}\p{N}])(?:trainee|intern|internship|harjoittelija|harjoittelu|kesätyö|summer (?:job|trainee|intern)|working student|werkstudent|praktikum|praktikant|thesis|apprentice(?:ship)?|graduate (?:program|programme|trainee))(?![\p{L}\p{N}])/iu;
+
+export function isTraineeRole(context = {}) {
+  return TRAINEE_ROLE.test(cleanFormText(context?.candidate?.title || context?.candidate?.role));
+}
+
+const JOB_BOARDS = [
+  [/(?:^|\.)duunitori\.fi$/, 'Duunitori'], [/(?:^|\.)linkedin\.com$/, 'LinkedIn'], [/(?:^|\.)indeed\./, 'Indeed'],
+  [/(?:^|\.)jobly\.fi$/, 'Jobly'], [/(?:^|\.)oikotie\.fi$/, 'Oikotie'], [/(?:^|\.)tyomarkkinatori\.fi$/, 'Työmarkkinatori'],
+  [/(?:^|\.)glassdoor\./, 'Glassdoor'], [/(?:^|\.)stepstone\./, 'StepStone'], [/(?:^|\.)monster\./, 'Monster'],
+  [/(?:^|\.)arbeitnow\.com$/, 'Arbeitnow'], [/(?:^|\.)weworkremotely\.com$/, 'We Work Remotely'],
+  [/(?:^|\.)academicpositions\./, 'Academic Positions'], [/(?:^|\.)eures\./, 'EURES'],
+];
+const COMPANY_BOARD_SOURCES = /^(?:greenhouse|ashby|lever|workday|smartrecruiters|teamtailor|recruitee|personio|workable|successfactors)(?:-api)?$/;
+
+// "How did you hear about this position?" comes from where the job was actually found (listing URLs or the lead's
+// source_url). Unknown stays for review.
+export function applicationSourceFromDiscovery(context = {}) {
+  const discovery = context?.discovery || {};
+  for (const value of discovery.urls || []) {
+    let host;
+    try { host = new URL(value).hostname.toLowerCase(); } catch { continue; }
+    const board = JOB_BOARDS.find(([pattern]) => pattern.test(host));
+    if (board) return board[1];
+  }
+  if (COMPANY_BOARD_SOURCES.test(cleanFormText(discovery.source).toLowerCase())) return 'Company website';
+  return null;
+}
+
 export function classifyFieldSemantics(field = {}) {
   const text = fieldText(field);
   const type = cleanFormText(field.type).toLowerCase();
@@ -256,6 +322,15 @@ export function classifyFieldSemantics(field = {}) {
     return { category: 'availability', semantic: start ? 'availability' : 'schedule_availability' };
   }
   if (/relocat/.test(text)) return { category: 'relocation', semantic: 'relocation' };
+  if (isYesNoControl(field) && skillsAskedIn(field.questionText || field.groupLabel || field.label)) {
+    return { category: 'skill_experience', semantic: 'skill_experience' };
+  }
+  if (/\b(?:current|latest|most recent|present) (?:or (?:latest|most recent|last) )?employer\b/.test(text)) {
+    return { category: 'employment', semantic: 'current_employer' };
+  }
+  if (/\b(?:current|latest|most recent|present) (?:or (?:latest|most recent|last) )?(?:role|job title|position|title)\b/.test(text)) {
+    return { category: 'employment', semantic: 'current_role' };
+  }
   if (isNarrativeControl(field) && /cover letter|motivation letter/.test(text)) {
     return { category: 'custom_motivation_experience_narrative', semantic: 'cover_letter_text' };
   }
@@ -483,7 +558,6 @@ function formRules(profile) {
   );
   return {
     currentLocation: { city: city || null, country: country || null, combined: combined || null },
-    source: rules.source?.value || 'LinkedIn',
     homeCountry: cleanFormText(rules.work_authorization?.home_country || country) || null,
     phoneDialCode: cleanFormText(rules.phone?.dial_code) || null,
   };
@@ -658,13 +732,23 @@ export function canonicalFieldValue(profile, semantics, {
       ...context, question: [field.questionText, field.groupLabel, field.label].filter(Boolean).join(' '),
     });
   }
-  if (category === 'source_how_heard') return rules.source;
+  if (category === 'source_how_heard') return applicationSourceFromDiscovery(context);
+  if (category === 'skill_experience') return skillExperienceAnswer(profile, field.questionText || field.groupLabel || field.label);
+  if (category === 'employment') {
+    const employment = profile?.formRules?.current_employment || {};
+    return cleanFormText(semantic === 'current_employer' ? employment.employer : employment.role) || null;
+  }
   if (category === 'education') {
     if (semantic === 'university') return configuredUniversity(profile);
     if (semantic === 'graduation') return profile?.education?.expected_graduation_date || null;
     return null;
   }
-  if (category === 'salary') return semantic === 'salary' ? profile?.compensation?.target_range || null : null;
+  if (category === 'salary') {
+    if (semantic !== 'salary') return null;
+    // The general target is for professional roles; trainee/internship roles need their own approved answer.
+    if (isTraineeRole(context)) return cleanFormText(profile?.compensation?.trainee_answer) || null;
+    return profile?.compensation?.target_range || null;
+  }
   if (category === 'availability') return semantic === 'availability' ? profile?.currentStatus?.availability?.start || null : null;
   if (category === 'relocation') {
     return cleanFormText(profile?.formRules?.relocation?.value) || null;

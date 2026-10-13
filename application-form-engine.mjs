@@ -21,12 +21,14 @@ import {
   containsUnresolvedPlaceholder,
   generateCustomNarrativeAnswer,
   hashFormValue,
+  isTraineeRole,
   normalizeNarrativeText,
   normalizeFormQuestion,
   preferredDeclineOption,
   stableFieldIdentity,
   validatePlannedValueForControl,
 } from './application-form-policy.mjs';
+import { basename } from 'node:path';
 import { validateNarrativeProvenanceRecord } from './application-evidence.mjs';
 import {
   addPreparedAnswers,
@@ -291,6 +293,7 @@ export function inspectOperationalUploadTopology(snapshot) {
   const applicationFormId = cleanFormText(snapshot?.applicationFormId);
   const fields = (snapshot.fields || [])
     .filter((field) => !field.disabled && field.type === 'file'
+      && !(field.visible === false && !field.required && classifyFieldSemantics(field).semantic === 'unknown_upload')
       && (!hasVerifiedFormKey || (applicationFormId && field.formId === applicationFormId && field.applicationFormOwned !== false)))
     .map((field) => {
       const semantics = classifyFieldSemantics(field);
@@ -310,9 +313,11 @@ export function inspectOperationalUploadTopology(snapshot) {
   const unknown = fields.filter((row) => row.semantic === 'unknown_upload');
   let mode = 'none';
   let reason = 'No visible document upload fields.';
-  if (cv.length && cover.length && !combined.length && !unknown.length) {
+  if ((cv.length || cover.length) && !combined.length && !unknown.length) {
+    // Each field names its document; a missing counterpart (e.g. a CV tile without a file input) is handled
+    // by trigger uploads or an explicit manual-upload row, not by refusing the labelled field.
     mode = 'separate';
-    reason = 'Separate CV and cover-letter upload fields are available.';
+    reason = 'Separate, explicitly labelled CV and/or cover-letter upload fields are available.';
   } else if (fields.length === 1 && combined.length === 1) {
     mode = 'single_combined';
     reason = 'Exactly one field explicitly requests combined application documents.';
@@ -514,6 +519,7 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       continue;
     }
     if (semantics.category === 'file_upload') {
+      if (field.visible === false && semantics.semantic === 'unknown_upload' && !field.required) continue;
       const artifact = selectArtifact(artifacts, semantics.semantic);
       if (!artifact) {
         if (field.required || semantics.semantic === 'unknown_upload') {
@@ -585,15 +591,18 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       : cleanFormText;
     let value = normalizeValue(resolved.value);
     if (!value) {
-      if (field.required || ['work_authorization', 'sponsorship_employer_support'].includes(semantics.category)) {
-        unresolvedFields.push(manualField(
-          field,
-          semantics,
-          'No grounded canonical answer is available.',
-          ['work_authorization', 'sponsorship_employer_support'].includes(semantics.category)
-            ? 'Verified job country or hiring arrangement is missing or ambiguous.'
-            : 'Canonical profile evidence is missing.',
-        ));
+      const traineeSalary = semantics.semantic === 'salary' && isTraineeRole(context);
+      if (field.required || traineeSalary || ['work_authorization', 'sponsorship_employer_support'].includes(semantics.category)) {
+        const missing = {
+          work_authorization: 'Verified job country or hiring arrangement is missing or ambiguous.',
+          sponsorship_employer_support: 'Verified job country or hiring arrangement is missing or ambiguous.',
+          source_how_heard: 'Where this job was found is not recorded in its discovery provenance.',
+          skill_experience: 'Not every skill named in the question is listed in the CV skills section.',
+          employment: 'application_form.current_employment is not set in config/profile.yml.',
+        }[semantics.category] || (traineeSalary
+          ? 'Trainee/internship role: the general salary target is not used; enter a role-appropriate expectation.'
+          : 'Canonical profile evidence is missing.');
+        unresolvedFields.push(manualField(field, semantics, 'No grounded canonical answer is available.', missing));
       }
       continue;
     }
@@ -658,7 +667,9 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       value,
       valueHash: hashFormValue(value),
       retryBudget: 1,
-      sourceRef: resolved.answerRecord ? 'candidate-specific-grounded-narrative' : 'config/profile.yml',
+      sourceRef: resolved.answerRecord ? 'candidate-specific-grounded-narrative'
+        : semantics.category === 'skill_experience' ? 'cv.md'
+          : semantics.category === 'source_how_heard' ? 'job-discovery-provenance' : 'config/profile.yml',
     };
     if (action === 'autocomplete' && semantics.category === 'current_location') {
       planned.locationGrounding = {
@@ -1259,6 +1270,196 @@ async function performAction(page, action, visibleOptions, { deadlineMs, clock }
   return state.value;
 }
 
+// Bound documents the form is expected to receive. A single combined upload covers both CV and cover letter.
+export function expectedDocuments(artifacts = {}, uploadTopology = null) {
+  if (uploadTopology?.mode === 'single_combined') {
+    return artifacts.combinedDocument ? [{ semantic: 'single_document_upload', artifact: artifacts.combinedDocument }] : [];
+  }
+  return [
+    artifacts.cv && { semantic: 'cv_upload', artifact: artifacts.cv },
+    artifacts.coverLetter && { semantic: 'cover_letter_upload', artifact: artifacts.coverLetter },
+  ].filter(Boolean);
+}
+
+const DOCUMENT_LABEL = { cv_upload: 'CV', cover_letter_upload: 'Cover letter', single_document_upload: 'Combined application document' };
+
+export function manualUploadRow(doc, reason) {
+  return {
+    fieldId: `upload-${doc.semantic}`,
+    stableFieldId: `upload:${doc.semantic}`,
+    label: `${DOCUMENT_LABEL[doc.semantic]} upload`,
+    category: 'file_upload',
+    semantic: doc.semantic,
+    reason: `${reason} Upload this exact file manually: ${doc.artifact.resolvedPath}`,
+    manualUploadPath: doc.artifact.resolvedPath,
+    manualActionRequired: true,
+  };
+}
+
+// Finds upload buttons/tiles/links for one doc purpose, e.g. SuccessFactors "Upload a CV" tiles that open a
+// dialog or a native file chooser. Purpose comes from the control's own text or its nearest small container.
+function stampUploadTriggers({ semantic, applicationFormId, finalTokenSource, finalTokenFlags }) {
+  const finalToken = new RegExp(finalTokenSource, finalTokenFlags);
+  const purposes = {
+    cv_upload: /\b(?:cv|resume|résumé|curriculum vitae|ansioluettelo|lebenslauf)\b/i,
+    cover_letter_upload: /\b(?:cover(?:ing)? letter|motivation letter|application letter|saatekirje|hakemuskirje|anschreiben)\b/i,
+  };
+  const uploadWords = /\b(?:upload|attach|browse|choose (?:a )?file|select (?:a )?file|add (?:a )?(?:file|document)|lataa|liitä|valitse tiedosto)\b/i;
+  const text = (element) => [element.getAttribute('aria-label'), element.getAttribute('title'), element.innerText, element.value,
+    ...(element.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean).map((id) => document.getElementById(id)?.innerText)]
+    .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+  const visible = (element) => {
+    if (element.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+  };
+  const purposeOf = (value) => {
+    const hits = Object.entries(purposes).filter(([, pattern]) => pattern.test(value)).map(([key]) => key);
+    return hits.length === 1 ? hits[0] : hits.length ? 'ambiguous' : null;
+  };
+  for (const element of document.querySelectorAll('[data-career-ops-upload-trigger]')) element.removeAttribute('data-career-ops-upload-trigger');
+  const found = [];
+  for (const element of document.querySelectorAll('button, a, [role="button"], input[type="button"], label, [tabindex]:not([tabindex="-1"])')) {
+    if (!visible(element) || element.type === 'submit') continue;
+    // A real link would navigate away from the form; upload links are script-driven ("#" or javascript:).
+    if (element.tagName === 'A' && element.getAttribute('href') && !/^\s*(?:#|javascript:)/i.test(element.getAttribute('href'))) continue;
+    if (element.closest('[id*="cookie" i], [class*="cookie" i], [id*="consent" i], [class*="consent" i], [id*="onetrust" i]')) continue;
+    const own = text(element);
+    if (!uploadWords.test(own) || finalToken.test(own.replace(uploadWords, ' '))) continue;
+    let purpose = purposeOf(own);
+    for (let node = element.parentElement, depth = 0; !purpose && node && depth < 5; node = node.parentElement, depth += 1) {
+      const context = (node.innerText || '').replace(/\s+/g, ' ').trim();
+      if (context.length > 300) break;
+      purpose = purposeOf(context);
+    }
+    if (purpose !== semantic) continue;
+    const owningForm = element.closest('form');
+    if (applicationFormId && owningForm && owningForm.getAttribute('data-career-ops-form-id') !== applicationFormId) continue;
+    found.push(element);
+  }
+  // Prefer the innermost control when a tile wrapper and its button both qualify.
+  const innermost = found.filter((element) => !found.some((other) => other !== element && element.contains(other)));
+  return innermost.slice(0, 3).map((element, index) => {
+    const id = `${semantic}-${index}`;
+    element.setAttribute('data-career-ops-upload-trigger', id);
+    return id;
+  });
+}
+
+const MODAL_SELECTOR = '[role="dialog"], [role="alertdialog"], dialog[open], [aria-modal="true"]';
+
+async function openModal(page) {
+  const modals = page.locator(MODAL_SELECTOR);
+  for (let index = 0; index < await modals.count(); index += 1) {
+    if (await modals.nth(index).isVisible()) return modals.nth(index);
+  }
+  return null;
+}
+
+async function attachmentVerified(page, artifact) {
+  const names = [...new Set([artifact.intendedFilename, basename(artifact.resolvedPath)].filter(Boolean))];
+  if (await openModal(page)) return false;
+  return page.evaluate((expected) => {
+    const inputs = [...document.querySelectorAll('input[type="file"]')]
+      .some((input) => [...(input.files || [])].some((file) => expected.includes(file.name)));
+    const shown = expected.some((name) => (document.body.innerText || '').includes(name));
+    return inputs || shown;
+  }, names);
+}
+
+export async function uploadThroughTrigger(page, doc, { applicationFormId = null, timeoutMs = 15000 } = {}) {
+  const triggerIds = await page.evaluate(stampUploadTriggers, {
+    semantic: doc.semantic, applicationFormId, finalTokenSource: FINAL_TOKEN.source, finalTokenFlags: FINAL_TOKEN.flags,
+  });
+  if (!triggerIds.length) return { status: 'no_trigger' };
+  const path = doc.artifact.resolvedPath;
+  for (const triggerId of triggerIds) {
+    await page.evaluate(() => document.querySelectorAll('input[type="file"]')
+      .forEach((input) => input.setAttribute('data-career-ops-preexisting-file', '1')));
+    let chooser = page.waitForEvent('filechooser', { timeout: 3000 }).catch(() => null);
+    const clicked = await page.locator(`[data-career-ops-upload-trigger="${triggerId}"]`).click({ timeout: 5000 })
+      .then(() => true, () => false);
+    if (!clicked) continue;
+    let fileChooser = await chooser;
+    let attached = false;
+    if (fileChooser) {
+      await fileChooser.setFiles(path);
+      attached = true;
+    } else {
+      const modal = await openModal(page);
+      const scope = modal || page.locator('body');
+      const inputs = modal
+        ? modal.locator('input[type="file"]')
+        : page.locator('input[type="file"]:not([data-career-ops-preexisting-file])');
+      if (await inputs.count() === 1) {
+        await inputs.setInputFiles(path);
+        attached = true;
+      } else if (modal) {
+        const browse = scope.locator('button, a, [role="button"], label, input[type="button"]')
+          .filter({ hasText: /browse|choose|select|from (?:my )?(?:computer|device)|upload|lataa|valitse/i });
+        if (await browse.count() >= 1) {
+          chooser = page.waitForEvent('filechooser', { timeout: 3000 }).catch(() => null);
+          await browse.first().click({ timeout: 5000 }).catch(() => null);
+          fileChooser = await chooser;
+          if (fileChooser) {
+            await fileChooser.setFiles(path);
+            attached = true;
+          }
+        }
+      }
+    }
+    if (!attached) {
+      const modal = await openModal(page);
+      if (modal) await page.keyboard.press('Escape').catch(() => null);
+      continue;
+    }
+    // Upload dialogs often need their own Upload/OK button; never anything that reads as a final action.
+    const modal = await openModal(page);
+    if (modal) {
+      const confirm = modal.locator('button, [role="button"], input[type="button"], a')
+        .filter({ hasText: /^\s*(?:upload|attach|ok|done|save|add|lataa|tallenna)(?: (?:file|document|attachment))?\s*$/i });
+      if (await confirm.count() >= 1) await confirm.last().click({ timeout: 5000 }).catch(() => null);
+    }
+    const deadline = Date.now() + Math.min(timeoutMs, 10000);
+    while (Date.now() < deadline) {
+      if (await attachmentVerified(page, doc.artifact)) return { status: 'uploaded' };
+      await page.waitForTimeout(250);
+    }
+    return { status: 'unverified', reason: `${DOCUMENT_LABEL[doc.semantic]} was given to the upload control but the page never showed it as attached.` };
+  }
+  return { status: 'failed', reason: `${DOCUMENT_LABEL[doc.semantic]} upload control did not open a file chooser or upload dialog.` };
+}
+
+function documentUploaded(uploads = [], doc) {
+  return uploads.some((upload) => upload?.sha256 === doc.artifact.sha256 || upload?.semantic === 'single_document_upload');
+}
+
+async function uploadPendingDocuments(page, plan, artifacts, aggregate, applicationFormId) {
+  const planned = new Set(plan.actions.filter((action) => action.action === 'upload').map((action) => action.artifact.sha256));
+  for (const doc of expectedDocuments(artifacts, plan.uploadTopology)) {
+    if (planned.has(doc.artifact.sha256) || documentUploaded(aggregate.uploadedArtifacts, doc)) continue;
+    let result;
+    try {
+      result = await uploadThroughTrigger(page, doc, { applicationFormId });
+    } catch (error) {
+      result = { status: 'failed', reason: cleanFormText(error.message) };
+    }
+    if (result.status === 'no_trigger') continue;
+    if (result.status !== 'uploaded') {
+      aggregate.unresolvedFields.push(manualUploadRow(doc, result.reason));
+      continue;
+    }
+    aggregate.uploadedArtifacts.push({
+      semantic: doc.semantic, filename: doc.artifact.intendedFilename, sha256: doc.artifact.sha256, preserved: false,
+    });
+    aggregate.completed.push({
+      fieldId: `upload-${doc.semantic}`, stableFieldId: `upload:${doc.semantic}`, category: 'file_upload',
+      semantic: doc.semantic, valueHash: doc.artifact.sha256, preserved: false,
+    });
+  }
+}
+
 async function withinAttemptDeadline(operation, {
   timeoutMs,
   sessionBound,
@@ -1440,6 +1641,10 @@ async function executeOperationalFormPlanGuarded(page, plan, {
         semantic: action.semantic,
         reason: lastReason || 'Retry budget exhausted.',
         manualActionRequired: true,
+        ...(action.action === 'upload' ? {
+          reason: `${lastReason || 'Retry budget exhausted.'} Upload this exact file manually: ${action.artifact.resolvedPath}`,
+          manualUploadPath: action.artifact.resolvedPath,
+        } : {}),
       });
     }
     if (sessionLimitReached) {
@@ -1946,6 +2151,9 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         outcome = { gate: execution.gate, snapshot };
         break;
       }
+      if (!execution.sessionLimitReached) {
+        await uploadPendingDocuments(page, plan, artifacts, aggregate, snapshot.applicationFormId);
+      }
       addPreparedAnswers(reasoningState, plan, plan.formFingerprint, snapshot);
       const triggerReasons = verifierTriggerReasons(reasoningState, plan, aggregate);
       reasoningState.riskReasons = new Set(triggerReasons);
@@ -2184,6 +2392,20 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
     outcome.evidence.userActionRequired = true;
     outcome.evidence.deterministicReviewComplete = false;
     outcome.evidence.reviewComplete = false;
+  }
+  if (outcome.gate?.state !== 'human_action_required') {
+    // Expected documents are never skipped silently: anything not attached gets an explicit manual handoff.
+    const missing = expectedDocuments(artifacts, outcome.evidence.uploadTopology).filter((doc) => (
+      !documentUploaded(outcome.evidence.uploadedArtifacts, doc)
+      && !outcome.evidence.unresolvedFields.some((row) => row.category === 'file_upload' && row.semantic === doc.semantic)));
+    if (missing.length) {
+      outcome.evidence.unresolvedFields.push(...missing.map((doc) => manualUploadRow(doc,
+        'Not attached: no upload control for this document was found on the form pages RoleForge reached.')));
+      outcome.evidence.userActionRequired = true;
+      outcome.evidence.deterministicReviewComplete = false;
+      outcome.evidence.reviewComplete = false;
+      outcome.gate ||= { state: 'review_required', reason: 'Bound application documents were not attached; upload them manually before submitting.' };
+    }
   }
   outcome.evidence.progression = { ...progression, progressionSubmits: outcome.snapshot?.progressionSubmits || progression.stepsAdvanced };
   outcome.evidence.operationalArtifacts.submissionGuardActiveAtHandoff = false;

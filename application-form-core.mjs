@@ -503,7 +503,19 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
           usedFieldIds.add(fieldId);
         }
         element.setAttribute('data-career-ops-field-id', fieldId);
-        const fieldText = textFor(element);
+        let fieldText = textFor(element);
+        // Upload tiles often hide an unlabelled file input; its purpose is the tile's short text ("CV", "Cover Letter").
+        if ((element.type || '').toLowerCase() === 'file' && !/resume|r[ée]sum[ée]|\bcv\b|cover|motivation|curriculum/i.test(fieldText)) {
+          for (let node = element.parentElement, depth = 0; node && depth < 4; node = node.parentElement, depth += 1) {
+            const context = (node.innerText || '').replace(/\s+/g, ' ').trim();
+            if (context.length > 160) break;
+            if (/resume|r[ée]sum[ée]|\bcv\b|cover letter|motivation letter|curriculum/i.test(context)
+                && !(/resume|\bcv\b|curriculum/i.test(context) && /cover|motivation/i.test(context))) {
+              fieldText = `${fieldText} ${context}`.trim();
+              break;
+            }
+          }
+        }
         const owningForm = element.form || element.closest('form');
         return {
           fieldId,

@@ -64,6 +64,11 @@ export function buildCandidateFormContext(contract) {
     hiringArrangement: inline(row.hiringArrangement ?? row.hiring_arrangement ?? row.employmentArrangement) || null,
     canEmployFromFinland: row.canEmployFromFinland === true || row.can_employ_from_finland === true,
     jdText,
+    discovery: {
+      source: inline(row.source) || null,
+      urls: [row.original_url, row.url, row.source_url, row.canonical_url, ...(row.url_aliases || []),
+        contract?.candidate?.listingUrl].map(inline).filter(Boolean),
+    },
     verifyApplicationContinuity,
   };
 }

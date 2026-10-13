@@ -28,7 +28,7 @@ const candidate = {
   company: 'Example Company',
   title: 'Data Engineer',
 };
-const context = { batchId: 'reasoning-batch', candidate, jobCountry: 'Finland', jdText: 'Build Python and SQL data pipelines.' };
+const context = { batchId: 'reasoning-batch', candidate, jobCountry: 'Finland', jdText: 'Build Python and SQL data pipelines.', discovery: { urls: ['https://www.linkedin.com/jobs/view/1000000001'] } };
 const profile = attachFactualSources({
   candidate: {
     full_name: 'Alex Example', email: 'alex@example.test', phone: '+358 40 123 4567',

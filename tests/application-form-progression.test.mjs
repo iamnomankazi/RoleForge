@@ -32,7 +32,7 @@ const profile = attachFactualSources({
   formRules: { source: { value: 'LinkedIn' }, current_location: { city: 'Example City', country: 'Finland', combined: 'Example City, Finland' }, work_authorization: { home_country: 'Finland' }, narrative_evidence: [] },
   answers: new Map(), priorApprovedAnswers: [], cvText: 'Synthetic fixture CV evidence.', articleDigestText: '', answerBankText: '', profileModeText: '',
 });
-const context = { batchId: 'fixture-batch', candidate: { candidate_id: `cand_v1_${'a'.repeat(64)}` }, jobCountry: 'Finland', jdText: '' };
+const context = { batchId: 'fixture-batch', candidate: { candidate_id: `cand_v1_${'a'.repeat(64)}` }, jobCountry: 'Finland', jdText: '', discovery: { urls: ['https://www.linkedin.com/jobs/view/1000000001'] } };
 const narrativeCvText = 'In the fictional Warehouse project, I built validated Python and SQL data pipelines.';
 const narrativeProfile = attachFactualSources({
   ...profile,

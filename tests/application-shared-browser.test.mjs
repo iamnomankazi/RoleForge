@@ -264,6 +264,8 @@ test('candidate tabs stay open, failures are isolated, human handoffs resume aft
           assert.equal(options.deferHumanHandoff, true);
           return { state: 'human_action_required', deferred: true };
         }
+        // e.g. a document that had to be handed off for manual upload: the session moves on to the next candidate.
+        if (options.candidateId === 'cand_v1_fixture_04') return { state: 'review_required' };
         return {
           state: 'form_prepared',
           submissionAvailable: false,
@@ -306,7 +308,10 @@ test('candidate tabs stay open, failures are isolated, human handoffs resume aft
       userActionRequired: true,
     });
     assert.equal(summary.completed[2].tabOpen, false);
-    assert.equal(summary.completed.filter((row) => row.state === 'form_prepared').length, 4);
+    assert.equal(summary.completed[3].state, 'review_required');
+    assert.equal(summary.completed[3].tabOpen, true, 'a review-required tab stays open for the user');
+    assert.ok(events.indexOf('execute:cand_v1_fixture_04:prepare') < events.indexOf('execute:cand_v1_fixture_05:prepare'));
+    assert.equal(summary.completed.filter((row) => row.state === 'form_prepared').length, 3);
     assert.equal(summary.browserRemainsOpen, true);
     assert.equal(summary.submissionAvailable, false);
     assert.equal(summary.trackerUpdated, false);

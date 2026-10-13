@@ -87,6 +87,7 @@ const formContext = {
   candidate,
   jobCountry: 'Finland',
   jdText: 'Build reliable Python and SQL data pipelines, analytics products, APIs, and applied AI workflows.',
+  discovery: { urls: ['https://www.linkedin.com/jobs/view/1000000001'] },
 };
 const controls = [{ type: 'submit', label: 'Submit application', insideApplicationForm: true }];
 let browser;
@@ -636,7 +637,7 @@ test('7–9. required privacy is accepted, marketing is declined, and EEO stays 
   assert.equal(requiredEeo.actions[0].value, 'Prefer not to say');
 });
 
-test('10 and 18. source is LinkedIn and yes/no authorization never receives a country value', () => {
+test('10 and 18. source follows LinkedIn discovery provenance and yes/no authorization never receives a country value', () => {
   const result = plan([
     field({
       id: 'source',
