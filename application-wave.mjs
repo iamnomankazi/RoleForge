@@ -62,7 +62,8 @@ function addProblem(item, message) {
 }
 
 function normalizedIdentity(value) {
-  return String(value ?? '').replace(/\s+/g, ' ').trim();
+  // Scanner company names can be lowercase slugs ("doctolib"); the letter may use the proper casing.
+  return String(value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
 function validSidecarHash(value) {

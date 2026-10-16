@@ -445,6 +445,16 @@ test('a role glued to neighbouring words by a scraped page still matches its exa
   assert.equal(wrongRole.checks.find(item => item.id === 'role_matches_jd').status, 'fail');
 });
 
+test('a description without the listing header still matches the exact listing company and title', async () => {
+  const jdText = 'We build reliable data products for teams across Europe.';
+  const listed = await checkDraft(makeDraft(), { jdText, listingCompany: company.toLowerCase(), listingTitle: role });
+  assert.equal(listed.checks.find(item => item.id === 'company_matches_jd').status, 'pass');
+  assert.equal(listed.checks.find(item => item.id === 'role_matches_jd').status, 'pass');
+  const otherListing = await checkDraft(makeDraft(), { jdText, listingCompany: 'Other Corp', listingTitle: `Senior ${role}` });
+  assert.equal(otherListing.checks.find(item => item.id === 'company_matches_jd').status, 'fail');
+  assert.equal(otherListing.checks.find(item => item.id === 'role_matches_jd').status, 'fail');
+});
+
 test('optional and negated language skills do not impose a language requirement', async () => {
   for (const text of [
     'Fluent in German is a plus, not a requirement',
