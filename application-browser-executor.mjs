@@ -1848,7 +1848,7 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
       await waitForCandidateReview(browser, ownsBrowser, finalState, options, dependencies);
       return candidateResult(contract, finalState);
     }
-    if (browserLiveness.result !== 'active' && !domConfirmsSafeEntry) {
+    if (browserLiveness.result !== 'active' && apiLiveness?.result !== 'active' && !domConfirmsSafeEntry) {
       finalState = recordTransition(
         contract.manifestPath,
         listingUrl,
@@ -2135,7 +2135,7 @@ async function executePreparationResume(options, contract, { root, executionLock
       listingUrl,
       applyUrl: contract.candidate.applyUrl,
     });
-    if (!compatible || (live.result !== 'active' && !domConfirmsSafeEntry) || !identity.verified) {
+    if (!compatible || (live.result !== 'active' && api?.result !== 'active' && !domConfirmsSafeEntry) || !identity.verified) {
       const state = transition(
         contract.manifestPath, contract.candidate.candidate_id, 'blocked', listingPage.url(),
         `Preparation resume listing revalidation failed: ${live.reason}; ${identity.reason}`,
