@@ -1622,6 +1622,13 @@ async function handoffHumanGate(page, contract, gate, stage, options, { root, ex
         if (fresh.candidateState.state !== 'human_action_required') throw new Error('Human handoff state changed concurrently');
         const identity = verifyVisibleIdentity(snapshot, fresh.candidate);
         if (!compatibleHumanDestination(fresh, snapshot.currentUrl, identity, gateUrl)) {
+          // Sign-in/MFA pages on the same ATS carry no job identity (Workday ".../login"); keep waiting there.
+          const sameAtsSignIn = !requisitionIdentity(snapshot.currentUrl)
+            && new URL(snapshot.currentUrl).origin === new URL(gateUrl).origin;
+          if (sameAtsSignIn) {
+            await sleep(1_000);
+            continue;
+          }
           return move('blocked', snapshot.currentUrl, 'Human handoff redirected outside the exact manifest candidate destination.');
         }
         // Enter while still gated leaves the persisted pause intact.
