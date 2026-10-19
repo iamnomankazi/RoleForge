@@ -379,6 +379,10 @@ test('CV selection covers data, AI/ML, software/backend, and broad graduate role
     assert.equal(selectApprovedCv(profile, { title: 'Machine Learning Engineer' }, 'PyTorch computer vision model training').variant, 'ai_ml');
     assert.equal(selectApprovedCv(profile, { title: 'Backend Developer' }, 'Python Django REST APIs').variant, 'software_backend');
     assert.equal(selectApprovedCv(profile, { title: 'Graduate Technology Trainee' }, 'Python SQL machine learning software').variant, 'master');
+    // "internal" is not an internship, and an explicit recommendation wins a near-tie.
+    assert.equal(selectApprovedCv(profile, { title: 'Data Engineer' }, 'Python SQL ETL warehouse for internal tools').variant, 'data_engineering');
+    assert.equal(selectApprovedCv(profile, { title: 'Junior Software Engineer - Data', recommendedCvVariant: 'data_engineering' },
+      'Data pipelines with SQL and a warehouse; a degree, an internship or open-source work').variant, 'data_engineering');
     assert.equal(profile.approvedCvs.frontend, undefined, 'optional variants are absent unless configured');
   } finally {
     rmSync(f.root, { recursive: true, force: true });

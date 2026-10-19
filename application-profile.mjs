@@ -128,7 +128,9 @@ export function selectApprovedCv(profile, candidate, jdText) {
     ]));
   if (advisory && advisory !== 'master' && advisory in scores) scores[advisory] += 2;
   const ranked = Object.entries(scores).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-  const broadGraduate = /graduate|trainee|intern|early career|early-career/.test(text)
+  // Whole words only ("internal" is not an internship); an explicit recommended variant is never overridden.
+  const explicitChoice = Boolean(advisory && advisory !== 'master' && ranked[0][0] === advisory);
+  const broadGraduate = !explicitChoice && /\b(?:graduate|trainee|intern|internship|early career|early-career)\b/.test(text)
     && ranked[0][1] - ranked[1][1] <= 1;
   const variant = broadGraduate ? 'master' : ranked[0][0];
   if (!ranked[0][1] && !broadGraduate && advisory !== 'master') {
