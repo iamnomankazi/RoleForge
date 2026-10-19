@@ -826,7 +826,7 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
       if (!control || ['textbox', 'checkbox', 'radio', 'combobox', 'listbox'].includes(control.getAttribute('role'))
           || (control.tagName === 'INPUT' && !['submit', 'button', 'image', 'reset'].includes(control.type))
           || ['TEXTAREA', 'SELECT'].includes(control.tagName)) return;
-      const form = control.form || control.closest('form') || path.find((element) => element.tagName === 'FORM');
+      const form = control.form || control.closest('form, [data-career-ops-virtual-form]') || path.find((element) => element.tagName === 'FORM');
       // Keep the gesture guarded if a handler moves the control or removes its form.
       if (form && ['pointerdown', 'mousedown', 'touchstart', 'keydown'].includes(event.type)) gestureFormControls.add(control);
       if (!form && !gestureFormControls.has(control)) return;
@@ -907,7 +907,7 @@ export async function grantProgressionPermit(page, control, {
     if (controls.length !== 1 || forms.length !== 1) return false;
     const controlElement = controls[0];
     const formElement = forms[0];
-    if ((controlElement.form || controlElement.closest('form')) !== formElement) return false;
+    if ((controlElement.form || controlElement.closest('form, [data-career-ops-virtual-form]')) !== formElement) return false;
     const live = {
       controlId: String(controlElement.getAttribute('data-career-ops-control-id') || '').trim(),
       formId: String(formElement.getAttribute('data-career-ops-form-id') || '').trim(),
@@ -1063,7 +1063,7 @@ async function assertNotFinal(locator) {
     role: element.getAttribute('role') || '',
     type: element.type,
     formAction: element.getAttribute('formaction'),
-    insideApplicationForm: Boolean(element.closest('form')),
+    insideApplicationForm: Boolean(element.closest('form, [data-career-ops-virtual-form]')),
     label: element.getAttribute('aria-label') || element.innerText || element.value,
     text: element.innerText || '',
     value: element.value || '',
@@ -1337,7 +1337,7 @@ function stampUploadTriggers({ semantic, applicationFormId, finalTokenSource, fi
       purpose = purposeOf(context);
     }
     if (purpose !== semantic) continue;
-    const owningForm = element.closest('form');
+    const owningForm = element.closest('form, [data-career-ops-virtual-form]');
     if (applicationFormId && owningForm && owningForm.getAttribute('data-career-ops-form-id') !== applicationFormId) continue;
     found.push(element);
   }

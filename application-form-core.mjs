@@ -478,7 +478,28 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
     globalThis.__careerOpsFieldCounter = Number(globalThis.__careerOpsFieldCounter || 0);
     globalThis.__careerOpsFormCounter = Number(globalThis.__careerOpsFormCounter || 0);
     globalThis.__careerOpsControlCounter = Number(globalThis.__careerOpsControlCounter || 0);
-    const forms = [...document.querySelectorAll('form')];
+    // Formless application pages (Ashby, Workday) render fields in plain containers. When no visible <form> holds
+    // applicant fields, the smallest container holding them and a submit-like control acts as the form.
+    const fieldSelector = 'input, textarea, select, [role="combobox"]';
+    const applicantField = (element) => visible(element)
+      && !['hidden', 'submit', 'button', 'reset', 'image', 'search'].includes((element.type || '').toLowerCase());
+    const realFormHasFields = [...document.querySelectorAll('form')]
+      .some((form) => visible(form) && [...form.querySelectorAll(fieldSelector)].some(applicantField));
+    if (!realFormHasFields && !document.querySelector('[data-career-ops-virtual-form]')) {
+      const loose = [...document.querySelectorAll(fieldSelector)].filter((element) => applicantField(element) && !element.closest('form'));
+      if (loose.length >= 3) {
+        let container = loose[0].parentElement;
+        while (container && !loose.every((element) => container.contains(element))) container = container.parentElement;
+        const submitLike = (root) => [...root.querySelectorAll('button, [role="button"], input[type="submit"]')]
+          .some((control) => visible(control) && (finalToken.test(control.innerText || control.value || control.getAttribute('aria-label') || '')
+            || /(?:save and continue|continue|next)/i.test(control.innerText || control.value || '')));
+        for (let depth = 0; container && depth < 6 && !submitLike(container); depth += 1) container = container.parentElement;
+        if (container && !['BODY', 'HTML'].includes(container.tagName) && submitLike(container)) {
+          container.setAttribute('data-career-ops-virtual-form', '1');
+        }
+      }
+    }
+    const forms = [...document.querySelectorAll('form, [data-career-ops-virtual-form]')];
     for (const form of forms) {
       if (!form.getAttribute('data-career-ops-form-id')) {
         form.setAttribute('data-career-ops-form-id', `form-${++globalThis.__careerOpsFormCounter}`);
@@ -518,7 +539,7 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
             }
           }
         }
-        const owningForm = element.form || element.closest('form');
+        const owningForm = element.form || element.closest('form, [data-career-ops-virtual-form]');
         return {
           fieldId,
           formId: owningForm?.getAttribute('data-career-ops-form-id') || '',
@@ -640,7 +661,7 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
         if (!element.getAttribute('data-career-ops-control-id')) {
           element.setAttribute('data-career-ops-control-id', `control-${++globalThis.__careerOpsControlCounter}`);
         }
-        const form = element.form || element.closest('form');
+        const form = element.form || element.closest('form, [data-career-ops-virtual-form]');
         const formFields = form ? [...form.querySelectorAll('input, textarea, select, [role="combobox"]')]
           .filter((field) => !['hidden', 'submit', 'button', 'reset', 'image'].includes((field.type || '').toLowerCase())) : [];
         const wizardScope = form === uniqueTopForm ? applicationWizard : null;
@@ -674,7 +695,7 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
     const validationErrorEvidence = [...document.querySelectorAll('[role="alert"], .error, .validation-error, [aria-invalid="true"]')]
       .filter(visible).map((element) => {
         const text = (element.innerText || element.getAttribute('aria-label') || '').trim();
-        const owningForm = element.form || element.closest('form');
+        const owningForm = element.form || element.closest('form, [data-career-ops-virtual-form]');
         const formId = owningForm?.getAttribute('data-career-ops-form-id') || '';
         const inApplicationWorkflow = Boolean(uniqueTopForm && (
           owningForm ? owningForm === uniqueTopForm : applicationWizard?.contains(element)
@@ -861,7 +882,7 @@ export async function executeFormPlan(page, plan) {
       role: element.getAttribute('role') || '',
       type: element.type,
       formAction: element.getAttribute('formaction'),
-      insideApplicationForm: Boolean(element.closest('form')),
+      insideApplicationForm: Boolean(element.closest('form, [data-career-ops-virtual-form]')),
       label: element.getAttribute('aria-label') || element.innerText || element.value,
       text: element.innerText || '',
       value: element.value || '',

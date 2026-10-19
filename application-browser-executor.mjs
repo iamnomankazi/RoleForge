@@ -348,7 +348,7 @@ export function classifyFormSnapshot(snapshot) {
   };
 }
 
-const ENTRY_ACTION_LABEL = /^(?:apply|apply now|apply here!?|apply for (?:this|the) (?:job|role|position)|start (?:an? |your )?application|begin (?:an? |your )?application|continue to (?:the )?application|go to (?:the )?application|bewerben|jetzt bewerben|ich bin interessiert|postuler|hae paikkaa|hae nyt|hae työpaikkaa|ansök(?: nu)?|solliciteer(?: nu)?|ansøg(?: nu)?)$/i;
+const ENTRY_ACTION_LABEL = /^(?:apply|apply now|apply here!?|autofill with resume|apply for (?:this|the) (?:job|role|position)|start (?:an? |your )?application|begin (?:an? |your )?application|continue to (?:the )?application|go to (?:the )?application|bewerben|jetzt bewerben|ich bin interessiert|postuler|hae paikkaa|hae nyt|hae työpaikkaa|ansök(?: nu)?|solliciteer(?: nu)?|ansøg(?: nu)?)$/i;
 const FINAL_ACTION_LABEL = /(?:^|[^\p{L}\p{N}_])(?:submit|send|complete|finish|confirm|finali[sz]e|review and apply|apply and submit|absenden|senden|abschicken|verzenden|versturen|indsend|lähetä|valmis|skicka|envoyer|soumettre|valider)(?=$|[^\p{L}\p{N}_])/iu;
 const ONE_CLICK_ENTRY_LABEL = /\b(?:(?:easy|quick|instant)\s+apply|(?:1|one)[- ]?click(?:[- ]apply)?|apply\s+with\s+(?:(?:your|my|a|saved)\s+)?(?:linkedin|indeed|profile|resume|cv))\b/i;
 const DANGEROUS_ACTION_PATH = /\b(?:submit|send|complete|finish|confirm|finali[sz]e)[-_ ]?(?:application)?\b/i;
@@ -507,6 +507,18 @@ export function requisitionIdentity(value) {
   }
   if (match && /^jobs\.(?:eu\.)?lever\.co$/i.test(parsed.hostname)) {
     return `lever:${match[1].toLowerCase()}:${match[2].toLowerCase()}`;
+  }
+  if (/\.myworkdayjobs\.com$/i.test(parsed.hostname)) {
+    // /<site>/job/<location>/<Title_REQ>[/apply/...]: the requisition is the job slug's suffix.
+    const segments = path.split('/').filter(Boolean);
+    const jobIndex = segments.findIndex((segment) => segment.toLowerCase() === 'job');
+    const after = jobIndex >= 0 ? segments.slice(jobIndex + 1) : [];
+    const applyIndex = after.findIndex((segment) => /^apply/i.test(segment));
+    const slug = (applyIndex < 0 ? after : after.slice(0, applyIndex)).at(-1);
+    const requisition = slug?.match(/_([A-Za-z0-9-]+)$/)?.[1];
+    if (jobIndex > 0 && requisition) {
+      return `workday:${parsed.hostname.toLowerCase()}:${segments[jobIndex - 1].toLowerCase()}:${requisition.toLowerCase()}`;
+    }
   }
   const queryIdentity = jobQueryIdentity(value);
   if (queryIdentity) return `query:${parsed.origin}:${queryIdentity}`;
@@ -839,7 +851,7 @@ async function inspectBenignSiteChromeActions(page) {
         if (!/(?:cookie|consent|cmp|gdpr|privacy prompt|datenschutz)/.test(rootEvidence)) return [];
         const label = normalize(element.getAttribute('aria-label') || element.innerText || element.getAttribute('value'));
         let kind = null;
-        if (/^(?:only the necessary cookies|reject all|reject non[- ]essential(?: cookies)?|decline all non[- ]necessary cookies|necessary only|continue without accepting|continue with necessary(?: cookies)?|(?:accept |allow |use )?only necessary(?: cookies)?|use necessary cookies only|(?:hyväksy )?vain välttämättömät(?: evästeet)?|alle ablehnen|nur notwendige(?: cookies)?|nur erforderliche(?: cookies)?)$/.test(label)) {
+        if (/^(?:only the necessary cookies|reject all|decline|reject non[- ]essential(?: cookies)?|decline all non[- ]necessary cookies|necessary only|continue without accepting|continue with necessary(?: cookies)?|(?:accept |allow |use )?only necessary(?: cookies)?|use necessary cookies only|(?:hyväksy )?vain välttämättömät(?: evästeet)?|alle ablehnen|nur notwendige(?: cookies)?|nur erforderliche(?: cookies)?)$/.test(label)) {
           kind = 'privacy_preserving_dismissal';
         } else if (/^(?:einstellungen oder ablehnen|cookie preferences|manage preferences|show details)$/.test(label)) {
           kind = 'open_privacy_preferences';
@@ -885,6 +897,25 @@ async function activateSiteChromeAction(page, expected) {
   await locator.click({ trial: true, timeout: 2_000 });
   await locator.click({ timeout: 4_000 });
   return current;
+}
+
+// Client-rendered ATS pages (Workday) are empty at DOMContentLoaded; give them a moment to render.
+export async function waitForRenderedContent(page, timeoutMs = 10_000) {
+  // Settled = text unchanged for 750 ms and no short "Loading" placeholder (Workday renders after its XHRs).
+  const started = Date.now();
+  let lastLength = -1;
+  let changedAt = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const text = await page.evaluate(() => (document.body?.innerText || '').trim()).catch(() => '');
+    const loading = /loading/i.test(text) && text.length < 3_000;
+    if (text.length !== lastLength) {
+      lastLength = text.length;
+      changedAt = Date.now();
+    } else if (!loading && text.length > 0 && Date.now() - changedAt >= 750) {
+      return;
+    }
+    await page.waitForTimeout(250);
+  }
 }
 
 // Best effort, before any gate or form check; never fails the application.
@@ -1354,6 +1385,8 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
         diagnostics: { candidates: failedCandidates, siteChromeActions },
       };
     }
+    await waitForRenderedContent(page);
+    if ((await dismissCookieBanner(page)).cleared) await waitForRenderedContent(page);
     snapshot = await collectPageSnapshot(page);
     form = classifyFormSnapshot(snapshot);
     identity = verifyVisibleIdentity(snapshot, candidate);
@@ -1377,6 +1410,12 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
     // login step for the user; such pages never show the job title. The form is re-verified after sign-in.
     if (!compatible && (form.loginRequired || form.humanGate) && identity.companyMatch
         && isKnownApplicationHost(snapshot.currentUrl)) {
+      compatible = true;
+    }
+    // ATS intermediate steps (Workday ".../apply") omit the title; the exact requisition in the URL identifies the job.
+    const listingRequisition = requisitionIdentity(listingUrl);
+    if (!compatible && identity.companyMatch && isKnownApplicationHost(snapshot.currentUrl)
+        && listingRequisition && requisitionIdentity(snapshot.currentUrl) === listingRequisition) {
       compatible = true;
     }
     if (!compatible) {
@@ -1807,7 +1846,8 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
     const listingPage = sharedSession?.page || await context.newPage();
     if (dependencies.onCandidatePage) await dependencies.onCandidatePage(listingPage, contract);
     const browserLiveness = await (dependencies.checkUrlLiveness || checkUrlLiveness)(listingPage, listingUrl);
-    await dismissCookieBanner(listingPage);
+    await waitForRenderedContent(listingPage);
+    if ((await dismissCookieBanner(listingPage)).cleared) await waitForRenderedContent(listingPage);
     const listingSnapshot = await collectPageSnapshot(listingPage);
     const listingCurrentUrl = safeCurrentUrl(listingSnapshot.currentUrl, listingUrl);
     latestUrl = listingCurrentUrl;
@@ -2118,7 +2158,8 @@ async function executePreparationResume(options, contract, { root, executionLock
     }
     if (dependencies.onCandidatePage) await dependencies.onCandidatePage(listingPage, contract);
     const live = await (dependencies.checkUrlLiveness || checkUrlLiveness)(listingPage, listingUrl);
-    await dismissCookieBanner(listingPage);
+    await waitForRenderedContent(listingPage);
+    if ((await dismissCookieBanner(listingPage)).cleared) await waitForRenderedContent(listingPage);
     const listingSnapshot = await collectPageSnapshot(listingPage);
     const identity = verifyVisibleIdentity(listingSnapshot, contract.candidate);
     const form = classifyFormSnapshot(listingSnapshot);
@@ -2136,6 +2177,11 @@ async function executePreparationResume(options, contract, { root, executionLock
       applyUrl: contract.candidate.applyUrl,
     });
     if (!compatible || (live.result !== 'active' && api?.result !== 'active' && !domConfirmsSafeEntry) || !identity.verified) {
+      if (fromState === 'blocked') {
+        // Already blocked: report the fresh failure instead of attempting a blocked -> blocked transition.
+        return { batchId: contract.manifest.batchId, candidate: listingUrl, state: 'blocked',
+          reason: `Preparation resume listing revalidation failed: ${live.reason}; ${identity.reason}` };
+      }
       const state = transition(
         contract.manifestPath, contract.candidate.candidate_id, 'blocked', listingPage.url(),
         `Preparation resume listing revalidation failed: ${live.reason}; ${identity.reason}`,

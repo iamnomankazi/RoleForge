@@ -247,3 +247,22 @@ test('a required cover-letter text box receives the approved letter, which then 
   assert.equal(result.evidence.unresolvedFields.some((row) => /cover_letter/.test(row.semantic)), false);
   await page.close();
 });
+
+test('a formless (Ashby/Workday-style) application page is filled, uploads attach, and its submit stays untouched', async () => {
+  const page = await browser.newPage();
+  await page.setContent(`<div id="app"><h1>Junior Software Engineer - Data</h1>
+    <div><label for="fn">First name</label><input id="fn" required></div>
+    <div><label for="ln">Last name</label><input id="ln" required></div>
+    <div><label for="em">Email</label><input id="em" type="email" required></div>
+    <div><label for="cv">Resume</label><input id="cv" type="file"></div>
+    <div><label for="cl">Cover letter</label><input id="cl" type="file"></div>
+    <button type="button" id="submit" onclick="window.submits=(window.submits||0)+1">Submit Application</button></div>`);
+  const result = await prepareOperationalApplicationForm(page, profile, artifacts, { context });
+  assert.equal(await page.inputValue('#fn'), 'Alex');
+  assert.equal(await page.inputValue('#em'), 'alex.example@example.test');
+  assert.deepEqual(result.evidence.uploadedArtifacts.map((row) => row.sha256).sort(), [artifacts.cv.sha256, artifacts.coverLetter.sha256].sort());
+  assert.equal(result.evidence.finalAction.detected, true);
+  assert.equal(result.evidence.finalAction.activated, false);
+  assert.equal(await page.evaluate(() => window.submits || 0), 0);
+  await page.close();
+});
