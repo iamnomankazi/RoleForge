@@ -337,6 +337,8 @@ export function classifyFormSnapshot(snapshot) {
     || (hasEmail && hasResume)
     || (pathLooksLikeApplication && signalIndexes.size >= 1 && formCount > 0)
     || (pathLooksLikeApplication && formCount > 0 && fields.length >= 5 && hasTerminalPostControl)
+    // Workday's first application step is a résumé upload on an /apply/ path with no <form>.
+    || (pathLooksLikeApplication && fields.some((field) => normalized(field.type) === 'file'))
   );
 
   return {

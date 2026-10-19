@@ -181,3 +181,92 @@ test('Workday steps with an unanswerable question or a validation error stop wit
     await browser.close();
   }
 });
+
+// Regression tests for the Sol High review findings (r261020-005650-cad8 review-01).
+test('review P1s: unstructured step text, hidden/stale forms, Enter in a virtual field, held files, trigger fallback', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    // 1. Step text that is not a structured step element never authorizes progression of a formless page.
+    const loose = await servedPage(browser, `<div class="steps">Step 1 of 3</div><div id="app"><div>
+      <label for="fn">First Name*</label><input id="fn" required><label for="ln">Last Name*</label><input id="ln" required>
+      <label for="em">Email*</label><input id="em" type="email" required></div>
+      <button type="submit" id="next">Continue</button></div>
+      <script>window.advances = 0; next.addEventListener('click', () => { window.advances += 1; });</script>`,
+    'https://careers.example.test/apply/loose');
+    const looseSnapshot = await inspectOperationalApplicationForm(loose);
+    assert.notEqual(classifyApplicationControl(looseSnapshot.controls.find((c) => c.label === 'Continue')), 'progression');
+    await prepareOperationalApplicationForm(loose, profile, {}, { context, transitionTimeoutMs: 300, transitionStabilityMs: 0 });
+    assert.equal(await loose.evaluate(() => window.advances), 0);
+    await loose.close();
+
+    // 2. A hidden unrelated form and a stale virtual-form marker do not lift protection of a Workday final button.
+    const review = await servedPage(browser, `<form style="display:none"><input name="q"></form>
+      <div data-career-ops-virtual-form="1"><p>stale</p></div>${shell(reviewStep,
+      '<button type="submit" id="submit" data-automation-id="pageFooterNextButton">Submit</button>', progress(6, 6, 'Review'))}
+      <script>window.submits = 0; submit.addEventListener('click', () => { window.submits += 1; });</script>`,
+    BASE.replace('autofillWithResume', 'review2'));
+    await installSubmissionGuard(review);
+    await review.click('#submit').catch(() => null);
+    assert.equal(await review.evaluate(() => window.submits), 0);
+    await review.close();
+
+    // 3. Enter in a text field of a virtual application form never reaches the page's own submit handler.
+    const enter = await servedPage(browser, `${shell(infoStep, '<button type="submit" data-automation-id="pageFooterNextButton">Save and Continue</button>', progress(2, 6, 'My Information'))}
+      <script>window.submits = 0; document.addEventListener('keydown', (e) => { if (e.key === 'Enter') window.submits += 1; });</script>`,
+    BASE.replace('autofillWithResume', 'myinfo'));
+    await inspectOperationalApplicationForm(enter);
+    assert.equal(await enter.locator('[data-career-ops-virtual-form]').count(), 1);
+    await installSubmissionGuard(enter);
+    await enter.locator('#fn').press('Enter').catch(() => null);
+    assert.equal(await enter.evaluate(() => window.submits), 0);
+    await enter.close();
+
+    // 4. An input already holding a different file is never overwritten, even when it accepts several files.
+    const held = await servedPage(browser, shell(`<div><h3>Resume</h3><div data-automation-id="resumeUpload">
+      <input type="file" multiple id="cvfile" data-automation-id="file-upload-input-ref"></div></div>
+      <label for="fn">First Name*</label><input id="fn" required><label for="ln">Last Name*</label><input id="ln" required>`,
+    '<button type="submit" data-automation-id="pageFooterNextButton">Save and Continue</button>', progress(3, 6, 'My Experience')),
+    BASE.replace('autofillWithResume', 'held'));
+    await held.setInputFiles('#cvfile', { name: 'Other_Resume_2025.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF other') });
+    const heldPlan = buildOperationalFormPlan(await inspectOperationalApplicationForm(held), profile, docs.value, { context });
+    assert.equal(heldPlan.actions.some((a) => a.action === 'upload'), false);
+    assert.ok(heldPlan.unresolvedFields.some((row) => /Other_Resume_2025\.pdf/.test(row.reason)));
+    await held.close();
+
+    // 5. A withheld document is not uploaded through a separate "Upload CV" trigger either.
+    const trigger = await servedPage(browser, shell(`<div><h3>Resume</h3><div data-automation-id="resumeUpload">
+      <input type="file" id="cvfile" data-automation-id="file-upload-input-ref"></div><div><span>Other_Resume_2025.pdf</span> successfully uploaded</div></div>
+      <div><span>CV</span><button type="button" id="up" aria-label="Upload CV" onclick="document.getElementById('hidden').click()">+</button>
+      <input type="file" id="hidden" hidden></div>
+      <label for="fn">First Name*</label><input id="fn" required><label for="ln">Last Name*</label><input id="ln" required>`,
+    '<button type="submit" data-automation-id="pageFooterNextButton">Save and Continue</button>', progress(3, 6, 'My Experience')),
+    BASE.replace('autofillWithResume', 'trigger'));
+    const result = await prepareOperationalApplicationForm(trigger, profile, docs.value, { context, transitionTimeoutMs: 300, transitionStabilityMs: 0 });
+    assert.equal(await trigger.evaluate(() => document.getElementById('hidden').files.length + document.getElementById('cvfile').files.length), 0);
+    assert.equal(result.evidence.uploadedArtifacts.some((row) => row.sha256 === docs.value.cv.sha256), false);
+    await trigger.close();
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});
+
+test('review P2s: Workday Autofill counts as the reached form; an unrelated newsletter form does not hide the application', async () => {
+  const { classifyFormSnapshot, collectPageSnapshot } = await import('../application-browser-executor.mjs');
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const autofill = await servedPage(browser, shell(autofillStep, '<button type="submit" data-automation-id="pageFooterNextButton">Continue</button>', progress(1, 6, 'Autofill with Resume')));
+    assert.equal(classifyFormSnapshot(await collectPageSnapshot(autofill)).actualForm, true);
+    await autofill.close();
+
+    const newsletter = await servedPage(browser, `<form><label for="nl">Newsletter email</label><input id="nl" type="email"></form>
+      ${shell(infoStep, '<button type="submit" data-automation-id="pageFooterNextButton">Save and Continue</button>', progress(2, 6, 'My Information'))}`,
+    BASE.replace('autofillWithResume', 'newsletter'));
+    const snapshot = await inspectOperationalApplicationForm(newsletter);
+    assert.ok(snapshot.fields.filter((field) => field.applicationFormOwned).length >= 3);
+    await newsletter.close();
+  } finally {
+    await browser.close();
+  }
+});

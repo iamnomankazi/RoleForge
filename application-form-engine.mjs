@@ -533,9 +533,15 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       // Files the ATS already lists for this control: the same bound file counts as attached; a different one is
       // never replaced without the user's review.
       const shown = field.attachedNames || [];
-      if (shown.length && !shown.includes(artifact.intendedFilename) && !field.multiple) {
+      const held = field.files || [];
+      // setInputFiles replaces the input's FileList, so any different file held by the input blocks the upload.
+      // Only an empty multiple-file input next to a server-side list (Workday) adds without replacing.
+      const differentHeld = held.length > 0 && !held.includes(artifact.intendedFilename);
+      const differentShown = shown.length > 0 && !shown.includes(artifact.intendedFilename)
+        && !(field.multiple && held.length === 0);
+      if (differentHeld || differentShown) {
         unresolvedFields.push({
-          ...manualField(field, semantics, `A different file is already attached here (${shown.join(', ')}); RoleForge did not replace it. Review it; the bound file is ${artifact.resolvedPath}`),
+          ...manualField(field, semantics, `A different file is already attached here (${[...new Set([...held, ...shown])].join(', ')}); RoleForge did not replace it. Review it; the bound file is ${artifact.resolvedPath}`),
           manualUploadPath: artifact.resolvedPath,
         });
         continue;
@@ -720,6 +726,15 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
         cleanFormText(control.label || control.text || control.value),
       ))
   ));
+  // A document withheld at one control (a different file is already attached) is not uploaded anywhere on the page.
+  const withheldUploads = new Set(unresolvedFields
+    .filter((row) => row.manualUploadPath && /different file is already attached/i.test(row.reason))
+    .map((row) => row.manualUploadPath));
+  if (withheldUploads.size) {
+    for (let index = actions.length - 1; index >= 0; index -= 1) {
+      if (actions[index].action === 'upload' && withheldUploads.has(actions[index].artifact.resolvedPath)) actions.splice(index, 1);
+    }
+  }
   const uploadTopology = inspectOperationalUploadTopology(snapshot);
   if (uploadTopology.mode === 'ambiguous') {
     for (const row of uploadTopology.fields) {
@@ -835,6 +850,15 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
       const path = event.composedPath?.() || [];
       const selector = 'button, input[type="submit"], input[type="button"], input[type="image"], input[type="reset"], a, [role="button"], [role="link"]';
       const control = path.find((element) => element.matches?.(selector)) || event.target?.closest?.(selector);
+      // Enter in a text field of a form-less application: no native submit event exists, so the page's own
+      // JavaScript could submit. Comboboxes and textareas keep Enter for option choice and new lines.
+      const target = path[0] || event.target;
+      if (['keydown', 'keyup'].includes(event.type) && event.key === 'Enter' && target?.tagName === 'INPUT'
+          && !['checkbox', 'radio', 'file', 'submit', 'button', 'image', 'reset'].includes((target.type || '').toLowerCase())
+          && target.getAttribute('role') !== 'combobox' && !target.getAttribute('aria-autocomplete')
+          && !target.form && target.closest('[data-career-ops-virtual-form]')) {
+        return block(event);
+      }
       if (!control || ['textbox', 'checkbox', 'radio', 'combobox', 'listbox'].includes(control.getAttribute('role'))
           || (control.tagName === 'INPUT' && !['submit', 'button', 'image', 'reset'].includes(control.type))
           || ['TEXTAREA', 'SELECT'].includes(control.tagName)) return;
@@ -844,9 +868,17 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
       if (!form && !gestureFormControls.has(control)) {
         // A form-less application step (a freshly loaded Workday Review: no fields, no form, "step 6 of 6") has its
         // final Submit outside any form; block final labels there. Pages with a form keep outside widgets usable.
-        const formlessApplicationStep = !document.querySelector('form, [data-career-ops-virtual-form]')
-          && (Boolean(document.querySelector('[data-automation-id="progressBarActiveStep"]'))
-            || /\b(?:step|page)\s*\d+\s+(?:of|\/)\s+\d+(?!\d)/i.test(document.body?.innerText || ''));
+        // Decided from the workflow, not from the absence of every form: a Workday flow container or footer always
+        // protects its final button; otherwise a structured step on a page without a visible application form does.
+        const inApplicationFlow = Boolean(control.closest('[data-automation-id="applyFlowPage"], [data-automation-id="pageFooter"]'));
+        const visibleApplicationForm = [...document.querySelectorAll('form, [data-career-ops-virtual-form]')].some((item) => {
+          const rect = item.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0
+            && item.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]').length > 0;
+        });
+        const formlessApplicationStep = inApplicationFlow || (!visibleApplicationForm
+          && [...document.querySelectorAll('[data-automation-id="progressBarActiveStep"], [aria-current="step"], [data-career-ops-step]')]
+            .some((element) => element.getBoundingClientRect().width > 0));
         if (formlessApplicationStep && finalToken.test(controlLabels(control).join(' '))) block(event);
         return;
       }
@@ -1462,6 +1494,9 @@ async function uploadPendingDocuments(page, plan, artifacts, aggregate, applicat
   const planned = new Set(plan.actions.filter((action) => action.action === 'upload').map((action) => action.artifact.sha256));
   for (const doc of expectedDocuments(artifacts, plan.uploadTopology)) {
     if (planned.has(doc.artifact.sha256) || documentUploaded(aggregate.uploadedArtifacts, doc)) continue;
+    // A document the plan withheld (different file already attached, or manual) is never uploaded through a trigger.
+    if (plan.unresolvedFields.some((row) => row.manualUploadPath === doc.artifact.resolvedPath
+      || (row.category === 'file_upload' && row.semantic === doc.semantic))) continue;
     let result;
     try {
       result = await uploadThroughTrigger(page, doc, { applicationFormId });

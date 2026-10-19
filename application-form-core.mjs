@@ -483,8 +483,12 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
     const fieldSelector = 'input, textarea, select, [role="combobox"]';
     const applicantField = (element) => visible(element)
       && !['hidden', 'submit', 'button', 'reset', 'image', 'search'].includes((element.type || '').toLowerCase());
-    const realFormHasFields = [...document.querySelectorAll('form')]
-      .some((form) => visible(form) && [...form.querySelectorAll(fieldSelector)].some(applicantField));
+    // Only a real form that looks like an application suppresses discovery (a newsletter email box does not).
+    const realFormHasFields = [...document.querySelectorAll('form')].some((form) => {
+      if (!visible(form)) return false;
+      const fields = [...form.querySelectorAll(fieldSelector)].filter(applicantField);
+      return fields.length >= 3 || fields.some((field) => (field.type || '').toLowerCase() === 'file');
+    });
     if (!realFormHasFields && !document.querySelector('[data-career-ops-virtual-form]')) {
       const loose = [...document.querySelectorAll(fieldSelector)].filter((element) => applicantField(element) && !element.closest('form'));
       if (loose.length >= 3 || loose.some((element) => (element.type || '').toLowerCase() === 'file')) {
@@ -495,11 +499,13 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
             || /\b(?:save and continue|continue|next)\b/i.test(control.innerText || control.value || '')));
         for (let depth = 0; container && depth < 12 && !submitLike(container); depth += 1) container = container.parentElement;
         // Include the workflow's step indicator when it sits just above (Workday: progress bar in applyFlowPage).
-        const hasStepText = (root) => /\b(?:step|page)\s*\d+\s+(?:of|\/)\s+\d+(?!\d)/i.test(root?.innerText || '');
-        if (container && !hasStepText(container)) {
+        // Only a structured step element counts (not any "step 2 of 3" text elsewhere on the page).
+        const structuredStep = '[data-automation-id="progressBarActiveStep"], [aria-current="step"], [data-career-ops-step]';
+        const hasStep = (root) => [...(root?.querySelectorAll(structuredStep) || [])].some(visible);
+        if (container && !hasStep(container)) {
           let ancestor = container.parentElement;
-          for (let depth = 0; ancestor && depth < 3 && !hasStepText(ancestor); depth += 1) ancestor = ancestor.parentElement;
-          if (ancestor && hasStepText(ancestor) && !['BODY', 'HTML'].includes(ancestor.tagName)) container = ancestor;
+          for (let depth = 0; ancestor && depth < 3 && !hasStep(ancestor); depth += 1) ancestor = ancestor.parentElement;
+          if (ancestor && hasStep(ancestor) && !['BODY', 'HTML'].includes(ancestor.tagName)) container = ancestor;
         }
         if (container && !['BODY', 'HTML'].includes(container.tagName) && submitLike(container)) {
           container.setAttribute('data-career-ops-virtual-form', '1');
@@ -648,7 +654,8 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
         || (formApplicationContext && hasTerminalAction)
         // A virtual form exists only on a form-less page with applicant fields and a submit-like control; inside a
         // numbered application workflow (Workday "step 3 of 6") that is the application.
-        || (form.hasAttribute('data-career-ops-virtual-form') && hasFormStepEvidence);
+        || (form.hasAttribute('data-career-ops-virtual-form')
+          && [...form.querySelectorAll('[data-automation-id="progressBarActiveStep"], [aria-current="step"], [data-career-ops-step]')].some(visible));
       const associationBonus = structurallyAssociated || hasFormStepEvidence || hasApplicationAction ? 100 : 0;
       return {
         form,
