@@ -530,7 +530,17 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
         continue;
       }
       const planned = { ...base, action: 'upload', artifact, retryBudget: 1 };
-      if (isCommitted(field, planned)) {
+      // Files the ATS already lists for this control: the same bound file counts as attached; a different one is
+      // never replaced without the user's review.
+      const shown = field.attachedNames || [];
+      if (shown.length && !shown.includes(artifact.intendedFilename) && !field.multiple) {
+        unresolvedFields.push({
+          ...manualField(field, semantics, `A different file is already attached here (${shown.join(', ')}); RoleForge did not replace it. Review it; the bound file is ${artifact.resolvedPath}`),
+          manualUploadPath: artifact.resolvedPath,
+        });
+        continue;
+      }
+      if (isCommitted(field, planned) || shown.includes(artifact.intendedFilename)) {
         preservedFields.push({ ...base, valueHash: artifact.sha256, preserved: true });
         preservedUploads.push({
           semantic: semantics.semantic,
@@ -702,6 +712,8 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
   const progressionActions = applicationControls.filter((control) => classifyApplicationControl(control) === 'progression');
   const ambiguousActions = applicationControls.filter((control) => (
     classifyApplicationControl(control) === 'ambiguous'
+    // A plain backward step (Workday's footer "Back" is type=submit) is never clicked and does not block progress.
+    && !/^(?:back|previous|zurück|takaisin|edellinen|tillbaka|vorige|précédent)$/i.test(cleanFormText(control.label || control.text || control.value))
     && (control.type === 'submit' || control.formAction || control.invokesSubmit
       || PROGRESSION_ACTION_LABEL.test(cleanFormText(control.label || control.text || control.value))
       || /\b(?:next|continue|proceed|review|apply|submit|send|complete|finish|finali[sz]e|confirm)\b/i.test(
@@ -752,7 +764,7 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
       const label = String(control.getAttribute('aria-label') || control.innerText || control.value || '').replace(/\s+/g, ' ').trim().replace(/\s*&\s*/g, ' & ');
       if (!progressionLabel.test(label) || finalToken.test(controlLabels(control).join(' '))) return false;
       const root = form.closest('[data-career-ops-workflow-id]') || form;
-      const candidates = [...root.querySelectorAll('[data-career-ops-step], [aria-current="step"], [role="progressbar"], .step, .steps, .progress')];
+      const candidates = [...root.querySelectorAll('[data-career-ops-step], [aria-current="step"], [role="progressbar"], .step, .steps, .progress, [data-automation-id="progressBarActiveStep"], [data-automation-id="progressBarActiveStep"] *')];
       if (root !== form) candidates.push(...[...root.querySelectorAll('*')].filter((element) => !form.contains(element)));
       for (const element of candidates) {
         if (element.closest('[hidden], [inert], [aria-hidden="true"]')) continue;
@@ -765,7 +777,7 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
         let current = Number(element.getAttribute('data-career-ops-step') || 0);
         let total = Number(element.getAttribute('data-career-ops-total-steps') || 0);
         if (!Number.isInteger(current) || current <= 0 || !Number.isInteger(total) || total <= 0) {
-          const match = text.match(/\b(?:step|page)\s*(\d+)\s+(?:of|\/)\s+(\d+)\b/i);
+          const match = text.match(/\b(?:step|page)\s*(\d+)\s+(?:of|\/)\s+(\d+)(?!\d)/i);
           if (!match) continue;
           current = Number(match[1]);
           total = Number(match[2]);
@@ -829,7 +841,15 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
       const form = control.form || control.closest('form, [data-career-ops-virtual-form]') || path.find((element) => element.tagName === 'FORM');
       // Keep the gesture guarded if a handler moves the control or removes its form.
       if (form && ['pointerdown', 'mousedown', 'touchstart', 'keydown'].includes(event.type)) gestureFormControls.add(control);
-      if (!form && !gestureFormControls.has(control)) return;
+      if (!form && !gestureFormControls.has(control)) {
+        // A form-less application step (a freshly loaded Workday Review: no fields, no form, "step 6 of 6") has its
+        // final Submit outside any form; block final labels there. Pages with a form keep outside widgets usable.
+        const formlessApplicationStep = !document.querySelector('form, [data-career-ops-virtual-form]')
+          && (Boolean(document.querySelector('[data-automation-id="progressBarActiveStep"]'))
+            || /\b(?:step|page)\s*\d+\s+(?:of|\/)\s+\d+(?!\d)/i.test(document.body?.innerText || ''));
+        if (formlessApplicationStep && finalToken.test(controlLabels(control).join(' '))) block(event);
+        return;
+      }
       const labels = controlLabels(control);
       if (finalToken.test(labels.join(' '))) return block(event);
       if (!labels.some((label) => progressionLabel.test(label))) return;
@@ -856,7 +876,7 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
     };
 }
 
-async function installSubmissionGuard(page) {
+export async function installSubmissionGuard(page) {
   const rules = {
     finalTokenSource: FINAL_TOKEN.source, finalTokenFlags: FINAL_TOKEN.flags,
     progressionLabelSource: PROGRESSION_ACTION_LABEL.source, progressionLabelFlags: PROGRESSION_ACTION_LABEL.flags,

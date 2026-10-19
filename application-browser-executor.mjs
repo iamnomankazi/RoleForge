@@ -12,7 +12,7 @@
 import { createInterface } from 'node:readline';
 import { applicationFormStateFingerprint, classifyHumanGate, inspectApplicationForm, isApplicationFormWithAccountCreation, sanitizeHumanGateUrl } from './application-form-core.mjs';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import {
@@ -114,6 +114,10 @@ export async function prepareFormPassWithEvidence(page, browserContext, contract
     reasoningProvider,
   });
   const screenshotAfter = await safeScreenshot(page, afterPath);
+  // Local page copy (gitignored evidence) so unsupported ATS steps can be fixed from a saved fixture.
+  if (screenshotAfter === afterPath) {
+    await page.content().then((html) => writeFileSync(join(evidenceDir, 'after.html'), html)).catch(() => null);
+  }
   return attachOperationalArtifacts(preparation, {
     screenshotBefore,
     screenshotAfter,
@@ -909,7 +913,7 @@ export async function waitForRenderedContent(page, timeoutMs = 10_000) {
   let changedAt = Date.now();
   while (Date.now() - started < timeoutMs) {
     const text = await page.evaluate(() => (document.body?.innerText || '').trim()).catch(() => '');
-    const loading = /loading/i.test(text) && text.length < 3_000;
+    const loading = /\bloading\b/i.test(text) && text.length < 3_000;
     if (text.length !== lastLength) {
       lastLength = text.length;
       changedAt = Date.now();

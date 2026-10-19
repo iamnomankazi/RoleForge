@@ -487,13 +487,20 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
       .some((form) => visible(form) && [...form.querySelectorAll(fieldSelector)].some(applicantField));
     if (!realFormHasFields && !document.querySelector('[data-career-ops-virtual-form]')) {
       const loose = [...document.querySelectorAll(fieldSelector)].filter((element) => applicantField(element) && !element.closest('form'));
-      if (loose.length >= 3) {
+      if (loose.length >= 3 || loose.some((element) => (element.type || '').toLowerCase() === 'file')) {
         let container = loose[0].parentElement;
         while (container && !loose.every((element) => container.contains(element))) container = container.parentElement;
         const submitLike = (root) => [...root.querySelectorAll('button, [role="button"], input[type="submit"]')]
           .some((control) => visible(control) && (finalToken.test(control.innerText || control.value || control.getAttribute('aria-label') || '')
-            || /(?:save and continue|continue|next)/i.test(control.innerText || control.value || '')));
-        for (let depth = 0; container && depth < 6 && !submitLike(container); depth += 1) container = container.parentElement;
+            || /\b(?:save and continue|continue|next)\b/i.test(control.innerText || control.value || '')));
+        for (let depth = 0; container && depth < 12 && !submitLike(container); depth += 1) container = container.parentElement;
+        // Include the workflow's step indicator when it sits just above (Workday: progress bar in applyFlowPage).
+        const hasStepText = (root) => /\b(?:step|page)\s*\d+\s+(?:of|\/)\s+\d+(?!\d)/i.test(root?.innerText || '');
+        if (container && !hasStepText(container)) {
+          let ancestor = container.parentElement;
+          for (let depth = 0; ancestor && depth < 3 && !hasStepText(ancestor); depth += 1) ancestor = ancestor.parentElement;
+          if (ancestor && hasStepText(ancestor) && !['BODY', 'HTML'].includes(ancestor.tagName)) container = ancestor;
+        }
         if (container && !['BODY', 'HTML'].includes(container.tagName) && submitLike(container)) {
           container.setAttribute('data-career-ops-virtual-form', '1');
         }
@@ -528,12 +535,17 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
         element.setAttribute('data-career-ops-field-id', fieldId);
         let fieldText = textFor(element);
         // Upload tiles often hide an unlabelled file input; its purpose is the tile's short text ("CV", "Cover Letter").
+        // Workday names the purpose in an ancestor's automation id ("resumeUpload") or a nearby heading.
         if ((element.type || '').toLowerCase() === 'file' && !/resume|r[ée]sum[ée]|\bcv\b|cover|motivation|curriculum/i.test(fieldText)) {
-          for (let node = element.parentElement, depth = 0; node && depth < 4; node = node.parentElement, depth += 1) {
-            const context = (node.innerText || '').replace(/\s+/g, ' ').trim();
-            if (context.length > 160) break;
-            if (/resume|r[ée]sum[ée]|\bcv\b|cover letter|motivation letter|curriculum/i.test(context)
-                && !(/resume|\bcv\b|curriculum/i.test(context) && /cover|motivation/i.test(context))) {
+          for (let node = element.parentElement, depth = 0; node && depth < 8; node = node.parentElement, depth += 1) {
+            if (depth > 0 && node.querySelectorAll('input[type="file"]').length > 1) break;
+            const automationId = (node.getAttribute('data-automation-id') || '').replace(/([a-z])([A-Z])/g, '$1 $2');
+            const context = `${automationId} ${(node.innerText || '').replace(/\s+/g, ' ').trim()}`.trim();
+            if (context.length > 500) break;
+            const cv = /resume|r[ée]sum[ée]|\bcv\b|curriculum/i.test(context);
+            const cover = /cover letter|motivation letter/i.test(context);
+            // A field for both documents is usable only when it accepts several files (adding never replaces).
+            if ((cv || cover) && (!(cv && cover) || element.multiple)) {
               fieldText = `${fieldText} ${context}`.trim();
               break;
             }
@@ -559,6 +571,16 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
           value: element.value || '',
           checked: Boolean(element.checked),
           files: element.files ? [...element.files].map((file) => file.name) : [],
+          multiple: Boolean(element.multiple),
+          attachedNames: (element.type || '').toLowerCase() === 'file' ? (() => {
+            // Files an ATS lists next to its upload control (Workday shows them; the input itself stays empty).
+            for (let node = element.parentElement, depth = 0; node && depth < 5; node = node.parentElement, depth += 1) {
+              if (node.querySelectorAll('input[type="file"]').length > 1) break;
+              const names = (node.innerText || '').match(/[\w()[\] .-]+\.(?:pdf|docx?|rtf|odt|txt)\b/gi);
+              if (names?.length) return [...new Set(names.map((name) => name.trim()))];
+            }
+            return [];
+          })() : [],
           options: element.tagName === 'SELECT' ? [...element.options].map((option) => ({ label: option.textContent.trim(), value: option.value })) : [],
         };
       });
@@ -573,7 +595,7 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
       const current = Number(element.getAttribute('data-career-ops-step') || 0);
       const total = Number(element.getAttribute('data-career-ops-total-steps') || 0);
       if (Number.isInteger(current) && current > 0 && Number.isInteger(total) && total > 0) return { current, total, text: text || `Step ${current} of ${total}` };
-      const match = text.match(/\b(?:step|page)\s*(\d+)\s+(?:of|\/)\s+(\d+)\b/i);
+      const match = text.match(/\b(?:step|page)\s*(\d+)\s+(?:of|\/)\s+(\d+)(?!\d)/i);
       if (!match) return null;
       return { current: Number(match[1]), total: Number(match[2]), text: match[0] };
     };
@@ -582,7 +604,7 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
       if (explicit && visible(explicit)) {
         const competing = [...explicit.querySelectorAll('form')].filter((item) => item !== form && visible(item));
         if (!competing.length) {
-          const step = [...explicit.querySelectorAll('[data-career-ops-step], [aria-current="step"], .step, .steps')]
+          const step = [...explicit.querySelectorAll('[data-career-ops-step], [aria-current="step"], .step, .steps, [data-automation-id="progressBarActiveStep"], [data-automation-id="progressBarActiveStep"] *')]
             .map(stepFromElement).find(Boolean) || null;
           if (step) return { root: explicit, explicit: true, step };
         }
@@ -619,11 +641,14 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
       const formApplicationContext = /\b(?:application|candidate|privacy|data notice|certif(?:y|ication)|resume|\bcv\b|cover letter|work authori[sz]|sponsor)\b/i.test(visibleText);
       const workflowAssociation = workflowAssociations.get(form);
       const structurallyAssociated = Boolean(workflowAssociation);
-      const hasFormStepEvidence = [...form.querySelectorAll('[data-career-ops-step], [aria-current="step"]')].some(visible)
-        || /\b(?:step|page)\s*\d+\s+(?:of|\/)\s+\d+\b/i.test(visibleText);
+      const hasFormStepEvidence = [...form.querySelectorAll('[data-career-ops-step], [aria-current="step"], [data-automation-id="progressBarActiveStep"], [data-automation-id="progressBarActiveStep"] *')].some(visible)
+        || /\b(?:step|page)\s*\d+\s+(?:of|\/)\s+\d+(?!\d)/i.test(visibleText);
       const independentApplicationIdentity = hasApplicationAction
         || (applicationSpecificSignals > 0 && (hasTerminalAction || structurallyAssociated || hasFormStepEvidence))
-        || (formApplicationContext && hasTerminalAction);
+        || (formApplicationContext && hasTerminalAction)
+        // A virtual form exists only on a form-less page with applicant fields and a submit-like control; inside a
+        // numbered application workflow (Workday "step 3 of 6") that is the application.
+        || (form.hasAttribute('data-career-ops-virtual-form') && hasFormStepEvidence);
       const associationBonus = structurallyAssociated || hasFormStepEvidence || hasApplicationAction ? 100 : 0;
       return {
         form,
@@ -653,8 +678,8 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
         : null;
     };
     const applicationStepIndicator = applicationWizard
-      ? parseStep(applicationWizard, '[data-career-ops-step], [aria-current="step"], [role="progressbar"], .step, .steps, .progress')
-      : parseStep(uniqueTopForm || document.createElement('div'), '[data-career-ops-step], [aria-current="step"], .step, .steps');
+      ? parseStep(applicationWizard, '[data-career-ops-step], [aria-current="step"], [role="progressbar"], .step, .steps, .progress, [data-automation-id="progressBarActiveStep"], [data-automation-id="progressBarActiveStep"] *')
+      : parseStep(uniqueTopForm || document.createElement('div'), '[data-career-ops-step], [aria-current="step"], .step, .steps, [data-automation-id="progressBarActiveStep"], [data-automation-id="progressBarActiveStep"] *');
     const controls = [...document.querySelectorAll(controlSelector)]
       .filter(visible)
       .map((element) => {
@@ -666,8 +691,8 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
           .filter((field) => !['hidden', 'submit', 'button', 'reset', 'image'].includes((field.type || '').toLowerCase())) : [];
         const wizardScope = form === uniqueTopForm ? applicationWizard : null;
         const scopedStep = wizardScope
-          ? parseStep(wizardScope, '[data-career-ops-step], [aria-current="step"], [role="progressbar"], .step, .steps, .progress')
-          : parseStep(form || document.createElement('div'), '[data-career-ops-step], [aria-current="step"], .step, .steps');
+          ? parseStep(wizardScope, '[data-career-ops-step], [aria-current="step"], [role="progressbar"], .step, .steps, .progress, [data-automation-id="progressBarActiveStep"], [data-automation-id="progressBarActiveStep"] *')
+          : parseStep(form || document.createElement('div'), '[data-career-ops-step], [aria-current="step"], .step, .steps, [data-automation-id="progressBarActiveStep"], [data-automation-id="progressBarActiveStep"] *');
         const stepIndicator = form === uniqueTopForm ? scopedStep : null;
         const formAction = element.getAttribute('formaction') || form?.getAttribute('action') || '';
         return {
