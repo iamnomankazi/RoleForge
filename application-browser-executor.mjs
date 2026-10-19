@@ -348,7 +348,7 @@ export function classifyFormSnapshot(snapshot) {
   };
 }
 
-const ENTRY_ACTION_LABEL = /^(?:apply|apply now|apply here!?|autofill with resume|apply for (?:this|the) (?:job|role|position)|start (?:an? |your )?application|begin (?:an? |your )?application|continue to (?:the )?application|go to (?:the )?application|bewerben|jetzt bewerben|ich bin interessiert|postuler|hae paikkaa|hae nyt|hae työpaikkaa|ansök(?: nu)?|solliciteer(?: nu)?|ansøg(?: nu)?)$/i;
+const ENTRY_ACTION_LABEL = /^(?:apply|apply now|apply here!?|autofill with resume|apply for (?:this|the) (?:job|role|position)|start (?:an? |your )?application|begin (?:an? |your )?application|continue to (?:the )?application|continue (?:your |my )?application|resume (?:your |my )?application|go to (?:the )?application|bewerben|jetzt bewerben|ich bin interessiert|postuler|hae paikkaa|hae nyt|hae työpaikkaa|ansök(?: nu)?|solliciteer(?: nu)?|ansøg(?: nu)?)$/i;
 const FINAL_ACTION_LABEL = /(?:^|[^\p{L}\p{N}_])(?:submit|send|complete|finish|confirm|finali[sz]e|review and apply|apply and submit|absenden|senden|abschicken|verzenden|versturen|indsend|lähetä|valmis|skicka|envoyer|soumettre|valider)(?=$|[^\p{L}\p{N}_])/iu;
 const ONE_CLICK_ENTRY_LABEL = /\b(?:(?:easy|quick|instant)\s+apply|(?:1|one)[- ]?click(?:[- ]apply)?|apply\s+with\s+(?:(?:your|my|a|saved)\s+)?(?:linkedin|indeed|profile|resume|cv))\b/i;
 const DANGEROUS_ACTION_PATH = /\b(?:submit|send|complete|finish|confirm|finali[sz]e)[-_ ]?(?:application)?\b/i;
@@ -836,7 +836,7 @@ async function inspectBenignSiteChromeActions(page) {
     const rootSelector = [
       '[id*="cookie" i]', '[class*="cookie" i]', '[id*="consent" i]', '[class*="consent" i]',
       '[id*="cmp" i]', '[class*="cmp" i]', '[id*="privacy-prompt" i]', '[class*="privacy-prompt" i]',
-      '#GDPRConsentManagerContainer', '#fixedfooter',
+      '#GDPRConsentManagerContainer', '#fixedfooter', '[data-automation-id="legalNotice"]',
       // Unbranded banners: any dialog whose own text is about cookies (checked below).
       '[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]', 'dialog',
     ].join(',');
@@ -902,6 +902,8 @@ async function activateSiteChromeAction(page, expected) {
 // Client-rendered ATS pages (Workday) are empty at DOMContentLoaded; give them a moment to render.
 export async function waitForRenderedContent(page, timeoutMs = 10_000) {
   // Settled = text unchanged for 750 ms and no short "Loading" placeholder (Workday renders after its XHRs).
+  // Client-rendered ATS pages fetch the job after load; let that traffic finish before judging stability.
+  await page.waitForLoadState('networkidle', { timeout: Math.min(timeoutMs, 8_000) }).catch(() => null);
   const started = Date.now();
   let lastLength = -1;
   let changedAt = Date.now();
