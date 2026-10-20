@@ -1299,6 +1299,9 @@ async function performAction(page, action, visibleOptions, { deadlineMs, clock }
       if (before.fieldId && before.fieldId !== action.fieldId) {
         throw new Error(`Exact upload target identity changed before upload: ${action.semantic}`);
       }
+      // Re-checked live: the input may have gained a different file since planning, and setInputFiles replaces it.
+      const other = await differentAttachment(target, action.artifact);
+      if (other) throw new Error(`A different file is already attached here (${other}); RoleForge did not replace it. Review it.`);
       await locator.setInputFiles(action.artifact.resolvedPath, { timeout: remainingTimeout(deadlineMs, clock) });
       const state = await target.evaluate((element) => ({
         attached: element.isConnected,

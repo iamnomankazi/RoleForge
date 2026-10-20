@@ -617,3 +617,30 @@ test('review-07: plain "Step 3 of 3" text on a form-less page keeps the final bu
     await browser.close();
   }
 });
+
+// Regression test for review-08: a direct upload re-checks the input right before setting files.
+test('review-08: a file that appears after planning is never replaced by a direct upload', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    const page = await servedPage(browser, `<form><label for="fn">First name</label><input id="fn" required>
+      <label for="ln">Last name</label><input id="ln" required><label for="em">Email</label><input id="em" type="email" required>
+      <label for="cv">Resume / CV</label><input type="file" id="cv"><button type="submit">Submit application</button></form>
+      <script>
+        // An earlier field's change handler restores a saved attachment into the (still empty at planning) CV input.
+        fn.addEventListener('input', () => {
+          const data = new DataTransfer(); data.items.add(new File(['%PDF old'], 'Other_Resume.pdf', { type: 'application/pdf' }));
+          document.getElementById('cv').files = data.files;
+        });
+      </script>`, 'https://careers.example.test/apply/late-file');
+    const result = await prepareOperationalApplicationForm(page, profile, docs.value, { context, transitionTimeoutMs: 300, transitionStabilityMs: 0 });
+    assert.deepEqual(await page.evaluate(() => [...document.getElementById('cv').files].map((file) => file.name)), ['Other_Resume.pdf']);
+    assert.equal(result.evidence.uploadedArtifacts.some((row) => row.sha256 === docs.value.cv.sha256), false);
+    assert.ok(result.evidence.unresolvedFields.some((row) => row.manualUploadPath === docs.value.cv.resolvedPath
+      && /Other_Resume\.pdf/.test(row.reason)));
+    await page.close();
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});
