@@ -1501,6 +1501,30 @@ async function differentAttachment(handle, artifact) {
           tokens.push({ raw, block, items: [item], listed: Boolean(parent.closest('[data-automation-id="file-upload-item-name"]')) });
         }
       }
+      // A token is a whole name only when it stands alone in its block: its nearest non-whitespace neighbours are block
+      // elements, form controls (or areas holding them), another control's area, or nothing. Inline text beside it
+      // ("<span>Archived </span><span>CV.pdf</span>") makes it a fragment, read as unreadable.
+      const boundary = (node) => {
+        if (!node) return true;
+        if (node.nodeType === Node.TEXT_NODE) return !/\S/.test(node.textContent || '');
+        if (node.nodeType !== Node.ELEMENT_NODE) return true;
+        if (skip.some((region) => region === node || region.contains(node) || node.contains(region))) return true;
+        if (node.matches('input, textarea, select, button') || node.querySelector('input, textarea, select, button')) return true;
+        if (!getComputedStyle(node).display.startsWith('inline')) return true;
+        return !/\S/.test(node.textContent || '');
+      };
+      const neighbour = (node, block, forward) => {
+        for (let current = node; current && current !== block; current = current.parentElement) {
+          let sibling = forward ? current.nextSibling : current.previousSibling;
+          while (sibling && sibling.nodeType === Node.TEXT_NODE && !/\S/.test(sibling.textContent || '')) {
+            sibling = forward ? sibling.nextSibling : sibling.previousSibling;
+          }
+          if (sibling) return sibling;
+        }
+        return null;
+      };
+      const isolated = (token) => boundary(neighbour(token.items[0], token.block, false))
+        && boundary(neighbour(token.items[token.items.length - 1], token.block, true));
       const found = [];
       for (const token of tokens) {
         const text = token.raw.replace(/\s+/g, ' ').trim();
@@ -1508,7 +1532,7 @@ async function differentAttachment(handle, artifact) {
         // A file name has a character before the dot; bare type hints (".pdf, .docx", "(.pdf)") do not.
         if (!token.listed && !/[^\s,;:(\/.]\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip)(?![\p{L}\p{N}])/iu.test(text)) continue;
         const lead = token.listed ? [text, text] : text.match(/^(.+\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip))(?:\s+(?:(?:was\s+)?(?:successfully\s+)?(?:uploaded|attached)(?:\s+successfully)?[.!]?))?$/i);
-        found.push(lead ? lead[1] : `(unreadable file name) ${text}`);
+        found.push(lead && isolated(token) ? lead[1] : `(unreadable file name) ${text}`);
         for (const item of token.items) used.add(item);
       }
       return found;

@@ -758,3 +758,25 @@ test('review-12: "<span>Archived_</span><span>Example_CV.pdf</span>" in a shared
     rmSync(docs.dir, { recursive: true, force: true });
   }
 });
+
+// Regression test for review-13: a name beside other inline text in its block is a fragment, never a whole name.
+test('review-13: "<span>Archived </span><span>bound name</span>" in a shared container withholds the upload', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    const page = await servedPage(browser, `<form><label for="fn">First name</label><input id="fn" required>
+      <label for="ln">Last name</label><input id="ln" required><label for="em">Email</label><input id="em" type="email" required>
+      <label for="cv">Resume</label><input type="file" id="cv"><label for="cl">Cover Letter</label><input type="file" id="cl">
+      <div><span>Archived </span><span>example_cover_letter.pdf</span></div>
+      <button type="submit">Submit application</button></form>`, 'https://careers.example.test/apply/spaced');
+    await page.setInputFiles('#cv', docs.value.cv.resolvedPath);
+    const result = await prepareOperationalApplicationForm(page, profile, docs.value, { context, transitionTimeoutMs: 300, transitionStabilityMs: 0 });
+    assert.equal(await page.evaluate(() => document.getElementById('cl').files.length), 0);
+    assert.equal(result.evidence.uploadedArtifacts.some((row) => row.sha256 === docs.value.coverLetter.sha256), false);
+    assert.ok(result.evidence.unresolvedFields.some((row) => row.manualUploadPath === docs.value.coverLetter.resolvedPath));
+    await page.close();
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});
