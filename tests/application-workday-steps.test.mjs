@@ -780,3 +780,35 @@ test('review-13: "<span>Archived </span><span>bound name</span>" in a shared con
     rmSync(docs.dir, { recursive: true, force: true });
   }
 });
+
+// Regression test for review-14: comments never isolate a fragment; names with spaces/dots before the extension count.
+test('review-14: a comment between fragments, "Old CV .pdf" and "Old CV..pdf" all withhold the upload', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    const comment = await servedPage(browser, `<form><label for="fn">First name</label><input id="fn" required>
+      <label for="ln">Last name</label><input id="ln" required><label for="em">Email</label><input id="em" type="email" required>
+      <label for="cv">Resume</label><input type="file" id="cv"><label for="cl">Cover Letter</label><input type="file" id="cl">
+      <div><span>Archived </span><!--x--><span>example_cover_letter.pdf</span></div>
+      <button type="submit">Submit application</button></form>`, 'https://careers.example.test/apply/comment');
+    await comment.setInputFiles('#cv', docs.value.cv.resolvedPath);
+    const result = await prepareOperationalApplicationForm(comment, profile, docs.value, { context, transitionTimeoutMs: 300, transitionStabilityMs: 0 });
+    assert.equal(await comment.evaluate(() => document.getElementById('cl').files.length), 0);
+    assert.ok(result.evidence.unresolvedFields.some((row) => row.manualUploadPath === docs.value.coverLetter.resolvedPath));
+    await comment.close();
+
+    for (const listed of ['Old CV .pdf', 'Old CV..pdf']) {
+      const page = await servedPage(browser, shell(`<div><h3>Resume</h3><div data-automation-id="resumeUpload">
+        <input type="file" id="cvfile" data-automation-id="file-upload-input-ref"></div><div><span>${listed}</span></div></div>
+        <label for="fn">First Name*</label><input id="fn" required><label for="ln">Last Name*</label><input id="ln" required>`,
+      '<button type="submit" data-automation-id="pageFooterNextButton">Save and Continue</button>', progress(3, 6, 'My Experience')),
+      BASE.replace('autofillWithResume', `dots-${listed.length}`));
+      const plan = buildOperationalFormPlan(await inspectOperationalApplicationForm(page), profile, docs.value, { context });
+      assert.equal(plan.actions.some((a) => a.action === 'upload'), false, listed);
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});

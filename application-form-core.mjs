@@ -586,7 +586,12 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
       const neighbour = (node, block, forward) => {
         for (let current = node; current && current !== block; current = current.parentElement) {
           let sibling = forward ? current.nextSibling : current.previousSibling;
-          while (sibling && sibling.nodeType === Node.TEXT_NODE && !/\S/.test(sibling.textContent || '')) {
+          // Whitespace, comments and empty inline elements are not neighbours (they never isolate a fragment).
+          while (sibling && ((sibling.nodeType === Node.TEXT_NODE && !/\S/.test(sibling.textContent || ''))
+            || (sibling.nodeType !== Node.TEXT_NODE && sibling.nodeType !== Node.ELEMENT_NODE)
+            || (sibling.nodeType === Node.ELEMENT_NODE && getComputedStyle(sibling).display.startsWith('inline')
+              && !/\S/.test(sibling.textContent || '') && !sibling.matches('input, textarea, select, button')
+              && !sibling.querySelector('input, textarea, select, button')))) {
             sibling = forward ? sibling.nextSibling : sibling.previousSibling;
           }
           if (sibling) return sibling;
@@ -599,8 +604,9 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
       for (const token of tokens) {
         const text = token.raw.replace(/\s+/g, ' ').trim();
         if (!text) continue;
-        // A file name has a character before the dot; bare type hints (".pdf, .docx", "(.pdf)") do not.
-        if (!token.listed && !/[^\s,;:(\/.]\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip)(?![\p{L}\p{N}])/iu.test(text)) continue;
+        // A file name has a letter or digit in its segment before the extension (spaces and dots allowed: "Old CV .pdf");
+        // bare type hints (".pdf, .docx", "(.pdf)", "types: .pdf") do not.
+        if (!token.listed && !/(?:^|[,;:(\/])[^,;:(\/]*[\p{L}\p{N}][^,;:(\/]*\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip)(?![\p{L}\p{N}])/iu.test(text)) continue;
         const lead = token.listed ? [text, text] : text.match(/^(.+\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip))(?:\s+(?:(?:was\s+)?(?:successfully\s+)?(?:uploaded|attached)(?:\s+successfully)?[.!]?))?$/i);
         found.push(lead && isolated(token) ? lead[1] : `(unreadable file name) ${text}`);
         for (const item of token.items) used.add(item);
@@ -618,7 +624,7 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
         if (skip.some((region) => region.contains(parent)) || used.has(item)) continue;
         joined += item.textContent || '';
       }
-      return /[^\s,;:(\/.]\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip)(?![\p{L}\p{N}])/iu.test(joined);
+      return /(?:^|[,;:(\/])[^,;:(\/]*[\p{L}\p{N}][^,;:(\/]*\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip)(?![\p{L}\p{N}])/iu.test(joined);
     };
     const regionOf = (other, top) => {
       let region = other;
