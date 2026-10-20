@@ -1477,20 +1477,39 @@ async function differentAttachment(handle, artifact) {
     // other listed name cannot be tied to one control and is ambiguous. Unreadable/ambiguous names never equal the
     // bound file, so the upload is withheld for review.
     const namesIn = (root, skip = [], used = new Set()) => {
-      const found = [];
+      // Text nodes are first joined into tokens: adjacent nodes in the same block element that touch without whitespace
+      // (<span>Archived_</span><span>CV.pdf</span>) form one token, so a name is always read whole.
+      const blockOf = (element) => {
+        let node = element;
+        while (node.parentElement && node !== root && getComputedStyle(node).display.startsWith('inline')) node = node.parentElement;
+        return node;
+      };
+      const tokens = [];
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
       for (let item = walker.nextNode(); item; item = walker.nextNode()) {
         const parent = item.parentElement;
         if (!parent || parent.closest('script, style, template') || !parent.getClientRects().length) continue;
         if (skip.some((region) => region.contains(parent))) continue;
-        const text = (item.textContent || '').replace(/\s+/g, ' ').trim();
+        const raw = item.textContent || '';
+        const block = blockOf(parent);
+        const last = tokens[tokens.length - 1];
+        if (last && last.block === block && /\S$/.test(last.raw) && /^\S/.test(raw)) {
+          last.raw += raw;
+          last.items.push(item);
+          last.listed = last.listed || Boolean(parent.closest('[data-automation-id="file-upload-item-name"]'));
+        } else {
+          tokens.push({ raw, block, items: [item], listed: Boolean(parent.closest('[data-automation-id="file-upload-item-name"]')) });
+        }
+      }
+      const found = [];
+      for (const token of tokens) {
+        const text = token.raw.replace(/\s+/g, ' ').trim();
         if (!text) continue;
-        const listedItem = Boolean(parent.closest('[data-automation-id="file-upload-item-name"]'));
         // A file name has a character before the dot; bare type hints (".pdf, .docx", "(.pdf)") do not.
-        if (!listedItem && !/[^\s,;:(\/.]\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip)(?![\p{L}\p{N}])/iu.test(text)) continue;
-        const lead = listedItem ? [text, text] : text.match(/^(.+\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip))(?:\s+(?:(?:was\s+)?(?:successfully\s+)?(?:uploaded|attached)(?:\s+successfully)?[.!]?))?$/i);
+        if (!token.listed && !/[^\s,;:(\/.]\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip)(?![\p{L}\p{N}])/iu.test(text)) continue;
+        const lead = token.listed ? [text, text] : text.match(/^(.+\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip))(?:\s+(?:(?:was\s+)?(?:successfully\s+)?(?:uploaded|attached)(?:\s+successfully)?[.!]?))?$/i);
         found.push(lead ? lead[1] : `(unreadable file name) ${text}`);
-        used.add(item);
+        for (const item of token.items) used.add(item);
       }
       return found;
     };

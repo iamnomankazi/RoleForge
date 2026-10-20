@@ -726,7 +726,32 @@ test('review-10: a split file name next to the bound file name still withholds t
     '<button type="submit" data-automation-id="pageFooterNextButton">Save and Continue</button>', progress(3, 6, 'My Experience')),
     BASE.replace('autofillWithResume', 'split-mixed'));
     const snapshot = await inspectOperationalApplicationForm(page);
-    assert.deepEqual(snapshot.fields.find((field) => field.type === 'file').attachedNames, ['Example_CV.pdf', '(unreadable file name)']);
+    assert.deepEqual(snapshot.fields.find((field) => field.type === 'file').attachedNames, ['Example_CV.pdf', 'Other_Resume.pdf']);
+    await page.close();
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});
+
+// Regression test for review-12: a name glued from adjacent elements is read whole, never as its suffix.
+test('review-12: "<span>Archived_</span><span>Example_CV.pdf</span>" in a shared container is never mistaken for the bound file', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    const page = await servedPage(browser, `<form><label for="fn">First name</label><input id="fn" required>
+      <label for="ln">Last name</label><input id="ln" required><label for="em">Email</label><input id="em" type="email" required>
+      <label for="cv">Resume</label><input type="file" id="cv"><label for="cl">Cover Letter</label><input type="file" id="cl">
+      <div><span>Archived_</span><span>example_cover_letter.pdf</span></div>
+      <button type="submit">Submit application</button></form>`, 'https://careers.example.test/apply/glued');
+    await page.setInputFiles('#cv', docs.value.cv.resolvedPath);
+    const snapshot = await inspectOperationalApplicationForm(page);
+    const cover = snapshot.fields.find((field) => field.type === 'file' && /cover/i.test(field.label));
+    assert.deepEqual(cover.attachedNames, ['(ambiguous attachment) Archived_example_cover_letter.pdf']);
+    const result = await prepareOperationalApplicationForm(page, profile, docs.value, { context, transitionTimeoutMs: 300, transitionStabilityMs: 0 });
+    assert.equal(await page.evaluate(() => document.getElementById('cl').files.length), 0);
+    assert.equal(result.evidence.uploadedArtifacts.some((row) => row.sha256 === docs.value.coverLetter.sha256), false);
+    assert.ok(result.evidence.unresolvedFields.some((row) => row.manualUploadPath === docs.value.coverLetter.resolvedPath));
     await page.close();
   } finally {
     await browser.close();
