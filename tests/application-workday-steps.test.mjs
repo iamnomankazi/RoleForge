@@ -693,3 +693,23 @@ test('review-09: a name listed in a container shared by several inputs withholds
     rmSync(docs.dir, { recursive: true, force: true });
   }
 });
+
+// Regression test for review-10: a listed file name split across elements is still an existing attachment.
+test('review-10: "<span>Other_Resume</span><span>.pdf</span>" beside an empty input withholds the upload', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    const page = await servedPage(browser, shell(`<div><h3>Resume</h3><div data-automation-id="resumeUpload">
+      <input type="file" id="cvfile" data-automation-id="file-upload-input-ref"></div><div><span>Other_Resume</span><span>.pdf</span></div></div>
+      <label for="fn">First Name*</label><input id="fn" required><label for="ln">Last Name*</label><input id="ln" required>`,
+    '<button type="submit" data-automation-id="pageFooterNextButton">Save and Continue</button>', progress(3, 6, 'My Experience')),
+    BASE.replace('autofillWithResume', 'split'));
+    const plan = buildOperationalFormPlan(await inspectOperationalApplicationForm(page), profile, docs.value, { context });
+    assert.equal(plan.actions.some((a) => a.action === 'upload'), false);
+    assert.ok(plan.unresolvedFields.some((row) => row.manualUploadPath === docs.value.cv.resolvedPath));
+    await page.close();
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});

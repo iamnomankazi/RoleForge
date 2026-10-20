@@ -563,6 +563,19 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
       }
       return found;
     };
+    // A file name split across elements (<span>Name</span><span>.pdf</span>) is caught on the joined text of the
+    // visible text nodes; when the per-node reading found nothing, it is unreadable and withholds the upload.
+    const joinedHasFile = (root, skip = []) => {
+      let joined = '';
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      for (let item = walker.nextNode(); item; item = walker.nextNode()) {
+        const parent = item.parentElement;
+        if (!parent || parent.closest('script, style, template') || !parent.getClientRects().length) continue;
+        if (skip.some((region) => region.contains(parent))) continue;
+        joined += item.textContent || '';
+      }
+      return /[^\s,;:(\/.]\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip)(?![\p{L}\p{N}])/iu.test(joined);
+    };
     const regionOf = (other, top) => {
       let region = other;
       while (region.parentElement && region.parentElement !== top
@@ -577,11 +590,13 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
           const regions = others.map((other) => regionOf(other, node));
           // A shared-area name that another input actually holds (e.g. RoleForge's own CV upload) belongs to it.
           const heldElsewhere = new Set(others.flatMap((other) => [...(other.files || [])].map((file) => file.name)));
-          return [...new Set(namesIn(node, regions).filter((name) => !heldElsewhere.has(name))
-            .map((name) => `(ambiguous attachment) ${name}`))];
+          const sharedNames = namesIn(node, regions).filter((name) => !heldElsewhere.has(name));
+          if (!sharedNames.length && joinedHasFile(node, regions)) return ['(ambiguous attachment) (unreadable file name)'];
+          return [...new Set(sharedNames.map((name) => `(ambiguous attachment) ${name}`))];
         }
         const names = namesIn(node);
         if (names.length) return [...new Set(names)];
+        if (joinedHasFile(node)) return ['(unreadable file name)'];
         if (node.matches('[role="dialog"], [role="alertdialog"], dialog, [aria-modal="true"]')) break;
       }
       return [];
