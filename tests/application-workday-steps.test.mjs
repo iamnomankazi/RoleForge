@@ -552,3 +552,50 @@ test('review-05: a listed name that only starts with the bound filename is a dif
     rmSync(docs.dir, { recursive: true, force: true });
   }
 });
+
+// Regression tests for the final Sol High review (r261020-005650-cad8 review-06).
+test('review-06: a final button inside an explicit wizard stays blocked beside its form', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await servedPage(browser, `<div data-career-ops-wizard><p data-career-ops-step="2" data-career-ops-total-steps="2">Step 2 of 2: Review</p>
+      <form><label for="em">Email</label><input id="em" type="email"><button type="button">Continue</button></form>
+      <button type="button" id="submit">Submit application</button></div>
+      <script>window.submits = 0; submit.addEventListener('click', () => { window.submits += 1; });</script>`,
+    'https://careers.example.test/apply/wizard-sibling');
+    await installSubmissionGuard(page);
+    await page.click('#submit').catch(() => null);
+    assert.equal(await page.evaluate(() => window.submits), 0);
+    await page.close();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('review-06: an existing HTML or extensionless Workday attachment is never replaced; type hints are not files', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    for (const listed of ['<span>Old_Resume.html</span>', '<div data-automation-id="file-upload-item-name">Old resume</div>']) {
+      const page = await servedPage(browser, shell(`<div><h3>Resume</h3><div data-automation-id="resumeUpload">
+        <input type="file" id="cvfile" data-automation-id="file-upload-input-ref"></div><div>${listed}</div></div>
+        <label for="fn">First Name*</label><input id="fn" required><label for="ln">Last Name*</label><input id="ln" required>`,
+      '<button type="submit" data-automation-id="pageFooterNextButton">Save and Continue</button>', progress(3, 6, 'My Experience')),
+      BASE.replace('autofillWithResume', `listed-${listed.length}`));
+      const plan = buildOperationalFormPlan(await inspectOperationalApplicationForm(page), profile, docs.value, { context });
+      assert.equal(plan.actions.some((a) => a.action === 'upload'), false, listed);
+      assert.ok(plan.unresolvedFields.some((row) => row.manualUploadPath === docs.value.cv.resolvedPath), listed);
+      await page.close();
+    }
+    const hint = await servedPage(browser, shell(`<div><h3>Resume</h3><p>Accepted file types: .pdf, .docx, .html (5MB max)</p>
+      <div data-automation-id="resumeUpload"><input type="file" id="cvfile" data-automation-id="file-upload-input-ref"></div></div>
+      <label for="fn">First Name*</label><input id="fn" required><label for="ln">Last Name*</label><input id="ln" required>`,
+    '<button type="submit" data-automation-id="pageFooterNextButton">Save and Continue</button>', progress(3, 6, 'My Experience')),
+    BASE.replace('autofillWithResume', 'hint'));
+    const hintPlan = buildOperationalFormPlan(await inspectOperationalApplicationForm(hint), profile, docs.value, { context });
+    assert.ok(hintPlan.actions.some((a) => a.action === 'upload' && a.artifact.resolvedPath === docs.value.cv.resolvedPath));
+    await hint.close();
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});

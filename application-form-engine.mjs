@@ -881,8 +881,8 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
         // A form-less application step (a freshly loaded Workday Review: no fields, no form, "step 6 of 6") has its
         // final Submit outside any form; block final labels there. A Workday flow container or footer always protects
         // its final button. Any visible structured step keeps final labels outside forms blocked; only an explicit
-        // [data-career-ops-wizard] holding exactly one form with fields lifts it (a stepper inside a form does not:
-        // an SPA may render its Submit outside that form).
+        // [data-career-ops-wizard] holding exactly one form with fields lifts it, and only for controls outside that
+        // wizard (a stepper inside a form does not: an SPA may render its Submit outside that form).
         const inApplicationFlow = Boolean(control.closest('[data-automation-id="applyFlowPage"], [data-automation-id="pageFooter"]'));
         const shown = (element) => {
           const rect = element.getBoundingClientRect();
@@ -890,10 +890,16 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
         };
         const formWithFields = (item) => shown(item)
           && [...item.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]')].some(shown);
+        const insideWizard = (wizard) => {
+          for (let node = control; node; node = node.getRootNode() instanceof ShadowRoot ? node.getRootNode().host : null) {
+            if (wizard.contains(node)) return true;
+          }
+          return false;
+        };
         const stepOwnsForm = (step) => {
           const forms = [...document.querySelectorAll('form, [data-career-ops-virtual-form]')].filter(formWithFields);
           const wizard = step.closest('[data-career-ops-wizard]');
-          return Boolean(wizard) && forms.some((item) => wizard.contains(item))
+          return Boolean(wizard) && !insideWizard(wizard) && forms.some((item) => wizard.contains(item))
             && [...wizard.querySelectorAll('form, [data-career-ops-virtual-form]')].filter(formWithFields).length === 1;
         };
         const formlessApplicationStep = inApplicationFlow
@@ -1464,8 +1470,10 @@ async function differentAttachment(handle, artifact) {
             if (!item.parentElement || item.parentElement.closest('script, style, template')
               || !item.parentElement.getClientRects().length) continue;
             const text = (item.textContent || '').replace(/\s+/g, ' ').trim();
-            if (!/\.(?:pdf|docx?|rtf|odt|txt)(?![\p{L}\p{N}])/iu.test(text)) continue;
-            const lead = text.match(/^(.+\.(?:pdf|docx?|rtf|odt|txt))(?:\s+(?:(?:was\s+)?(?:successfully\s+)?(?:uploaded|attached)(?:\s+successfully)?[.!]?))?$/i);
+            if (!text) continue;
+            const listedItem = Boolean(item.parentElement.closest('[data-automation-id="file-upload-item-name"]'));
+            if (!listedItem && !/[\p{L}\p{N}_)\]-]\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip)(?![\p{L}\p{N}])/iu.test(text)) continue;
+            const lead = listedItem ? [text, text] : text.match(/^(.+\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip))(?:\s+(?:(?:was\s+)?(?:successfully\s+)?(?:uploaded|attached)(?:\s+successfully)?[.!]?))?$/i);
             found.push(lead ? lead[1] : `(unreadable file name) ${text}`);
           }
           return found;
