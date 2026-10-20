@@ -644,3 +644,52 @@ test('review-08: a file that appears after planning is never replaced by a direc
     rmSync(docs.dir, { recursive: true, force: true });
   }
 });
+
+// Regression tests for review-09: punctuation in listed names, and names in a container shared by several inputs.
+test('review-09: "Resume++.pdf" beside an empty single-file input is an existing attachment', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    const page = await servedPage(browser, shell(`<div><h3>Resume</h3><div data-automation-id="resumeUpload">
+      <input type="file" id="cvfile" data-automation-id="file-upload-input-ref"></div><div><span>Resume++.pdf</span></div></div>
+      <label for="fn">First Name*</label><input id="fn" required><label for="ln">Last Name*</label><input id="ln" required>`,
+    '<button type="submit" data-automation-id="pageFooterNextButton">Save and Continue</button>', progress(3, 6, 'My Experience')),
+    BASE.replace('autofillWithResume', 'punct'));
+    const plan = buildOperationalFormPlan(await inspectOperationalApplicationForm(page), profile, docs.value, { context });
+    assert.equal(plan.actions.some((a) => a.action === 'upload'), false);
+    assert.ok(plan.unresolvedFields.some((row) => row.manualUploadPath === docs.value.cv.resolvedPath));
+    await page.close();
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});
+
+test('review-09: a name listed in a container shared by several inputs withholds uploads; a name in a sibling\'s own area does not', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    const shared = await servedPage(browser, `<form><label for="fn">First name</label><input id="fn" required>
+      <label for="ln">Last name</label><input id="ln" required><label for="em">Email</label><input id="em" type="email" required>
+      <label for="cv">Resume</label><input type="file" id="cv"><span>Other_CV.pdf</span>
+      <label for="cl">Cover Letter</label><input type="file" id="cl">
+      <button type="submit">Submit application</button></form>`, 'https://careers.example.test/apply/shared');
+    const sharedPlan = buildOperationalFormPlan(await inspectOperationalApplicationForm(shared), profile, docs.value, { context });
+    assert.equal(sharedPlan.actions.some((a) => a.action === 'upload' && a.semantic === 'cv_upload'), false);
+    assert.ok(sharedPlan.unresolvedFields.some((row) => row.manualUploadPath === docs.value.cv.resolvedPath));
+    await shared.close();
+
+    const owned = await servedPage(browser, `<form><label for="fn">First name</label><input id="fn" required>
+      <label for="ln">Last name</label><input id="ln" required><label for="em">Email</label><input id="em" type="email" required>
+      <div><label for="cv">Resume</label><input type="file" id="cv"></div>
+      <div><label for="cl">Cover Letter</label><input type="file" id="cl"><span>Other_letter.pdf</span></div>
+      <button type="submit">Submit application</button></form>`, 'https://careers.example.test/apply/owned');
+    const ownedPlan = buildOperationalFormPlan(await inspectOperationalApplicationForm(owned), profile, docs.value, { context });
+    assert.ok(ownedPlan.actions.some((a) => a.action === 'upload' && a.artifact.resolvedPath === docs.value.cv.resolvedPath), 'CV slot is free');
+    assert.equal(ownedPlan.actions.some((a) => a.action === 'upload' && a.artifact.resolvedPath === docs.value.coverLetter.resolvedPath), false);
+    await owned.close();
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});

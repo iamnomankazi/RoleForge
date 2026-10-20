@@ -539,7 +539,10 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       const planned = { ...base, action: 'upload', artifact, retryBudget: 1 };
       // Files the ATS already lists for this control: the same bound file counts as attached; a different one is
       // never replaced without the user's review.
-      const shown = field.attachedNames || [];
+      // A name listed in an area shared by several inputs that is exactly this control's bound file is RoleForge's own
+      // earlier upload; any other shared-area name stays ambiguous and withholds the upload.
+      const shown = (field.attachedNames || [])
+        .map((name) => (name === `(ambiguous attachment) ${artifact.intendedFilename}` ? artifact.intendedFilename : name));
       const held = field.files || [];
       // setInputFiles replaces the input's FileList, so any different file held by the input blocks the upload.
       // Only an empty multiple-file input next to a server-side list (Workday) adds without replacing.
@@ -1465,32 +1468,55 @@ async function differentAttachment(handle, artifact) {
   const expected = [...new Set([artifact.intendedFilename, basename(artifact.resolvedPath)].filter(Boolean))];
   return handle.evaluate((input, expected) => {
     // Exact names only: "Old CV.pdf" is a different file from a bound "CV.pdf".
-    const same = (name) => expected.includes(name);
+    const same = (name) => expected.includes(name) || expected.some((item) => name === `(ambiguous attachment) ${item}`);
     const held = [...(input.files || [])].map((file) => file.name);
     let shown = [];
-    if (!(input.multiple && held.length === 0)) {
+    // Files an ATS lists next to an upload control. Read per visible text node: a node that is a file name, or a name
+    // followed only by an upload status, gives that exact name; any other mention of a file is unreadable. In a
+    // container shared by several file inputs, a name inside another control's own area belongs to that control; any
+    // other listed name cannot be tied to one control and is ambiguous. Unreadable/ambiguous names never equal the
+    // bound file, so the upload is withheld for review.
+    const namesIn = (root, skip = []) => {
+      const found = [];
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      for (let item = walker.nextNode(); item; item = walker.nextNode()) {
+        const parent = item.parentElement;
+        if (!parent || parent.closest('script, style, template') || !parent.getClientRects().length) continue;
+        if (skip.some((region) => region.contains(parent))) continue;
+        const text = (item.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!text) continue;
+        const listedItem = Boolean(parent.closest('[data-automation-id="file-upload-item-name"]'));
+        // A file name has a character before the dot; bare type hints (".pdf, .docx", "(.pdf)") do not.
+        if (!listedItem && !/[^\s,;:(\/.]\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip)(?![\p{L}\p{N}])/iu.test(text)) continue;
+        const lead = listedItem ? [text, text] : text.match(/^(.+\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip))(?:\s+(?:(?:was\s+)?(?:successfully\s+)?(?:uploaded|attached)(?:\s+successfully)?[.!]?))?$/i);
+        found.push(lead ? lead[1] : `(unreadable file name) ${text}`);
+      }
+      return found;
+    };
+    const regionOf = (other, top) => {
+      let region = other;
+      while (region.parentElement && region.parentElement !== top
+        && region.parentElement.querySelectorAll('input[type="file"]').length === 1) region = region.parentElement;
+      return region;
+    };
+    const listedNames = (input) => {
       for (let node = input.parentElement, depth = 0; node && depth < 5; node = node.parentElement, depth += 1) {
-        if (node.querySelectorAll('input[type="file"]').length > 1) break;
-        // Same reading as the form snapshot: exact names from text nodes that start with one, else unreadable.
-        const names = [...(() => {
-          const found = [];
-          const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
-          for (let item = walker.nextNode(); item; item = walker.nextNode()) {
-            if (!item.parentElement || item.parentElement.closest('script, style, template')
-              || !item.parentElement.getClientRects().length) continue;
-            const text = (item.textContent || '').replace(/\s+/g, ' ').trim();
-            if (!text) continue;
-            const listedItem = Boolean(item.parentElement.closest('[data-automation-id="file-upload-item-name"]'));
-            if (!listedItem && !/[\p{L}\p{N}_)\]-]\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip)(?![\p{L}\p{N}])/iu.test(text)) continue;
-            const lead = listedItem ? [text, text] : text.match(/^(.+\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip))(?:\s+(?:(?:was\s+)?(?:successfully\s+)?(?:uploaded|attached)(?:\s+successfully)?[.!]?))?$/i);
-            found.push(lead ? lead[1] : `(unreadable file name) ${text}`);
-          }
-          return found;
-        })()];
-        if (names.length) { shown = names; break; }
+        const inputs = [...node.querySelectorAll('input[type="file"]')];
+        if (inputs.length > 1) {
+          const others = inputs.filter((other) => other !== input);
+          const regions = others.map((other) => regionOf(other, node));
+          // A shared-area name that another input actually holds (e.g. RoleForge's own CV upload) belongs to it.
+          const heldElsewhere = new Set(others.flatMap((other) => [...(other.files || [])].map((file) => file.name)));
+          return [...new Set(namesIn(node, regions).filter((name) => !heldElsewhere.has(name))
+            .map((name) => `(ambiguous attachment) ${name}`))];
+        }
+        const names = namesIn(node);
+        if (names.length) return [...new Set(names)];
         if (node.matches('[role="dialog"], [role="alertdialog"], dialog, [aria-modal="true"]')) break;
       }
-    }
+      return [];
+    };
+    if (!(input.multiple && held.length === 0)) shown = listedNames(input);
     return [...held, ...shown].find((name) => !same(name)) || null;
   }, expected).catch(() => null);
 }
