@@ -546,19 +546,30 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
     // container shared by several file inputs, a name inside another control's own area belongs to that control; any
     // other listed name cannot be tied to one control and is ambiguous. Unreadable/ambiguous names never equal the
     // bound file, so the upload is withheld for review.
+    // Text-node visibility from its own rects (display:contents wrappers have none, their text does);
+    // display:contents elements are transparent like inline ones.
+    const textShown = (item) => {
+      const range = document.createRange();
+      range.selectNodeContents(item);
+      return range.getClientRects().length > 0;
+    };
+    const inlineLike = (element) => {
+      const display = getComputedStyle(element).display;
+      return display.startsWith('inline') || display === 'contents';
+    };
     const namesIn = (root, skip = [], used = new Set()) => {
       // Text nodes are first joined into tokens: adjacent nodes in the same block element that touch without whitespace
       // (<span>Archived_</span><span>CV.pdf</span>) form one token, so a name is always read whole.
       const blockOf = (element) => {
         let node = element;
-        while (node.parentElement && node !== root && getComputedStyle(node).display.startsWith('inline')) node = node.parentElement;
+        while (node.parentElement && node !== root && inlineLike(node)) node = node.parentElement;
         return node;
       };
       const tokens = [];
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
       for (let item = walker.nextNode(); item; item = walker.nextNode()) {
         const parent = item.parentElement;
-        if (!parent || parent.closest('script, style, template') || !parent.getClientRects().length) continue;
+        if (!parent || parent.closest('script, style, template') || !textShown(item)) continue;
         if (skip.some((region) => region.contains(parent))) continue;
         const raw = item.textContent || '';
         const block = blockOf(parent);
@@ -580,7 +591,7 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
         if (node.nodeType !== Node.ELEMENT_NODE) return true;
         if (skip.some((region) => region === node || region.contains(node) || node.contains(region))) return true;
         if (node.matches('input, textarea, select, button') || node.querySelector('input, textarea, select, button')) return true;
-        if (!getComputedStyle(node).display.startsWith('inline')) return true;
+        if (!inlineLike(node)) return true;
         return !/\S/.test(node.textContent || '');
       };
       const neighbour = (node, block, forward) => {
@@ -589,7 +600,7 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
           // Whitespace, comments and empty inline elements are not neighbours (they never isolate a fragment).
           while (sibling && ((sibling.nodeType === Node.TEXT_NODE && !/\S/.test(sibling.textContent || ''))
             || (sibling.nodeType !== Node.TEXT_NODE && sibling.nodeType !== Node.ELEMENT_NODE)
-            || (sibling.nodeType === Node.ELEMENT_NODE && getComputedStyle(sibling).display.startsWith('inline')
+            || (sibling.nodeType === Node.ELEMENT_NODE && inlineLike(sibling)
               && !/\S/.test(sibling.textContent || '') && !sibling.matches('input, textarea, select, button')
               && !sibling.querySelector('input, textarea, select, button')))) {
             sibling = forward ? sibling.nextSibling : sibling.previousSibling;
@@ -604,9 +615,10 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
       for (const token of tokens) {
         const text = token.raw.replace(/\s+/g, ' ').trim();
         if (!text) continue;
-        // A file name has a letter or digit in its segment before the extension (spaces and dots allowed: "Old CV .pdf");
+        // A file name has a non-separator character right before the extension ("Old CV ().pdf") or a letter or digit in
+        // its segment before it (spaces and dots allowed: "Old CV .pdf");
         // bare type hints (".pdf, .docx", "(.pdf)", "types: .pdf") do not.
-        if (!token.listed && !/(?:^|[,;:(\/])[^,;:(\/]*[\p{L}\p{N}][^,;:(\/]*\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip)(?![\p{L}\p{N}])/iu.test(text)) continue;
+        if (!token.listed && !/(?:[^\s,;:(\/]|(?:^|[,;:(\/])[^,;:(\/]*[\p{L}\p{N}][^,;:(\/]*)\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip)(?![\p{L}\p{N}])/iu.test(text)) continue;
         const lead = token.listed ? [text, text] : text.match(/^(.+\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip))(?:\s+(?:(?:was\s+)?(?:successfully\s+)?(?:uploaded|attached)(?:\s+successfully)?[.!]?))?$/i);
         found.push(lead && isolated(token) ? lead[1] : `(unreadable file name) ${text}`);
         for (const item of token.items) used.add(item);
@@ -620,11 +632,11 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
       for (let item = walker.nextNode(); item; item = walker.nextNode()) {
         const parent = item.parentElement;
-        if (!parent || parent.closest('script, style, template') || !parent.getClientRects().length) continue;
+        if (!parent || parent.closest('script, style, template') || !textShown(item)) continue;
         if (skip.some((region) => region.contains(parent)) || used.has(item)) continue;
         joined += item.textContent || '';
       }
-      return /(?:^|[,;:(\/])[^,;:(\/]*[\p{L}\p{N}][^,;:(\/]*\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip)(?![\p{L}\p{N}])/iu.test(joined);
+      return /(?:[^\s,;:(\/]|(?:^|[,;:(\/])[^,;:(\/]*[\p{L}\p{N}][^,;:(\/]*)\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip)(?![\p{L}\p{N}])/iu.test(joined);
     };
     const regionOf = (other, top) => {
       let region = other;

@@ -812,3 +812,25 @@ test('review-14: a comment between fragments, "Old CV .pdf" and "Old CV..pdf" al
     rmSync(docs.dir, { recursive: true, force: true });
   }
 });
+
+// Regression test for review-15: punctuation before the extension and display:contents wrappers.
+test('review-15: "Old CV ().pdf" and a display:contents name beside an empty input withhold the upload', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    for (const listed of ['<span>Old CV ().pdf</span>', '<span style="display:contents">Old_CV.pdf</span>']) {
+      const page = await servedPage(browser, shell(`<div><h3>Resume</h3><div data-automation-id="resumeUpload">
+        <input type="file" id="cvfile" data-automation-id="file-upload-input-ref"></div><div>${listed}</div></div>
+        <label for="fn">First Name*</label><input id="fn" required><label for="ln">Last Name*</label><input id="ln" required>`,
+      '<button type="submit" data-automation-id="pageFooterNextButton">Save and Continue</button>', progress(3, 6, 'My Experience')),
+      BASE.replace('autofillWithResume', `r15-${listed.length}`));
+      const plan = buildOperationalFormPlan(await inspectOperationalApplicationForm(page), profile, docs.value, { context });
+      assert.equal(plan.actions.some((a) => a.action === 'upload'), false, listed);
+      assert.ok(plan.unresolvedFields.some((row) => row.manualUploadPath === docs.value.cv.resolvedPath), listed);
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});
