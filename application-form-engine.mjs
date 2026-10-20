@@ -874,37 +874,33 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
       if (form && ['pointerdown', 'mousedown', 'touchstart', 'keydown'].includes(event.type)) gestureFormControls.add(control);
       if (!form && !gestureFormControls.has(control)) {
         // A form-less application step (a freshly loaded Workday Review: no fields, no form, "step 6 of 6") has its
-        // final Submit outside any form; block final labels there. Pages with a form keep outside widgets usable.
-        // Decided from the workflow, not from the absence of every form: a Workday flow container or footer always
-        // protects its final button; otherwise a structured step on a page without a visible application form does.
-        // A step counts only as the application's own progress indicator (not in a dialog/tooltip, no controls in its
-        // stepper), and it is form-less unless a form with fields sits in that step's own wizard: an unrelated form
-        // elsewhere on the page (newsletter, search) never lifts the protection.
+        // final Submit outside any form; block final labels there. A Workday flow container or footer always protects
+        // its final button. Any visible structured step keeps final labels outside forms blocked (conservative: a stricter reading of
+        // the stepper never lifts protection) unless the step is verifiably tied to a form of its own: the step sits
+        // inside that form, in the same explicit [data-career-ops-wizard], or the form's parent holds only the form
+        // and the stepper. An unrelated newsletter/account form elsewhere on the page never lifts it.
         const inApplicationFlow = Boolean(control.closest('[data-automation-id="applyFlowPage"], [data-automation-id="pageFooter"]'));
         const shown = (element) => {
           const rect = element.getBoundingClientRect();
           return rect.width > 0 && rect.height > 0;
         };
-        // The step's form must be a workflow form: fields and its own Continue/Next control (a newsletter has neither).
         const formWithFields = (item) => shown(item)
-          && [...item.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]')].some(shown)
-          && [...item.querySelectorAll('button, [role="button"], input[type="submit"], input[type="button"]')]
-            .some((button) => shown(button) && controlLabels(button).some((label) => progressionLabel.test(label)));
-        const applicationStep = (element) => shown(element)
-          && !element.closest('[role="dialog"], [role="alertdialog"], [role="tooltip"], dialog, [aria-modal="true"]')
-          && (element.hasAttribute('data-career-ops-step')
-            || ![...((element.closest('[data-automation-id="progressBar"], ol, ul, nav, [role="list"], [role="tablist"]')
-              || element.parentElement)?.querySelectorAll('button, [role="button"], input, select, textarea') || [])].some(shown));
+          && [...item.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]')].some(shown);
         const stepOwnsForm = (step) => {
-          for (let node = step.parentElement, depth = 0; node && depth < 4 && !['BODY', 'MAIN', 'HTML'].includes(node.tagName);
-            node = node.parentElement, depth += 1) {
-            if ([...node.querySelectorAll('form, [data-career-ops-virtual-form]')].some(formWithFields)) return true;
-          }
-          return false;
+          const forms = [...document.querySelectorAll('form, [data-career-ops-virtual-form]')].filter(formWithFields);
+          const wizard = step.closest('[data-career-ops-wizard]');
+          return forms.some((item) => {
+            if (item.contains(step)) return true;
+            if (wizard) return wizard.contains(item) && [...wizard.querySelectorAll('form, [data-career-ops-virtual-form]')]
+              .filter(formWithFields).length === 1;
+            const parent = item.parentElement;
+            if (!parent || ['BODY', 'MAIN', 'HTML'].includes(parent.tagName) || !parent.contains(step)) return false;
+            return [...parent.children].filter((child) => !['SCRIPT', 'STYLE', 'TEMPLATE'].includes(child.tagName)).length <= 2;
+          });
         };
         const formlessApplicationStep = inApplicationFlow
           || [...document.querySelectorAll('[data-automation-id="progressBarActiveStep"], [aria-current="step"], [data-career-ops-step]')]
-            .some((step) => applicationStep(step) && !stepOwnsForm(step));
+            .some((step) => shown(step) && !stepOwnsForm(step));
         if (formlessApplicationStep && finalToken.test(controlLabels(control).join(' '))) block(event);
         return;
       }
@@ -1455,7 +1451,8 @@ async function differentAttachment(handle, artifact) {
   if (!handle) return null;
   const expected = [...new Set([artifact.intendedFilename, basename(artifact.resolvedPath)].filter(Boolean))];
   return handle.evaluate((input, expected) => {
-    const same = (name) => expected.some((item) => name === item || name.endsWith(` ${item}`));
+    // Exact names only: "Old CV.pdf" is a different file from a bound "CV.pdf".
+    const same = (name) => expected.includes(name);
     const held = [...(input.files || [])].map((file) => file.name);
     let shown = [];
     if (!(input.multiple && held.length === 0)) {

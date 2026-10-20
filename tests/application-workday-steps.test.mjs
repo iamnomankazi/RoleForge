@@ -357,3 +357,72 @@ test('review-02: a header job-search form does not hide a formless application',
     await browser.close();
   }
 });
+
+// Regression tests for the third Sol High review (r261020-005650-cad8 review-03).
+test('review-03: a tour with a Skip link never authorizes a submit-type Continue', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await servedPage(browser, `<div id="wrapper"><div class="tour"><span aria-current="step">Step 1 of 3</span>
+      <a href="#skip">Skip tour</a></div><div id="app"><div>
+      <label for="fn">First Name*</label><input id="fn" required><label for="ln">Last Name*</label><input id="ln" required>
+      <label for="em">Email*</label><input id="em" type="email" required></div>
+      <button type="submit" id="next">Continue</button></div></div>
+      <script>window.advances = 0; next.addEventListener('click', () => { window.advances += 1; });</script>`,
+    'https://careers.example.test/apply/tour-link');
+    const snapshot = await inspectOperationalApplicationForm(page);
+    assert.equal(await page.locator('#wrapper[data-career-ops-virtual-form]').count(), 0);
+    assert.notEqual(classifyApplicationControl(snapshot.controls.find((c) => c.label === 'Continue')), 'progression');
+    await prepareOperationalApplicationForm(page, profile, {}, { context, transitionTimeoutMs: 300, transitionStabilityMs: 0 });
+    assert.equal(await page.evaluate(() => window.advances), 0);
+    await page.close();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('review-03: final Submit stays blocked beside an interactive stepper or a sibling form with its own Continue', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const layouts = {
+      'interactive-stepper': `<div id="page"><nav><button type="button">Back to step 2</button><span aria-current="step">Step 3 of 3: Review</span></nav>
+        <section><h2>Review your application</h2></section><button type="button" id="submit">Submit application</button></div>`,
+      'sibling-account-form': `<div id="page"><ol><li aria-current="step">Step 3 of 3: Review</li></ol>
+        <section><h2>Review your application</h2></section><button type="button" id="submit">Submit application</button>
+        <form><label for="ae">Account email</label><input id="ae" type="email"><button type="button">Continue</button></form></div>`,
+    };
+    for (const [name, html] of Object.entries(layouts)) {
+      const page = await servedPage(browser, `<main>${html}</main>
+        <script>window.submits = 0; submit.addEventListener('click', () => { window.submits += 1; });</script>`,
+      `https://careers.example.test/apply/${name}`);
+      await installSubmissionGuard(page);
+      await page.click('#submit').catch(() => null);
+      assert.equal(await page.evaluate(() => window.submits), 0, name);
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test('review-03: a held file whose name merely ends with the bound filename is never replaced', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    const page = await servedPage(browser, `<form><label for="fn">First name</label><input id="fn" required>
+      <label for="ln">Last name</label><input id="ln" required><label for="em">Email</label><input id="em" type="email" required>
+      <div><span>CV</span><button type="button" id="up" aria-label="Upload CV">+</button></div>
+      <button type="button">Continue</button></form>
+      <div id="dlg" role="dialog" aria-modal="true" style="display:none"><h3>Upload CV</h3><input type="file" id="dlgfile"></div>
+      <script>up.addEventListener('click', () => { dlg.style.display = 'block'; });</script>`,
+    'https://careers.example.test/apply/suffix');
+    await page.setInputFiles('#dlgfile', { name: 'Old Example_CV.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF old') });
+    const { uploadThroughTrigger } = await import('../application-form-engine.mjs');
+    const result = await uploadThroughTrigger(page, { semantic: 'cv_upload', artifact: docs.value.cv });
+    assert.equal(result.status, 'withheld');
+    assert.deepEqual(await page.evaluate(() => [...document.getElementById('dlgfile').files].map((file) => file.name)), ['Old Example_CV.pdf']);
+    await page.close();
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});

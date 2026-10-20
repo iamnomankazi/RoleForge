@@ -492,14 +492,13 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
       if (fields.some((field) => (field.type || '').toLowerCase() === 'file')) return true;
       return fields.length >= 3 && fields.filter((field) => applicantNamed.test(textFor(field))).length >= 2;
     });
-    // A structured step authorizes nothing unless it reads as the application's own progress indicator: not inside a
-    // dialog/tooltip (product tours, onboarding popovers) and its stepper holds no buttons or inputs of its own.
-    const stepperControls = 'button, [role="button"], input, select, textarea';
+    // Only a verified application progress indicator may widen a virtual form or give it identity: Workday's own
+    // progress bar or an explicit step hook. A generic aria-current="step" (product tours, onboarding) never does.
     const applicationStepElement = (element) => visible(element)
       && !element.closest('[role="dialog"], [role="alertdialog"], [role="tooltip"], dialog, [aria-modal="true"]')
       && (element.hasAttribute('data-career-ops-step')
-        || ![...((element.closest('[data-automation-id="progressBar"], ol, ul, nav, [role="list"], [role="tablist"]')
-          || element.parentElement)?.querySelectorAll(stepperControls) || [])].some(visible));
+        || (element.getAttribute('data-automation-id') === 'progressBarActiveStep'
+          && Boolean(element.closest('[data-automation-id="progressBar"]'))));
     if (!realFormHasFields && !document.querySelector('[data-career-ops-virtual-form]')) {
       const loose = [...document.querySelectorAll(fieldSelector)].filter((element) => applicantField(element) && !element.closest('form'));
       if (loose.length >= 3 || loose.some((element) => (element.type || '').toLowerCase() === 'file')) {
