@@ -786,8 +786,13 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
       const label = String(control.getAttribute('aria-label') || control.innerText || control.value || '').replace(/\s+/g, ' ').trim().replace(/\s*&\s*/g, ' & ');
       if (!progressionLabel.test(label) || finalToken.test(controlLabels(control).join(' '))) return false;
       const root = form.closest('[data-career-ops-workflow-id]') || form;
-      const candidates = [...root.querySelectorAll('[data-career-ops-step], [aria-current="step"], [role="progressbar"], .step, .steps, .progress, [data-automation-id="progressBarActiveStep"], [data-automation-id="progressBarActiveStep"] *')];
+      let candidates = [...root.querySelectorAll('[data-career-ops-step], [aria-current="step"], [role="progressbar"], .step, .steps, .progress, [data-automation-id="progressBarActiveStep"], [data-automation-id="progressBarActiveStep"] *')];
       if (root !== form) candidates.push(...[...root.querySelectorAll('*')].filter((element) => !form.contains(element)));
+      // A virtual form progresses only on a verified application step (Workday progress bar or explicit hook).
+      if (form.hasAttribute('data-career-ops-virtual-form')) {
+        candidates = candidates.filter((element) => element.hasAttribute('data-career-ops-step')
+          || Boolean(element.closest('[data-automation-id="progressBarActiveStep"]')?.closest('[data-automation-id="progressBar"]')));
+      }
       for (const element of candidates) {
         if (element.closest('[hidden], [inert], [aria-hidden="true"]')) continue;
         const style = getComputedStyle(element);
@@ -877,8 +882,8 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
         // final Submit outside any form; block final labels there. A Workday flow container or footer always protects
         // its final button. Any visible structured step keeps final labels outside forms blocked (conservative: a stricter reading of
         // the stepper never lifts protection) unless the step is verifiably tied to a form of its own: the step sits
-        // inside that form, in the same explicit [data-career-ops-wizard], or the form's parent holds only the form
-        // and the stepper. An unrelated newsletter/account form elsewhere on the page never lifts it.
+        // inside that form or in the same explicit [data-career-ops-wizard]. An unrelated newsletter/account form
+        // elsewhere on the page never lifts it.
         const inApplicationFlow = Boolean(control.closest('[data-automation-id="applyFlowPage"], [data-automation-id="pageFooter"]'));
         const shown = (element) => {
           const rect = element.getBoundingClientRect();
@@ -891,11 +896,8 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
           const wizard = step.closest('[data-career-ops-wizard]');
           return forms.some((item) => {
             if (item.contains(step)) return true;
-            if (wizard) return wizard.contains(item) && [...wizard.querySelectorAll('form, [data-career-ops-virtual-form]')]
+            return Boolean(wizard) && wizard.contains(item) && [...wizard.querySelectorAll('form, [data-career-ops-virtual-form]')]
               .filter(formWithFields).length === 1;
-            const parent = item.parentElement;
-            if (!parent || ['BODY', 'MAIN', 'HTML'].includes(parent.tagName) || !parent.contains(step)) return false;
-            return [...parent.children].filter((child) => !['SCRIPT', 'STYLE', 'TEMPLATE'].includes(child.tagName)).length <= 2;
           });
         };
         const formlessApplicationStep = inApplicationFlow
@@ -1458,8 +1460,21 @@ async function differentAttachment(handle, artifact) {
     if (!(input.multiple && held.length === 0)) {
       for (let node = input.parentElement, depth = 0; node && depth < 5; node = node.parentElement, depth += 1) {
         if (node.querySelectorAll('input[type="file"]').length > 1) break;
-        const names = (node.innerText || '').match(/[\w()[\] .-]+\.(?:pdf|docx?|rtf|odt|txt)\b/gi);
-        if (names?.length) { shown = names.map((name) => name.trim()); break; }
+        // Same reading as the form snapshot: exact names from text nodes that start with one, else unreadable.
+        const names = [...(() => {
+          const found = [];
+          const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+          for (let item = walker.nextNode(); item; item = walker.nextNode()) {
+            if (!item.parentElement || item.parentElement.closest('script, style, template')
+              || !item.parentElement.getClientRects().length) continue;
+            const text = (item.textContent || '').replace(/\s+/g, ' ').trim();
+            if (!/\.(?:pdf|docx?|rtf|odt|txt)(?![\p{L}\p{N}])/iu.test(text)) continue;
+            const lead = text.match(/^(.+?\.(?:pdf|docx?|rtf|odt|txt))(?=$|\s)/i);
+            found.push(lead ? lead[1] : `(unreadable file name) ${text}`);
+          }
+          return found;
+        })()];
+        if (names.length) { shown = names; break; }
         if (node.matches('[role="dialog"], [role="alertdialog"], dialog, [aria-modal="true"]')) break;
       }
     }

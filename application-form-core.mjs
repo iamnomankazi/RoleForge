@@ -497,8 +497,8 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
     const applicationStepElement = (element) => visible(element)
       && !element.closest('[role="dialog"], [role="alertdialog"], [role="tooltip"], dialog, [aria-modal="true"]')
       && (element.hasAttribute('data-career-ops-step')
-        || (element.getAttribute('data-automation-id') === 'progressBarActiveStep'
-          && Boolean(element.closest('[data-automation-id="progressBar"]'))));
+        || Boolean(element.closest('[data-automation-id="progressBarActiveStep"]')?.closest('[data-automation-id="progressBar"]')));
+    const isVirtualForm = (element) => Boolean(element?.hasAttribute?.('data-career-ops-virtual-form'));
     if (!realFormHasFields && !document.querySelector('[data-career-ops-virtual-form]')) {
       const loose = [...document.querySelectorAll(fieldSelector)].filter((element) => applicantField(element) && !element.closest('form'));
       if (loose.length >= 3 || loose.some((element) => (element.type || '').toLowerCase() === 'file')) {
@@ -592,8 +592,22 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
             // Files an ATS lists next to its upload control (Workday shows them; the input itself stays empty).
             for (let node = element.parentElement, depth = 0; node && depth < 5; node = node.parentElement, depth += 1) {
               if (node.querySelectorAll('input[type="file"]').length > 1) break;
-              const names = (node.innerText || '').match(/[\w()[\] .-]+\.(?:pdf|docx?|rtf|odt|txt)\b/gi);
-              if (names?.length) return [...new Set(names.map((name) => name.trim()))];
+              // Read per text node: one that starts with a file name ("X.pdf", "X.pdf successfully uploaded") gives
+              // that exact name; any other mention of a document is unreadable and never equals the bound file.
+              const names = [...(() => {
+                const found = [];
+                const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+                for (let item = walker.nextNode(); item; item = walker.nextNode()) {
+                  if (!item.parentElement || item.parentElement.closest('script, style, template')
+                    || !item.parentElement.getClientRects().length) continue;
+                  const text = (item.textContent || '').replace(/\s+/g, ' ').trim();
+                  if (!/\.(?:pdf|docx?|rtf|odt|txt)(?![\p{L}\p{N}])/iu.test(text)) continue;
+                  const lead = text.match(/^(.+?\.(?:pdf|docx?|rtf|odt|txt))(?=$|\s)/i);
+                  found.push(lead ? lead[1] : `(unreadable file name) ${text}`);
+                }
+                return found;
+              })()];
+              if (names.length) return [...new Set(names)];
             }
             return [];
           })() : [],
@@ -617,6 +631,8 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
     };
     const localWorkflowAssociation = (form) => {
       const explicit = form.closest('[data-career-ops-wizard]');
+      // A virtual form's step evidence comes only from verified application steps (never a nearby "Step 1 of 3").
+      if (isVirtualForm(form) && !explicit) return null;
       if (explicit && visible(explicit)) {
         const competing = [...explicit.querySelectorAll('form')].filter((item) => item !== form && visible(item));
         if (!competing.length) {
@@ -657,8 +673,10 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
       const formApplicationContext = /\b(?:application|candidate|privacy|data notice|certif(?:y|ication)|resume|\bcv\b|cover letter|work authori[sz]|sponsor)\b/i.test(visibleText);
       const workflowAssociation = workflowAssociations.get(form);
       const structurallyAssociated = Boolean(workflowAssociation);
-      const hasFormStepEvidence = [...form.querySelectorAll('[data-career-ops-step], [aria-current="step"], [data-automation-id="progressBarActiveStep"], [data-automation-id="progressBarActiveStep"] *')].some(visible)
-        || /\b(?:step|page)\s*\d+\s+(?:of|\/)\s+\d+(?!\d)/i.test(visibleText);
+      const hasFormStepEvidence = isVirtualForm(form)
+        ? [...form.querySelectorAll('[data-career-ops-step], [data-automation-id="progressBarActiveStep"], [data-automation-id="progressBarActiveStep"] *')].some(applicationStepElement)
+        : [...form.querySelectorAll('[data-career-ops-step], [aria-current="step"], [data-automation-id="progressBarActiveStep"], [data-automation-id="progressBarActiveStep"] *')].some(visible)
+          || /\b(?:step|page)\s*\d+\s+(?:of|\/)\s+\d+(?!\d)/i.test(visibleText);
       const independentApplicationIdentity = hasApplicationAction
         || (applicationSpecificSignals > 0 && (hasTerminalAction || structurallyAssociated || hasFormStepEvidence))
         || (formApplicationContext && hasTerminalAction)
@@ -685,7 +703,7 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
     const applicationWorkflowId = applicationWizard?.getAttribute('data-career-ops-workflow-id') || applicationFormId;
     for (const field of fields) field.applicationFormOwned = Boolean(applicationFormId && field.formId === applicationFormId);
     const parseStep = (root, selector) => {
-      const candidates = [...root.querySelectorAll(selector)].filter(visible);
+      const candidates = [...root.querySelectorAll(selector)].filter(isVirtualForm(root) ? applicationStepElement : visible);
       for (const element of candidates) {
         const step = stepFromElement(element);
         if (step) return step;
