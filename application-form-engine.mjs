@@ -1476,7 +1476,7 @@ async function differentAttachment(handle, artifact) {
     // container shared by several file inputs, a name inside another control's own area belongs to that control; any
     // other listed name cannot be tied to one control and is ambiguous. Unreadable/ambiguous names never equal the
     // bound file, so the upload is withheld for review.
-    const namesIn = (root, skip = []) => {
+    const namesIn = (root, skip = [], used = new Set()) => {
       const found = [];
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
       for (let item = walker.nextNode(); item; item = walker.nextNode()) {
@@ -1490,18 +1490,19 @@ async function differentAttachment(handle, artifact) {
         if (!listedItem && !/[^\s,;:(\/.]\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip)(?![\p{L}\p{N}])/iu.test(text)) continue;
         const lead = listedItem ? [text, text] : text.match(/^(.+\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip))(?:\s+(?:(?:was\s+)?(?:successfully\s+)?(?:uploaded|attached)(?:\s+successfully)?[.!]?))?$/i);
         found.push(lead ? lead[1] : `(unreadable file name) ${text}`);
+        used.add(item);
       }
       return found;
     };
     // A file name split across elements (<span>Name</span><span>.pdf</span>) is caught on the joined text of the
     // visible text nodes; when the per-node reading found nothing, it is unreadable and withholds the upload.
-    const joinedHasFile = (root, skip = []) => {
+    const joinedHasFile = (root, skip = [], used = new Set()) => {
       let joined = '';
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
       for (let item = walker.nextNode(); item; item = walker.nextNode()) {
         const parent = item.parentElement;
         if (!parent || parent.closest('script, style, template') || !parent.getClientRects().length) continue;
-        if (skip.some((region) => region.contains(parent))) continue;
+        if (skip.some((region) => region.contains(parent)) || used.has(item)) continue;
         joined += item.textContent || '';
       }
       return /[^\s,;:(\/.]\.(?:pdf|docx?|rtf|odt|ott|txt|html?|pages|md|png|jpe?g|gif|tiff?|xlsx?|pptx?|zip)(?![\p{L}\p{N}])/iu.test(joined);
@@ -1520,13 +1521,14 @@ async function differentAttachment(handle, artifact) {
           const regions = others.map((other) => regionOf(other, node));
           // A shared-area name that another input actually holds (e.g. RoleForge's own CV upload) belongs to it.
           const heldElsewhere = new Set(others.flatMap((other) => [...(other.files || [])].map((file) => file.name)));
-          const sharedNames = namesIn(node, regions).filter((name) => !heldElsewhere.has(name));
-          if (!sharedNames.length && joinedHasFile(node, regions)) return ['(ambiguous attachment) (unreadable file name)'];
-          return [...new Set(sharedNames.map((name) => `(ambiguous attachment) ${name}`))];
+          const used = new Set();
+          const sharedNames = namesIn(node, regions, used).filter((name) => !heldElsewhere.has(name));
+          const split = joinedHasFile(node, regions, used) ? ['(unreadable file name)'] : [];
+          return [...new Set([...sharedNames, ...split].map((name) => `(ambiguous attachment) ${name}`))];
         }
-        const names = namesIn(node);
+        const used = new Set();
+        const names = [...namesIn(node, [], used), ...(joinedHasFile(node, [], used) ? ['(unreadable file name)'] : [])];
         if (names.length) return [...new Set(names)];
-        if (joinedHasFile(node)) return ['(unreadable file name)'];
         if (node.matches('[role="dialog"], [role="alertdialog"], dialog, [aria-modal="true"]')) break;
       }
       return [];

@@ -713,3 +713,23 @@ test('review-10: "<span>Other_Resume</span><span>.pdf</span>" beside an empty in
     rmSync(docs.dir, { recursive: true, force: true });
   }
 });
+
+// Review-10 follow-up: a readable bound name does not hide a split name beside it; consumed names are not re-read.
+test('review-10: a split file name next to the bound file name still withholds the upload', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    const page = await servedPage(browser, shell(`<div><h3>Resume</h3><div data-automation-id="resumeUpload">
+      <input type="file" id="cvfile" data-automation-id="file-upload-input-ref"></div>
+      <div><span>Example_CV.pdf</span></div><div><span>Other_Resume</span><span>.pdf</span></div></div>
+      <label for="fn">First Name*</label><input id="fn" required><label for="ln">Last Name*</label><input id="ln" required>`,
+    '<button type="submit" data-automation-id="pageFooterNextButton">Save and Continue</button>', progress(3, 6, 'My Experience')),
+    BASE.replace('autofillWithResume', 'split-mixed'));
+    const snapshot = await inspectOperationalApplicationForm(page);
+    assert.deepEqual(snapshot.fields.find((field) => field.type === 'file').attachedNames, ['Example_CV.pdf', '(unreadable file name)']);
+    await page.close();
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});
