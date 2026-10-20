@@ -599,3 +599,21 @@ test('review-06: an existing HTML or extensionless Workday attachment is never r
     rmSync(docs.dir, { recursive: true, force: true });
   }
 });
+
+// Regression test for review-07: plain step text keeps blocking final buttons on a form-less page.
+test('review-07: plain "Step 3 of 3" text on a form-less page keeps the final button blocked', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await servedPage(browser, `<p>Step 3 of 3: Review</p>
+      <button type="button" id="submit" onclick="window.submits++">Submit application</button>
+      <script>window.submits = 0;</script>`, 'https://careers.example.test/apply/text-step');
+    await installSubmissionGuard(page);
+    await page.click('#submit').catch(() => null);
+    await page.focus('#submit').catch(() => null);
+    await page.keyboard.press('Enter').catch(() => null);
+    assert.equal(await page.evaluate(() => window.submits), 0);
+    await page.close();
+  } finally {
+    await browser.close();
+  }
+});

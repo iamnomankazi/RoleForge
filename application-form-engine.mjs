@@ -902,8 +902,14 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
           return Boolean(wizard) && !insideWizard(wizard) && forms.some((item) => wizard.contains(item))
             && [...wizard.querySelectorAll('form, [data-career-ops-virtual-form]')].filter(formWithFields).length === 1;
         };
+        // Plain "Step 3 of 3" text also counts here (blocking only; progression still needs verified structure).
+        const textSteps = [];
+        const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+        for (let item = walker.nextNode(); item; item = walker.nextNode()) {
+          if (item.parentElement && /\b(?:step|page)\s*\d+\s+(?:of|\/)\s+\d+(?!\d)/i.test(item.textContent || '')) textSteps.push(item.parentElement);
+        }
         const formlessApplicationStep = inApplicationFlow
-          || [...document.querySelectorAll('[data-automation-id="progressBarActiveStep"], [aria-current="step"], [data-career-ops-step]')]
+          || [...document.querySelectorAll('[data-automation-id="progressBarActiveStep"], [aria-current="step"], [data-career-ops-step]'), ...textSteps]
             .some((step) => shown(step) && !stepOwnsForm(step));
         if (formlessApplicationStep && finalToken.test(controlLabels(control).join(' '))) block(event);
         return;
