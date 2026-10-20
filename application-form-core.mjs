@@ -602,7 +602,7 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
                     || !item.parentElement.getClientRects().length) continue;
                   const text = (item.textContent || '').replace(/\s+/g, ' ').trim();
                   if (!/\.(?:pdf|docx?|rtf|odt|txt)(?![\p{L}\p{N}])/iu.test(text)) continue;
-                  const lead = text.match(/^(.+?\.(?:pdf|docx?|rtf|odt|txt))(?=$|\s)/i);
+                  const lead = text.match(/^(.+\.(?:pdf|docx?|rtf|odt|txt))(?:\s+(?:(?:was\s+)?(?:successfully\s+)?(?:uploaded|attached)(?:\s+successfully)?[.!]?))?$/i);
                   found.push(lead ? lead[1] : `(unreadable file name) ${text}`);
                 }
                 return found;

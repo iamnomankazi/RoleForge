@@ -497,3 +497,58 @@ test('review-04: a listed non-ASCII file name is never mistaken for the bound fi
     rmSync(docs.dir, { recursive: true, force: true });
   }
 });
+
+// Regression tests for the fifth Sol High review (r261020-005650-cad8 review-05).
+test('review-05: a stepper inside a form never releases a final button rendered outside it', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    for (const container of ['<div data-career-ops-virtual-form="1">', '<form>']) {
+      const close = container.startsWith('<form') ? '</form>' : '</div>';
+      const page = await servedPage(browser, `<main>${container}<ol><li aria-current="step">Step 3 of 3: Review</li></ol>
+        <label for="ro">Email</label><input id="ro" readonly value="alex@example.test">${close}
+        <button type="button" id="submit">Submit application</button></main>
+        <script>window.submits = 0; submit.addEventListener('click', () => { window.submits += 1; });</script>`,
+      `https://careers.example.test/apply/outside-${close.length}`);
+      await installSubmissionGuard(page);
+      await page.click('#submit').catch(() => null);
+      assert.equal(await page.evaluate(() => window.submits), 0, container);
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test('review-05: a listed name that only starts with the bound filename is a different file', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    const page = await servedPage(browser, shell(`<div><h3>Resume</h3><div data-automation-id="resumeUpload">
+      <input type="file" id="cvfile" data-automation-id="file-upload-input-ref"></div><div><span>Example_CV.pdf old.pdf</span></div></div>
+      <label for="fn">First Name*</label><input id="fn" required><label for="ln">Last Name*</label><input id="ln" required>`,
+    '<button type="submit" data-automation-id="pageFooterNextButton">Save and Continue</button>', progress(3, 6, 'My Experience')),
+    BASE.replace('autofillWithResume', 'prefix'));
+    const plan = buildOperationalFormPlan(await inspectOperationalApplicationForm(page), profile, docs.value, { context });
+    assert.equal(plan.actions.some((a) => a.action === 'upload'), false);
+    assert.equal(plan.actions.some((a) => a.preserved && a.semantic === 'cv_upload'), false);
+    assert.ok(plan.unresolvedFields.some((row) => row.manualUploadPath === docs.value.cv.resolvedPath));
+    await page.close();
+
+    const dialog = await servedPage(browser, `<form><label for="fn">First name</label><input id="fn" required>
+      <label for="ln">Last name</label><input id="ln" required><label for="em">Email</label><input id="em" type="email" required>
+      <div><span>CV</span><button type="button" id="up" aria-label="Upload CV">+</button></div>
+      <button type="button">Continue</button></form>
+      <div id="dlg" role="dialog" aria-modal="true" style="display:none"><h3>Upload CV</h3>
+      <div><input type="file" id="dlgfile"><span>Example_CV.pdf old.pdf</span></div></div>
+      <script>up.addEventListener('click', () => { dlg.style.display = 'block'; });</script>`,
+    'https://careers.example.test/apply/prefix-dialog');
+    const { uploadThroughTrigger } = await import('../application-form-engine.mjs');
+    const result = await uploadThroughTrigger(dialog, { semantic: 'cv_upload', artifact: docs.value.cv });
+    assert.equal(result.status, 'withheld');
+    assert.equal(await dialog.evaluate(() => document.getElementById('dlgfile').files.length), 0);
+    await dialog.close();
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});
