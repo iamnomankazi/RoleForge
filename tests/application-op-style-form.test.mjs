@@ -241,7 +241,8 @@ test('a required cover-letter text box receives the approved letter, which then 
     <label for="cl">Cover letter*</label><textarea id="cl" required></textarea>
     <button type="submit">Submit application</button></form>`);
   const letter = 'Dear Example team,\n\nI am applying for the role.\n\nKind regards,\nAlex Example';
-  const result = await prepareOperationalApplicationForm(page, profile, { ...artifacts, coverLetterTextContent: letter }, { context });
+  const binding = { coverLetterText: { sha256: createHash('sha256').update(letter, 'utf8').digest('hex') } };
+  const result = await prepareOperationalApplicationForm(page, profile, { ...artifacts, ...binding, coverLetterTextContent: letter }, { context });
   assert.equal(await page.inputValue('#cl'), letter);
   assert.ok(result.evidence.uploadedArtifacts.some((row) => row.sha256 === artifacts.cv.sha256));
   assert.equal(result.evidence.unresolvedFields.some((row) => /cover_letter/.test(row.semantic)), false);
@@ -264,5 +265,19 @@ test('a formless (Ashby/Workday-style) application page is filled, uploads attac
   assert.equal(result.evidence.finalAction.detected, true);
   assert.equal(result.evidence.finalAction.activated, false);
   assert.equal(await page.evaluate(() => window.submits || 0), 0);
+  await page.close();
+});
+
+test('cover-letter text that is not the hash-bound approved letter is never pasted without provenance', async () => {
+  const page = await browser.newPage();
+  await page.setContent(`<form><label for="fn">First name</label><input id="fn" required>
+    <label for="ln">Last name</label><input id="ln" required><label for="em">Email</label><input id="em" type="email" required>
+    <label for="cl">Cover letter*</label><textarea id="cl" required></textarea>
+    <button type="submit">Submit application</button></form>`);
+  const letter = 'Dear Example team,\n\nI owned an unsupported global platform.\n\nKind regards,\nAlex Example';
+  const binding = { coverLetterText: { sha256: createHash('sha256').update('a different approved letter', 'utf8').digest('hex') } };
+  const result = await prepareOperationalApplicationForm(page, profile, { ...artifacts, ...binding, coverLetterTextContent: letter }, { context });
+  assert.equal(await page.inputValue('#cl'), '');
+  assert.ok(result.evidence.unresolvedFields.some((row) => row.semantic === 'cover_letter_text'));
   await page.close();
 });

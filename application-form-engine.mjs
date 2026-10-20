@@ -28,6 +28,7 @@ import {
   stableFieldIdentity,
   validatePlannedValueForControl,
 } from './application-form-policy.mjs';
+import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
 import { validateNarrativeProvenanceRecord } from './application-evidence.mjs';
 import {
@@ -349,9 +350,15 @@ function answerForField(field, semantics, profile, snapshot, artifacts, context,
         throw new Error('Bound cover letter contains an unresolved placeholder');
       }
       const provenance = artifacts.coverLetterTextProvenance;
-      // The approved, claim-checked letter is bound by hash; it is pasted as-is. A provenance record, when the
-      // binding carries one, is still validated.
-      if (!provenance) return { value: artifacts.coverLetterTextContent, answerRecord: null };
+      // The approved, claim-checked letter is bound by hash and pasted as-is; text without a provenance record is
+      // used only when it is exactly that bound artifact. A provenance record, when present, is still validated.
+      if (!provenance) {
+        const bound = String(artifacts.coverLetterText?.sha256 || '').replace(/^sha256:/, '');
+        if (!bound || createHash('sha256').update(artifacts.coverLetterTextContent, 'utf8').digest('hex') !== bound) {
+          throw new Error('Bound cover letter text has no factual provenance');
+        }
+        return { value: artifacts.coverLetterTextContent, answerRecord: null };
+      }
       validateNarrativeProvenanceRecord(profile, provenance, {
         candidateId: cleanFormText(context?.candidate?.candidate_id || context?.candidate?.candidateId),
         normalizedQuestion: provenance.normalizedQuestion,
@@ -870,15 +877,34 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
         // final Submit outside any form; block final labels there. Pages with a form keep outside widgets usable.
         // Decided from the workflow, not from the absence of every form: a Workday flow container or footer always
         // protects its final button; otherwise a structured step on a page without a visible application form does.
+        // A step counts only as the application's own progress indicator (not in a dialog/tooltip, no controls in its
+        // stepper), and it is form-less unless a form with fields sits in that step's own wizard: an unrelated form
+        // elsewhere on the page (newsletter, search) never lifts the protection.
         const inApplicationFlow = Boolean(control.closest('[data-automation-id="applyFlowPage"], [data-automation-id="pageFooter"]'));
-        const visibleApplicationForm = [...document.querySelectorAll('form, [data-career-ops-virtual-form]')].some((item) => {
-          const rect = item.getBoundingClientRect();
-          return rect.width > 0 && rect.height > 0
-            && item.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]').length > 0;
-        });
-        const formlessApplicationStep = inApplicationFlow || (!visibleApplicationForm
-          && [...document.querySelectorAll('[data-automation-id="progressBarActiveStep"], [aria-current="step"], [data-career-ops-step]')]
-            .some((element) => element.getBoundingClientRect().width > 0));
+        const shown = (element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        // The step's form must be a workflow form: fields and its own Continue/Next control (a newsletter has neither).
+        const formWithFields = (item) => shown(item)
+          && [...item.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]')].some(shown)
+          && [...item.querySelectorAll('button, [role="button"], input[type="submit"], input[type="button"]')]
+            .some((button) => shown(button) && controlLabels(button).some((label) => progressionLabel.test(label)));
+        const applicationStep = (element) => shown(element)
+          && !element.closest('[role="dialog"], [role="alertdialog"], [role="tooltip"], dialog, [aria-modal="true"]')
+          && (element.hasAttribute('data-career-ops-step')
+            || ![...((element.closest('[data-automation-id="progressBar"], ol, ul, nav, [role="list"], [role="tablist"]')
+              || element.parentElement)?.querySelectorAll('button, [role="button"], input, select, textarea') || [])].some(shown));
+        const stepOwnsForm = (step) => {
+          for (let node = step.parentElement, depth = 0; node && depth < 4 && !['BODY', 'MAIN', 'HTML'].includes(node.tagName);
+            node = node.parentElement, depth += 1) {
+            if ([...node.querySelectorAll('form, [data-career-ops-virtual-form]')].some(formWithFields)) return true;
+          }
+          return false;
+        };
+        const formlessApplicationStep = inApplicationFlow
+          || [...document.querySelectorAll('[data-automation-id="progressBarActiveStep"], [aria-current="step"], [data-career-ops-step]')]
+            .some((step) => applicationStep(step) && !stepOwnsForm(step));
         if (formlessApplicationStep && finalToken.test(controlLabels(control).join(' '))) block(event);
         return;
       }
@@ -1423,6 +1449,34 @@ async function attachmentVerified(page, artifact) {
   }, names);
 }
 
+// The file an input already holds, or the ATS lists next to it, when it is not the bound document. Checked on the
+// actual chooser/dialog input right before every trigger upload, since setFiles replaces whatever was selected.
+async function differentAttachment(handle, artifact) {
+  if (!handle) return null;
+  const expected = [...new Set([artifact.intendedFilename, basename(artifact.resolvedPath)].filter(Boolean))];
+  return handle.evaluate((input, expected) => {
+    const same = (name) => expected.some((item) => name === item || name.endsWith(` ${item}`));
+    const held = [...(input.files || [])].map((file) => file.name);
+    let shown = [];
+    if (!(input.multiple && held.length === 0)) {
+      for (let node = input.parentElement, depth = 0; node && depth < 5; node = node.parentElement, depth += 1) {
+        if (node.querySelectorAll('input[type="file"]').length > 1) break;
+        const names = (node.innerText || '').match(/[\w()[\] .-]+\.(?:pdf|docx?|rtf|odt|txt)\b/gi);
+        if (names?.length) { shown = names.map((name) => name.trim()); break; }
+        if (node.matches('[role="dialog"], [role="alertdialog"], dialog, [aria-modal="true"]')) break;
+      }
+    }
+    return [...held, ...shown].find((name) => !same(name)) || null;
+  }, expected).catch(() => null);
+}
+
+function withheldUpload(doc, name) {
+  return {
+    status: 'withheld',
+    reason: `A different file is already attached here (${name}); RoleForge did not replace it. Review it; the bound file is ${doc.artifact.resolvedPath}`,
+  };
+}
+
 export async function uploadThroughTrigger(page, doc, { applicationFormId = null, timeoutMs = 15000 } = {}) {
   const triggerIds = await page.evaluate(stampUploadTriggers, {
     semantic: doc.semantic, applicationFormId, finalTokenSource: FINAL_TOKEN.source, finalTokenFlags: FINAL_TOKEN.flags,
@@ -1439,6 +1493,11 @@ export async function uploadThroughTrigger(page, doc, { applicationFormId = null
     let fileChooser = await chooser;
     let attached = false;
     if (fileChooser) {
+      const other = await differentAttachment(fileChooser.element(), doc.artifact);
+      if (other) {
+        if (await openModal(page)) await page.keyboard.press('Escape').catch(() => null);
+        return withheldUpload(doc, other);
+      }
       await fileChooser.setFiles(path);
       attached = true;
     } else {
@@ -1448,6 +1507,11 @@ export async function uploadThroughTrigger(page, doc, { applicationFormId = null
         ? modal.locator('input[type="file"]')
         : page.locator('input[type="file"]:not([data-career-ops-preexisting-file])');
       if (await inputs.count() === 1) {
+        const other = await differentAttachment(await inputs.elementHandle(), doc.artifact);
+        if (other) {
+          if (modal) await page.keyboard.press('Escape').catch(() => null);
+          return withheldUpload(doc, other);
+        }
         await inputs.setInputFiles(path);
         attached = true;
       } else if (modal) {
@@ -1457,6 +1521,11 @@ export async function uploadThroughTrigger(page, doc, { applicationFormId = null
           chooser = page.waitForEvent('filechooser', { timeout: 3000 }).catch(() => null);
           await browse.first().click({ timeout: 5000 }).catch(() => null);
           fileChooser = await chooser;
+          const other = fileChooser ? await differentAttachment(fileChooser.element(), doc.artifact) : null;
+          if (other) {
+            await page.keyboard.press('Escape').catch(() => null);
+            return withheldUpload(doc, other);
+          }
           if (fileChooser) {
             await fileChooser.setFiles(path);
             attached = true;

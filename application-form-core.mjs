@@ -483,12 +483,23 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
     const fieldSelector = 'input, textarea, select, [role="combobox"]';
     const applicantField = (element) => visible(element)
       && !['hidden', 'submit', 'button', 'reset', 'image', 'search'].includes((element.type || '').toLowerCase());
-    // Only a real form that looks like an application suppresses discovery (a newsletter email box does not).
+    // Only a real form that looks like an application suppresses discovery (a newsletter box or a header job
+    // search with keyword/location/department fields does not): applicant-named fields or a file input.
+    const applicantNamed = /(?:first.?name|last.?name|full.?name|e-?mail|phone|linkedin|resume|r[ée]sum[ée]|\bcv\b|cover letter)/i;
     const realFormHasFields = [...document.querySelectorAll('form')].some((form) => {
       if (!visible(form)) return false;
       const fields = [...form.querySelectorAll(fieldSelector)].filter(applicantField);
-      return fields.length >= 3 || fields.some((field) => (field.type || '').toLowerCase() === 'file');
+      if (fields.some((field) => (field.type || '').toLowerCase() === 'file')) return true;
+      return fields.length >= 3 && fields.filter((field) => applicantNamed.test(textFor(field))).length >= 2;
     });
+    // A structured step authorizes nothing unless it reads as the application's own progress indicator: not inside a
+    // dialog/tooltip (product tours, onboarding popovers) and its stepper holds no buttons or inputs of its own.
+    const stepperControls = 'button, [role="button"], input, select, textarea';
+    const applicationStepElement = (element) => visible(element)
+      && !element.closest('[role="dialog"], [role="alertdialog"], [role="tooltip"], dialog, [aria-modal="true"]')
+      && (element.hasAttribute('data-career-ops-step')
+        || ![...((element.closest('[data-automation-id="progressBar"], ol, ul, nav, [role="list"], [role="tablist"]')
+          || element.parentElement)?.querySelectorAll(stepperControls) || [])].some(visible));
     if (!realFormHasFields && !document.querySelector('[data-career-ops-virtual-form]')) {
       const loose = [...document.querySelectorAll(fieldSelector)].filter((element) => applicantField(element) && !element.closest('form'));
       if (loose.length >= 3 || loose.some((element) => (element.type || '').toLowerCase() === 'file')) {
@@ -501,7 +512,7 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
         // Include the workflow's step indicator when it sits just above (Workday: progress bar in applyFlowPage).
         // Only a structured step element counts (not any "step 2 of 3" text elsewhere on the page).
         const structuredStep = '[data-automation-id="progressBarActiveStep"], [aria-current="step"], [data-career-ops-step]';
-        const hasStep = (root) => [...(root?.querySelectorAll(structuredStep) || [])].some(visible);
+        const hasStep = (root) => [...(root?.querySelectorAll(structuredStep) || [])].some(applicationStepElement);
         if (container && !hasStep(container)) {
           let ancestor = container.parentElement;
           for (let depth = 0; ancestor && depth < 3 && !hasStep(ancestor); depth += 1) ancestor = ancestor.parentElement;
@@ -655,7 +666,7 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
         // A virtual form exists only on a form-less page with applicant fields and a submit-like control; inside a
         // numbered application workflow (Workday "step 3 of 6") that is the application.
         || (form.hasAttribute('data-career-ops-virtual-form')
-          && [...form.querySelectorAll('[data-automation-id="progressBarActiveStep"], [aria-current="step"], [data-career-ops-step]')].some(visible));
+          && [...form.querySelectorAll('[data-automation-id="progressBarActiveStep"], [aria-current="step"], [data-career-ops-step]')].some(applicationStepElement));
       const associationBonus = structurallyAssociated || hasFormStepEvidence || hasApplicationAction ? 100 : 0;
       return {
         form,

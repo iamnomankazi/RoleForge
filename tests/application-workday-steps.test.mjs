@@ -270,3 +270,90 @@ test('review P2s: Workday Autofill counts as the reached form; an unrelated news
     await browser.close();
   }
 });
+
+// Regression tests for the second Sol High review (r261020-005650-cad8 review-02).
+test('review-02: a product-tour stepper never authorizes progression of a formless application', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    for (const tour of [
+      '<div class="tour"><span aria-current="step">Step 1 of 3</span><button type="button">Skip tour</button></div>',
+      '<div role="dialog" aria-label="Welcome tour"><span aria-current="step">Step 1 of 3</span></div>',
+    ]) {
+      const page = await servedPage(browser, `<div id="wrapper">${tour}<div id="app"><div>
+        <label for="fn">First Name*</label><input id="fn" required><label for="ln">Last Name*</label><input id="ln" required>
+        <label for="em">Email*</label><input id="em" type="email" required></div>
+        <button type="button" id="next">Continue</button></div></div>
+        <script>window.advances = 0; next.addEventListener('click', () => { window.advances += 1; });</script>`,
+      'https://careers.example.test/apply/tour');
+      const snapshot = await inspectOperationalApplicationForm(page);
+      assert.equal(await page.locator('#wrapper[data-career-ops-virtual-form]').count(), 0, 'virtual form not expanded to the tour');
+      assert.notEqual(classifyApplicationControl(snapshot.controls.find((c) => c.label === 'Continue')), 'progression');
+      await prepareOperationalApplicationForm(page, profile, {}, { context, transitionTimeoutMs: 300, transitionStabilityMs: 0 });
+      assert.equal(await page.evaluate(() => window.advances), 0);
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test('review-02: an unrelated newsletter form never lifts final-button protection on a structured review step', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    for (const layout of ['footer', 'same-wrapper']) {
+      const newsletter = '<form><label for="nl">Newsletter email</label><input id="nl" type="email"><button type="submit">Subscribe</button></form>';
+      const page = await servedPage(browser, `<main><div id="page"><ol><li aria-current="step">Step 3 of 3: Review</li></ol>
+        <section><h2>Review your application</h2></section>
+        <button type="button" id="submit">Submit application</button>${layout === 'same-wrapper' ? newsletter : ''}</div></main>
+        ${layout === 'footer' ? `<footer>${newsletter}</footer>` : ''}
+        <script>window.submits = 0; submit.addEventListener('click', () => { window.submits += 1; });</script>`,
+      `https://careers.example.test/apply/review-${layout}`);
+      await installSubmissionGuard(page);
+      await page.click('#submit').catch(() => null);
+      assert.equal(await page.evaluate(() => window.submits), 0, layout);
+      await page.close();
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test('review-02: a trigger-opened dialog input already holding a different file is never replaced', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    const page = await servedPage(browser, `<form><label for="fn">First name</label><input id="fn" required>
+      <label for="ln">Last name</label><input id="ln" required><label for="em">Email</label><input id="em" type="email" required>
+      <div><span>CV</span><button type="button" id="up" aria-label="Upload CV">+</button></div>
+      <button type="button">Continue</button></form>
+      <div id="dlg" role="dialog" aria-modal="true" style="display:none"><h3>Upload CV</h3><input type="file" id="dlgfile"></div>
+      <script>up.addEventListener('click', () => { dlg.style.display = 'block'; });</script>`,
+    'https://careers.example.test/apply/dialog');
+    await page.setInputFiles('#dlgfile', { name: 'Other.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF other') });
+    const { uploadThroughTrigger } = await import('../application-form-engine.mjs');
+    const result = await uploadThroughTrigger(page, { semantic: 'cv_upload', artifact: docs.value.cv });
+    assert.equal(result.status, 'withheld');
+    assert.match(result.reason, /Other\.pdf/);
+    assert.deepEqual(await page.evaluate(() => [...document.getElementById('dlgfile').files].map((file) => file.name)), ['Other.pdf']);
+    await page.close();
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});
+
+test('review-02: a header job-search form does not hide a formless application', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await servedPage(browser, `<header><form role="search"><input aria-label="Keyword"><input aria-label="Location">
+      <select aria-label="Department"><option>All</option></select><button>Search</button></form></header>
+      ${shell(infoStep, '<button type="submit" data-automation-id="pageFooterNextButton">Save and Continue</button>', progress(2, 6, 'My Information'))}`,
+    BASE.replace('autofillWithResume', 'search'));
+    const snapshot = await inspectOperationalApplicationForm(page);
+    assert.equal(await page.locator('[data-career-ops-virtual-form]').count(), 1);
+    assert.ok(snapshot.fields.filter((field) => field.applicationFormOwned).length >= 3);
+    await page.close();
+  } finally {
+    await browser.close();
+  }
+});
