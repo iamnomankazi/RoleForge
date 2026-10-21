@@ -401,7 +401,22 @@ function selectArtifact(artifacts, semantic) {
   return null;
 }
 
+// Workday can navigate (URL change, re-render of the document) while a step is being read; a read interrupted by
+// that navigation is repeated on the new document instead of failing the pass.
 export async function inspectOperationalApplicationForm(page) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await inspectOperationalApplicationFormOnce(page);
+    } catch (error) {
+      const navigated = /Execution context was destroyed|Cannot find context with specified id|navigation/i.test(String(error?.message));
+      if (!navigated || attempt >= 4 || page.isClosed()) throw error;
+      await page.waitForLoadState('domcontentloaded', { timeout: 10_000 }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {});
+    }
+  }
+}
+
+async function inspectOperationalApplicationFormOnce(page) {
   const snapshot = await inspectLegacyApplicationForm(page);
   const metadata = await page.evaluate(() => {
     const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
