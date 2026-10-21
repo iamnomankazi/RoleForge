@@ -258,7 +258,7 @@ export function classifyFieldSemantics(field = {}) {
   if (/certif|declare|signature|background check|truthful|information is accurate|terms and conditions|legal declaration/.test(text)) {
     return { category: 'legal_declaration', semantic: 'legal_declaration' };
   }
-  if (/how did you hear|where did you hear|application source|referral source|source detail/.test(text)) {
+  if (/how did you hear|how did you learn|where did you hear|application source|referral source|source detail/.test(text)) {
     return { category: 'source_how_heard', semantic: 'application_source' };
   }
   if (/\b(?:city|location|office|where)\b/.test(text)
@@ -293,6 +293,7 @@ export function classifyFieldSemantics(field = {}) {
   if (/last ?name|family ?name|surname/.test(text)) return { category: 'identity_contact', semantic: 'last_name' };
   if (/full ?name|your name|candidate name/.test(text)) return { category: 'identity_contact', semantic: 'full_name' };
   if (/e ?mail/.test(text)) return { category: 'identity_contact', semantic: 'email' };
+  if (/phone.*(?:device|number)?\s*type|phone type/.test(text)) return { category: 'identity_contact', semantic: 'phone_type' };
   if (type === 'tel') return { category: 'identity_contact', semantic: 'phone' };
   if (selectorShape && /dial(?:ing)? code|calling code|phone prefix|country prefix/.test(text)) {
     return { category: 'identity_contact', semantic: 'phone_dial_code' };
@@ -309,8 +310,15 @@ export function classifyFieldSemantics(field = {}) {
   if (/(?:enrolled|degree program).*(?:german university)|(?:german university).*(?:enrolled|degree program)/.test(text)) {
     return { category: 'education', semantic: 'german_university_enrollment' };
   }
-  if (/university|school|institution/.test(text)) return { category: 'education', semantic: 'university' };
+  if (field.workdayBlockKind === 'language' && /\bi am fluent\b/.test(text)) {
+    return { category: 'education', semantic: 'language_fluent' };
+  }
+  if (field.workdayBlockKind === 'language'
+      && /\b(?:overall|reading|writing|speaking|listening)\b/.test(text)) {
+    return { category: 'education', semantic: 'language_proficiency' };
+  }
   if (/degree|qualification/.test(text)) return { category: 'education', semantic: 'degree' };
+  if (/university|school|institution/.test(text)) return { category: 'education', semantic: 'university' };
   if (/graduat/.test(text)) return { category: 'education', semantic: 'graduation' };
   if (/\b(?:salary|compensation|remuneration)\b|\b(?:pay expectations?|expected pay|desired pay)\b/.test(text)) {
     const target = /\b(?:expect|expected|expectations?|desired|target|requested|requirements?)\b/.test(text);
@@ -707,6 +715,7 @@ export function canonicalFieldValue(profile, semantics, {
     full_name: fullName || null,
     email: candidate.email || null,
     phone: candidate.phone || null,
+    phone_type: candidate.phone_type || null,
     phone_country: rules.homeCountry,
     phone_dial_code: rules.phoneDialCode || null,
     citizenship: candidate.citizenship || null,

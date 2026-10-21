@@ -194,6 +194,85 @@ function controlAction(field, intended) {
   return 'fill';
 }
 
+function listboxOptionMatches(label, action) {
+  const normalized = normalizeFormQuestion(label);
+  const optionMatch = action.optionMatch || null;
+  if (optionMatch?.mode === 'contains_any') {
+    return (optionMatch.values || []).some((value) => normalized.includes(normalizeFormQuestion(value)));
+  }
+  return normalized === normalizeFormQuestion(action.value);
+}
+
+function pickOptionMatches(label, action) {
+  if (action.pickKind === 'phone_country') {
+    const country = cleanFormText(action.value);
+    const match = cleanFormText(label).match(/^(.+?)\s*\(\s*\+\d{1,4}\s*\)$/);
+    return Boolean(match && normalizeFormQuestion(match[1]) === normalizeFormQuestion(country));
+  }
+  return (action.optionValues || [action.value])
+    .some((value) => normalizeFormQuestion(label) === normalizeFormQuestion(value));
+}
+
+function pickFieldCommitted(field, action) {
+  const values = Array.isArray(field.selectedItems)
+    ? field.selectedItems.map(cleanFormText).filter(Boolean)
+    : cleanFormText(field.value).split(/\s*,\s*/).filter(Boolean);
+  return values.length === 1 && pickOptionMatches(values[0], action);
+}
+
+function markdownSection(markdown, name) {
+  const match = String(markdown || '').match(new RegExp(`^##\\s+${name}\\s*\\r?\\n([\\s\\S]*?)(?=^##\\s+|$(?![\\s\\S]))`, 'im'));
+  return match?.[1] || '';
+}
+
+function cvEducationEntries(profile) {
+  const section = markdownSection(profile?.cvText, 'Education');
+  const headings = [...section.matchAll(/^###\s+(.+)\s*$/gm)];
+  return headings.map((heading, index) => {
+    const start = heading.index + heading[0].length;
+    const end = headings[index + 1]?.index ?? section.length;
+    const degree = section.slice(start, end).match(/^\s*\*\*([^*]+)\*\*/m)?.[1] || '';
+    return { school: cleanFormText(heading[1]), degree: cleanFormText(degree) };
+  }).filter((entry) => entry.school && entry.degree);
+}
+
+function cvLanguageLevels(profile) {
+  const section = markdownSection(profile?.cvText, 'Languages');
+  return [...section.matchAll(/^\s*[-*]\s*([^:\r\n]+):\s*(Native|Fluent|Beginner)\b[^\r\n]*$/gim)]
+    .map((match) => [cleanFormText(match[1]), cleanFormText(match[2])]);
+}
+
+function languageLevelForField(field, profile) {
+  const blockLanguage = normalizeFormQuestion(field.workdayLanguage);
+  if (!blockLanguage) return null;
+  const matches = cvLanguageLevels(profile).filter(([language]) => {
+    const normalized = normalizeFormQuestion(language);
+    return blockLanguage === normalized || blockLanguage.includes(` ${normalized} `)
+      || blockLanguage.startsWith(`${normalized} `) || blockLanguage.endsWith(` ${normalized}`);
+  });
+  return matches.length === 1 ? matches[0][1] : null;
+}
+
+function companyNamesFromContext(context = {}) {
+  const values = [context.company, context.companyName, context.company_name, context.jobCompany,
+    context.discovery?.company, context.candidate?.company, context.candidate?.companyName,
+    context.candidate?.company_name, context.job?.company, context.job?.companyName];
+  return [...new Set(values.map(cleanFormText).filter(Boolean))];
+}
+
+function applicationSourceOptionValues(value, context) {
+  if (normalizeFormQuestion(value) !== normalizeFormQuestion('Company website')) return [value];
+  const companyValues = companyNamesFromContext(context);
+  return [...new Set([
+    value,
+    'Company Website',
+    'Company Career Site',
+    ...companyValues.map((company) => `${company} Careers Website`),
+    'Career Site',
+    'Careers Page',
+  ].filter(Boolean))];
+}
+
 function groundedLocationComponents(action) {
   const combined = cleanFormText(action.locationGrounding?.combined || action.value);
   const parts = combined.split(',').map((part) => part.trim()).filter(Boolean);
@@ -231,7 +310,8 @@ function isCommitted(field, action) {
     return (field.files || []).some((filename) => filename === action.artifact.intendedFilename);
   }
   if (action.action === 'check' || action.action === 'radio') return Boolean(field.checked);
-  if (action.action === 'listbox') return normalizeFormQuestion(field.value) === normalizeFormQuestion(action.value);
+  if (action.action === 'listbox') return listboxOptionMatches(field.value, action);
+  if (action.action === 'pick') return pickFieldCommitted(field, action);
   if (action.action === 'select') {
     const option = matchingOption(field, action.value);
     return Boolean(option && (
@@ -270,17 +350,64 @@ export async function inspectOperationalApplicationForm(page) {
         || clean(element.closest('[role="group"], [role="radiogroup"]')?.getAttribute('aria-label'));
       const ownLabel = element.labels ? clean([...element.labels].map((label) => label.innerText).join(' ')) : '';
       const formGroupLabel = clean(element.closest('.form-group')?.querySelector(':scope > label.control-label')?.innerText);
+      let labelledGroup = null;
+      for (let node = element.parentElement, depth = 0; node && depth < 8; node = node.parentElement, depth += 1) {
+        if (node.matches('[role="group"], fieldset, [aria-labelledby]')) {
+          labelledGroup = node;
+          break;
+        }
+      }
+      const referencedLabel = (node) => clean((node?.getAttribute('aria-labelledby') || '').split(/\s+/)
+        .filter(Boolean).map((id) => document.getElementById(id)?.innerText || '').join(' '));
+      const controlLabel = (control) => clean([
+        ...(control.labels || []),
+      ].map((label) => label.innerText).join(' ')
+        || control.getAttribute('aria-label') || referencedLabel(control));
+      const controlValue = (control) => clean(control?.value || control?.innerText
+        || [...(control?.querySelectorAll?.('[data-automation-id="selectedItem"]') || [])].map((item) => item.innerText).join(' '));
+      const educationPanel = element.closest('[data-automation-id^="education-"]');
+      const languageGroup = labelledGroup || element.closest('[data-automation-id*="language" i]')
+        || (element.hasAttribute('aria-labelledby') ? element : null);
+      const groupName = clean(referencedLabel(languageGroup)
+        || languageGroup?.querySelector('legend, h1, h2, h3, h4, h5, h6')?.innerText
+        || languageGroup?.getAttribute('aria-label')
+        || (languageGroup === element ? element.getAttribute('aria-label') : ''));
+      const controlsInGroup = languageGroup ? [...languageGroup.querySelectorAll('input, button, [role="combobox"]')] : [];
+      const namedLanguage = controlsInGroup.find((control) => /\blanguage\b/i.test(controlLabel(control)));
+      const languageName = controlValue(namedLanguage) || groupName
+        || (element.getAttribute('aria-label') || '');
+      const schoolControl = educationPanel
+        ? [...educationPanel.querySelectorAll('input, button, [role="combobox"]')]
+          .find((control) => /school|university|institution/i.test(controlLabel(control)))
+        : null;
+      const fieldLabel = [ownLabel, formGroupLabel, element.getAttribute('aria-label'), referencedLabel(element)]
+        .filter(Boolean).join(' ');
+      const workdayBlockKind = educationPanel ? 'education'
+        : (/\b(?:overall|reading|writing|speaking|listening|language)\b|\bi am fluent\b/i.test(fieldLabel)
+          && (languageGroup || /language|proficiency|\bi am fluent\b/i.test(fieldLabel))) ? 'language' : '';
+      const workdaySchool = clean(controlValue(schoolControl));
+      const directQuestion = clean(ownLabel || formGroupLabel || element.getAttribute('aria-label')
+        || element.placeholder || element.name || element.id);
+      const normalizedText = (value) => clean(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      const contextualQuestion = workdayBlockKind === 'language' && languageName
+        ? (normalizedText(directQuestion).includes(normalizedText(languageName))
+          ? directQuestion : `${languageName} ${directQuestion}`)
+        : workdayBlockKind === 'education' && workdaySchool && /degree|qualification/i.test(directQuestion)
+          ? `${workdaySchool} ${directQuestion}` : '';
       const optionLabel = ['radio', 'checkbox'].includes((element.type || '').toLowerCase()) ? ownLabel : '';
       const selected = element.tagName === 'SELECT' ? element.selectedOptions?.[0]?.textContent : '';
       return {
         fieldId,
         groupLabel,
-        questionText: groupLabel || ownLabel || formGroupLabel || element.getAttribute('aria-label') || element.placeholder || element.name || element.id || '',
+        questionText: contextualQuestion || groupLabel || directQuestion,
         optionLabel,
         maxLength: Number(element.getAttribute('maxlength') || 0) || null,
         minLength: Number(element.getAttribute('minlength') || 0) || null,
         selectedLabel: clean(selected),
         ariaInvalid: element.getAttribute('aria-invalid') === 'true',
+        workdayBlockKind,
+        workdaySchool,
+        workdayLanguage: workdayBlockKind === 'language' ? clean(languageName) : '',
       };
     });
   });
@@ -606,15 +733,6 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       continue;
     }
 
-    // Workday pick-from-list fields (Country Phone Code, How Did You Hear About Us): a chosen item is kept as is;
-    // an empty one is the user's to pick. RoleForge never types into their search box.
-    if (field.widget === 'selectinput') {
-      if (!cleanFormText(field.value) && field.required) {
-        unresolvedFields.push(manualField(field, semantics, 'Workday pick-from-list field: choose the option in the browser.'));
-      }
-      continue;
-    }
-
     let resolved;
     try {
       resolved = answerForField(field, semantics, effectiveProfile, snapshot, artifacts, context, narrativeRouting);
@@ -625,6 +743,106 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
         cleanFormText(error.message),
         cleanFormText(error.message).startsWith('Missing evidence') ? cleanFormText(error.message) : null,
       ));
+      continue;
+    }
+    if (field.widget === 'selectinput') {
+      const value = cleanFormText(resolved.value);
+      const selectedItems = Array.isArray(field.selectedItems)
+        ? field.selectedItems.map(cleanFormText).filter(Boolean)
+        : cleanFormText(field.value).split(/\s*,\s*/).filter(Boolean);
+      if (!['phone_country', 'phone_dial_code'].includes(semantics.semantic)
+          && semantics.semantic !== 'application_source') {
+        if (field.required && !selectedItems.length) {
+          unresolvedFields.push(manualField(field, semantics, 'Workday pick-from-list field has no grounded answer.'));
+        }
+        continue;
+      }
+      // A selected chip without discovery provenance is an existing user/ATS answer and stays in place.
+      if (selectedItems.length && !value) continue;
+      if (!value) {
+        if (field.required) unresolvedFields.push(manualField(
+          field,
+          semantics,
+          'No grounded value is available for this Workday pick-from-list field.',
+          semantics.category === 'source_how_heard' ? 'Where this job was found is not recorded in its discovery provenance.' : null,
+        ));
+        continue;
+      }
+      const pickKind = semantics.category === 'source_how_heard' ? 'application_source' : 'phone_country';
+      const planned = {
+        ...base,
+        action: 'pick',
+        pickKind,
+        optionValues: pickKind === 'application_source' ? applicationSourceOptionValues(value, context) : [value],
+        value,
+        valueHash: hashFormValue(value),
+        retryBudget: 1,
+      };
+      if (selectedItems.length) {
+        if (isCommitted(field, planned)) preservedFields.push({ ...base, valueHash: planned.valueHash, preserved: true });
+        else unresolvedFields.push(manualField(field, semantics, 'A different Workday selection is already present; RoleForge did not replace it.'));
+      } else actions.push(planned);
+      continue;
+    }
+    if (field.widget === 'workday-listbox' && semantics.semantic === 'degree'
+        && field.workdayBlockKind === 'education') {
+      const school = normalizeFormQuestion(field.workdaySchool);
+      const matchingEntries = cvEducationEntries(profile).filter((entry) => (
+        normalizeFormQuestion(entry.school) === school
+        && /\b(?:master|bachelor)\b/i.test(entry.degree)
+      ));
+      const targets = matchingEntries.map((entry) => /\bmaster\b/i.test(entry.degree) ? 'Master' : 'Bachelor');
+      if (targets.length !== 1) {
+        if (field.required) unresolvedFields.push(manualField(
+          field, semantics, 'The education block does not match exactly one CV degree entry.',
+        ));
+        continue;
+      }
+      const planned = {
+        ...base,
+        action: 'listbox',
+        value: targets[0],
+        optionMatch: { mode: 'contains_any', values: [targets[0]] },
+        valueHash: hashFormValue(targets[0]),
+        retryBudget: 1,
+      };
+      if (isCommitted(field, planned)) preservedFields.push({ ...base, valueHash: planned.valueHash, preserved: true });
+      else actions.push(planned);
+      continue;
+    }
+    if (field.widget === 'workday-listbox' && semantics.semantic === 'language_proficiency'
+        && field.workdayBlockKind === 'language') {
+      const level = languageLevelForField(field, profile);
+      const valuesByLevel = {
+        Native: ['Native', 'Mother tongue'],
+        Fluent: ['Fluent', 'Advanced', 'Proficient'],
+        Beginner: ['Beginner', 'Basic', 'Elementary'],
+      };
+      if (!level) {
+        if (field.required) unresolvedFields.push(manualField(field, semantics, 'Language proficiency is not grounded by the CV language entry.'));
+        continue;
+      }
+      const planned = {
+        ...base,
+        action: 'listbox',
+        value: level,
+        optionMatch: { mode: 'contains_any', values: valuesByLevel[level] },
+        valueHash: hashFormValue(level),
+        retryBudget: 1,
+      };
+      if (isCommitted(field, planned)) preservedFields.push({ ...base, valueHash: planned.valueHash, preserved: true });
+      else actions.push(planned);
+      continue;
+    }
+    if (semantics.semantic === 'language_fluent' && field.workdayBlockKind === 'language') {
+      const level = languageLevelForField(field, profile);
+      if (level === 'Native' || level === 'Fluent') {
+        const planned = { ...base, action: 'check', value: 'Yes', valueHash: hashFormValue('Yes'), retryBudget: 1 };
+        if (isCommitted(field, planned)) preservedFields.push({ ...base, valueHash: planned.valueHash, preserved: true });
+        else actions.push(planned);
+      } else if (!level && field.required) {
+        unresolvedFields.push(manualField(field, semantics, 'The fluent checkbox language level is not grounded by the CV.'));
+      }
       continue;
     }
     const normalizeValue = semantics.category === 'custom_motivation_experience_narrative'
@@ -893,6 +1111,7 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
       if (['keydown', 'keyup'].includes(event.type) && event.key === 'Enter' && target?.tagName === 'INPUT'
           && !['checkbox', 'radio', 'file', 'submit', 'button', 'image', 'reset'].includes((target.type || '').toLowerCase())
           && target.getAttribute('role') !== 'combobox' && !target.getAttribute('aria-autocomplete')
+          && target.getAttribute('data-uxi-widget-type') !== 'selectinput'
           && !target.form && target.closest('[data-career-ops-virtual-form]')) {
         return block(event);
       }
@@ -1320,6 +1539,127 @@ async function assertHumanFillTarget(locator, action) {
   }
 }
 
+async function workdayListboxOptions(page, control, { deadlineMs, clock }) {
+  const relation = await control.evaluate((element) => `${element.getAttribute('aria-controls') || ''} ${element.getAttribute('aria-owns') || ''}`.trim());
+  const ids = [...new Set(relation.split(/\s+/).filter(Boolean))];
+  if (ids.length > 1) throw new Error('Workday dropdown owns several listboxes.');
+  if (ids.length === 1) {
+    const identified = page.locator(`[id="${ids[0].replace(/"/g, '\\"')}"]`);
+    if (await identified.count() !== 1 || await identified.getAttribute('role') !== 'listbox'
+        || !await identified.isVisible()) throw new Error('Workday dropdown listbox is not uniquely visible.');
+    return identified.locator('[role="option"]');
+  }
+  const listboxes = page.locator('[role="listbox"]:visible');
+  if (await listboxes.count() !== 1) throw new Error('Workday dropdown does not have one visible listbox.');
+  const listbox = listboxes.first();
+  await listbox.waitFor({ state: 'visible', timeout: Math.min(5_000, remainingTimeout(deadlineMs, clock)) });
+  return listbox.locator('[role="option"]');
+}
+
+function pickOptionLocators(page) {
+  return page.locator('[data-automation-id="promptOption"]:visible, [role="option"]:visible');
+}
+
+async function visiblePickChipTexts(input) {
+  const container = input.locator('xpath=ancestor::*[@data-automation-id="multiSelectContainer"][1]');
+  if (await container.count() !== 1) throw new Error('Workday pick field has no unique multiSelectContainer.');
+  const chips = container.locator('[data-automation-id="selectedItem"]');
+  const values = [];
+  for (let index = 0; index < await chips.count(); index += 1) {
+    const chip = chips.nth(index);
+    if (await chip.isVisible().catch(() => false)) values.push(cleanFormText(await chip.innerText().catch(() => '')));
+  }
+  return { container, values: values.filter(Boolean) };
+}
+
+function categoryPromptOption(locator, label) {
+  return locator.evaluate((element) => Boolean(
+    element.hasAttribute('aria-haspopup')
+    || element.hasAttribute('aria-expanded')
+    || element.hasAttribute('data-has-children')
+    || /category|subcategory|sub-category/i.test(element.getAttribute('data-automation-id') || '')
+    || /expand|more options/i.test(element.getAttribute('aria-label') || ''),
+  )).catch(() => /\b(?:category|other)\b/i.test(label));
+}
+
+async function clearPickSearch(page, action, { deadlineMs, clock }) {
+  let input = await exactLocator(page, action).catch(() => null);
+  if (!input) return;
+  await input.press('Escape', { timeout: remainingTimeout(deadlineMs, clock) }).catch(() => null);
+  input = await exactLocator(page, action).catch(() => input);
+  await input.fill('', { timeout: remainingTimeout(deadlineMs, clock) }).catch(() => null);
+}
+
+async function chooseWorkdayPick(page, action, visibleOptions, { deadlineMs, clock }) {
+  let input = await exactLocator(page, action);
+  let chipState = await visiblePickChipTexts(input);
+  if (chipState.values.length) {
+    if (chipState.values.length === 1 && pickOptionMatches(chipState.values[0], action)) return chipState.values[0];
+    throw new Error('A different Workday selection is already present; RoleForge did not replace it.');
+  }
+  try {
+    await input.focus({ timeout: remainingTimeout(deadlineMs, clock) });
+    await input.fill('', { timeout: remainingTimeout(deadlineMs, clock) });
+    for (const character of [...action.value]) {
+      input = await exactLocator(page, action);
+      await input.pressSequentially(character, { delay: 0, timeout: remainingTimeout(deadlineMs, clock) });
+    }
+    input = await exactLocator(page, action);
+    await input.focus({ timeout: remainingTimeout(deadlineMs, clock) });
+    await page.keyboard.press('Enter', { timeout: remainingTimeout(deadlineMs, clock) });
+    const options = pickOptionLocators(page);
+    await options.first().waitFor({ state: 'visible', timeout: Math.min(5_000, remainingTimeout(deadlineMs, clock)) });
+    for (let depth = 0; depth < 3; depth += 1) {
+      const liveOptions = pickOptionLocators(page);
+      const count = await liveOptions.count();
+      const matching = [];
+      const categories = [];
+      for (let index = 0; index < count; index += 1) {
+        const option = liveOptions.nth(index);
+        if (!await option.isVisible().catch(() => false)) continue;
+        const label = cleanFormText(await option.innerText().catch(() => ''));
+        if (!label) continue;
+        visibleOptions.push(label);
+        if (pickOptionMatches(label, action)) matching.push({ option, label });
+        else if (await categoryPromptOption(option, label)) categories.push({ option, label });
+      }
+      if (matching.length > 1) throw new Error(`Several Workday pick options match ${action.value}.`);
+      let selectedLabel = null;
+      if (matching.length === 1) {
+        selectedLabel = matching[0].label;
+        await matching[0].option.click({ timeout: remainingTimeout(deadlineMs, clock) });
+      } else if (categories.length === 1) {
+        await categories[0].option.click({ timeout: remainingTimeout(deadlineMs, clock) });
+        await page.waitForTimeout(100);
+        input = await exactLocator(page, action);
+        chipState = await visiblePickChipTexts(input);
+        if (chipState.values.length) {
+          if (chipState.values.length === 1 && pickOptionMatches(chipState.values[0], action)) return chipState.values[0];
+          throw new Error('A different Workday selection is already present; RoleForge did not replace it.');
+        }
+        const children = pickOptionLocators(page);
+        if (await children.count()) continue;
+        throw new Error(`Workday category did not open child options for ${action.value}.`);
+      } else {
+        throw new Error(`No unique Workday pick option matches ${action.value}.`);
+      }
+      await page.waitForTimeout(100);
+      input = await exactLocator(page, action);
+      chipState = await visiblePickChipTexts(input);
+      if (chipState.values.length === 1 && pickOptionMatches(chipState.values[0], action)) return chipState.values[0];
+      if (chipState.values.length) throw new Error('Workday selected a different chip; RoleForge did not replace it.');
+      const childOptions = pickOptionLocators(page);
+      if (!selectedLabel && await childOptions.count()) continue;
+      if (await childOptions.count()) continue;
+      throw new Error(`Workday pick option was not committed: ${selectedLabel || action.value}.`);
+    }
+    throw new Error(`Workday category nesting is too deep for ${action.value}.`);
+  } catch (error) {
+    await clearPickSearch(page, action, { deadlineMs, clock });
+    throw error;
+  }
+}
+
 async function performAction(page, action, visibleOptions, { deadlineMs, clock }) {
   let locator = await exactLocator(page, action);
   await assertNotFinal(locator);
@@ -1362,16 +1702,25 @@ async function performAction(page, action, visibleOptions, { deadlineMs, clock }
   if (action.action === 'listbox') {
     // Workday "Select One" button: open it, pick the option whose whole text matches, verify the button shows it.
     // Option order varies per question, so never pick by position.
-    const wanted = normalizeFormQuestion(action.value);
     await locator.click({ timeout: remainingTimeout(deadlineMs, clock) });
-    const options = page.locator('[role="listbox"]:visible [role="option"]');
-    await options.first().waitFor({ state: 'visible', timeout: Math.min(5_000, remainingTimeout(deadlineMs, clock)) });
+    const options = await workdayListboxOptions(page, locator, { deadlineMs, clock });
+    try {
+      await options.first().waitFor({ state: 'visible', timeout: Math.min(5_000, remainingTimeout(deadlineMs, clock)) });
+    } catch (error) {
+      await page.keyboard.press('Escape').catch(() => null);
+      throw error;
+    }
     const count = await options.count();
     let match = null;
     for (let index = 0; index < count; index += 1) {
-      if (normalizeFormQuestion(await options.nth(index).innerText()) === wanted) {
-        if (match) throw new Error(`Several dropdown options match ${action.value}`);
-        match = options.nth(index);
+      const option = options.nth(index);
+      if (!await option.isVisible().catch(() => false)) continue;
+      if (listboxOptionMatches(await option.innerText(), action)) {
+        if (match) {
+          await page.keyboard.press('Escape').catch(() => null);
+          throw new Error(`Several dropdown options match ${action.value}`);
+        }
+        match = option;
       }
     }
     if (!match) {
@@ -1380,11 +1729,12 @@ async function performAction(page, action, visibleOptions, { deadlineMs, clock }
     }
     await match.click({ timeout: remainingTimeout(deadlineMs, clock) });
     locator = await exactLocator(page, action);
-    if (normalizeFormQuestion(await locator.innerText()) !== wanted) {
+    if (!listboxOptionMatches(await locator.innerText(), action)) {
       throw new Error(`Dropdown selection did not remain committed: ${action.value}`);
     }
     return action.value;
   }
+  if (action.action === 'pick') return chooseWorkdayPick(page, action, visibleOptions, { deadlineMs, clock });
   if (action.action === 'select') {
     const selected = await locator.evaluate((element, intended) => {
       const normalized = (value) => String(value || '').trim().toLowerCase();
@@ -2551,8 +2901,17 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
       if ((blockingUnresolved.length || reviewed.evidence.validationErrors.length) && awaitManualFields && manualWaits < 12) {
         manualWaits += 1;
         const waitStarted = clock();
-        const labels = [...blockingUnresolved.map((row) => cleanFormText(row.label || row.semantic || row.fieldId)),
-          ...reviewed.evidence.validationErrors.map((text) => `error: ${cleanFormText(text)}`)];
+        const labels = [];
+        const seenManualLabels = new Set();
+        for (const label of [
+          ...blockingUnresolved.map((row) => cleanFormText(row.label || row.semantic || row.fieldId)),
+          ...reviewed.evidence.validationErrors.map((text) => `error: ${cleanFormText(text)}`),
+        ]) {
+          const key = normalizeFormQuestion(label);
+          if (!key || seenManualLabels.has(key)) continue;
+          seenManualLabels.add(key);
+          labels.push(label);
+        }
         if (await awaitManualFields(labels)) {
           const waited = clock() - waitStarted;
           sessionDeadlineMs += waited;

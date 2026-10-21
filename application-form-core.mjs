@@ -738,6 +738,10 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
               ? [...(element.closest('[data-automation-id="multiSelectContainer"]')?.querySelectorAll('[data-automation-id="selectedItem"]') || [])]
                 .filter(visible).map((item) => (item.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean).join(', ')
               : ''),
+          selectedItems: element.getAttribute('data-uxi-widget-type') === 'selectinput'
+            ? [...(element.closest('[data-automation-id="multiSelectContainer"]')?.querySelectorAll('[data-automation-id="selectedItem"]') || [])]
+              .filter(visible).map((item) => (item.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean)
+            : [],
           checked: Boolean(element.checked),
           files: element.files ? [...element.files].map((file) => file.name) : [],
           multiple: Boolean(element.multiple),

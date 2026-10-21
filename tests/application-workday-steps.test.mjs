@@ -935,18 +935,18 @@ const myInfoLive = ({ source = '', phoneType = 'Select One' } = {}) => {
   </div>`, '<button type="submit" data-automation-id="pageFooterNextButton">Save and Continue</button>', progress(2, 6, 'My Information'));
 };
 
-test('Workday My Information: chips count as values, Select One buttons are fields, phone keeps its separate code', async () => {
+test('Workday My Information: existing chips and button values are preserved; ungrounded picks stay manual', async () => {
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await servedPage(browser, myInfoLive({ source: '' }), BASE.replace('autofillWithResume', 'myInformation'));
     const plan = buildOperationalFormPlan(await inspectOperationalApplicationForm(page), profile, {}, { context });
     const manual = plan.unresolvedFields.map((row) => row.label);
     const filled = Object.fromEntries(plan.actions.map((action) => [action.label, action.value]));
-    assert.ok(manual.some((label) => /How Did You Hear/.test(label)), 'empty pick-from-list is the user\'s to choose');
+    assert.ok(manual.some((label) => /How Did You Hear/.test(label)), 'discovery provenance is required to choose the source');
     assert.ok(manual.some((label) => /Phone Device Type/.test(label)), '"Select One" button is a required empty field');
     assert.ok(!manual.some((label) => /Country Phone Code/.test(label)), 'a chosen chip is a value');
     assert.ok(!Object.keys(filled).some((label) => /Country Phone Code|How Did You Hear|Extension|Device/.test(label)),
-      'never types into a pick-from-list, the extension or a device-type dropdown');
+      'no grounded source or phone device type exists in this fixture/profile');
     assert.ok(!Object.entries(filled).some(([label, value]) => /Phone Number/.test(label) && /^\+/.test(value)),
       'phone number goes without the country code that has its own control');
     await page.close();
