@@ -1565,6 +1565,28 @@ export async function waitForApplicationStateTransition(page, beforeFingerprint,
   return { snapshot: latest, fingerprint: latest ? applicationFormStateFingerprint(latest) : beforeFingerprint, durationMs: clock() - started, timedOut: true };
 }
 
+// Workday renders a step in phases: fields first, then the saved values from the server. Reading it earlier makes
+// prefilled fields look empty. Settled = network quiet and field values + page text unchanged for quietMs.
+async function waitForSettledStep(page, { quietMs = 1_500, maxMs = 10_000 } = {}) {
+  if (quietMs <= 0) return;
+  await page.waitForLoadState('networkidle', { timeout: Math.min(5_000, maxMs) }).catch(() => {});
+  const started = Date.now();
+  let last = null;
+  let since = Date.now();
+  while (Date.now() - started < maxMs) {
+    const signature = await page.evaluate(() => {
+      const values = [...document.querySelectorAll('input, textarea, select, button[aria-haspopup="listbox"]')]
+        .map((element) => (element.type === 'checkbox' ? String(element.checked) : element.value || element.innerText || ''));
+      return `${values.length}:${values.join('|').slice(0, 20_000)}:${(document.body?.innerText || '').length}`;
+    }).catch(() => null);
+    if (signature !== last) {
+      last = signature;
+      since = Date.now();
+    } else if (Date.now() - since >= quietMs) return;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
 function isSameVerifiedApplicationOrigin(beforeUrl, afterUrl) {
   try {
     const before = new URL(beforeUrl);
@@ -3052,6 +3074,8 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
   const historicalVisited = new Set(progression.visitedFingerprints);
   let manualWaits = 0;
   const stepCommitted = new Set();
+  // Live runs wait for Workday to finish loading a step; tests that pass transitionStabilityMs: 0 skip it.
+  const settleQuietMs = transitionStabilityMs >= DEFAULT_PROGRESSION_STABILITY_MS ? 1_500 : 0;
   let settleRetries = 0;
   let progressionDeadlineMs = Math.min(sessionDeadlineMs, clock() + Math.min(progressionSessionMs, effectiveLimits.sessionMs));
   const aggregate = {
@@ -3443,6 +3467,12 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         after: transition.fingerprint,
         durationMs: transition.durationMs ?? Math.max(0, clock() - startedAt),
       });
+      // The next step must finish loading its saved values before it is planned. Waiting for the ATS is not
+      // RoleForge's working time, so it extends the deadlines like a manual pause does.
+      const settleStarted = clock();
+      await waitForSettledStep(page, { quietMs: settleQuietMs });
+      sessionDeadlineMs += clock() - settleStarted;
+      progressionDeadlineMs += clock() - settleStarted;
     }
   } finally {
     await clearProgressionPermit(page);

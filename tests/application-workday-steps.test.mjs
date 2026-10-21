@@ -985,3 +985,49 @@ test('a field that React re-renders with the same id after typing is re-acquired
     rmSync(docs.dir, { recursive: true, force: true });
   }
 });
+
+// Live Cushman & Wakefield 2026-10-21: after Continue, My Information is drawn first and Workday fills the saved
+// values ~1 s later; read too early, prefilled required fields look empty and the run paused instead of continuing.
+test('a Workday step whose saved values arrive late is read after it settles: no pause, Save and Continue clicked', async () => {
+  const lateStep = `<div data-automation-id="applyFlowMyInfoPage"><h2>My Information</h2>
+    <div><label for="fn">Given Name(s)*</label><input id="fn" required></div>
+    <div><label for="ln">Family Name*</label><input id="ln" required></div>
+    <div><label for="tool">Favourite tool*</label><input id="tool" required></div></div>`;
+  const page = `${shell(autofillStep, '<button type="submit" id="next" data-automation-id="pageFooterNextButton">Continue</button>')}
+  <script>
+    window.advances = 0; let step = 1;
+    document.getElementById('progress').innerHTML = ${JSON.stringify(progress(1, 3, 'Autofill with Resume'))};
+    document.getElementById('next').addEventListener('click', () => {
+      if (step === 3) return;
+      step += 1; window.advances += 1;
+      if (step === 2) {
+        document.getElementById('step').innerHTML = ${JSON.stringify(lateStep)};
+        document.getElementById('progress').innerHTML = ${JSON.stringify(progress(2, 3, 'My Information'))};
+        document.getElementById('next').textContent = 'Save and Continue';
+        setTimeout(() => { for (const [id, value] of [['fn', 'Alex'], ['ln', 'Example'], ['tool', 'Spreadsheet']]) {
+          document.getElementById(id).value = value; } }, 1200);
+      } else {
+        document.getElementById('step').innerHTML = '<div data-automation-id="applyFlowReviewPage"><h2>Review</h2></div>';
+        document.getElementById('progress').innerHTML = ${JSON.stringify(progress(3, 3, 'Review'))};
+        document.getElementById('next').textContent = 'Submit';
+      }
+    });
+    document.addEventListener('change', (e) => { if (e.target.type === 'file') document.getElementById('picked').textContent = e.target.files[0].name; });
+  </script>`;
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    const tab = await servedPage(browser, page, BASE.replace('autofillWithResume', 'late'));
+    let pauses = 0;
+    await prepareOperationalApplicationForm(tab, profile, docs.value, {
+      context, transitionTimeoutMs: 5_000,
+      awaitManualFields: async () => { if (await tab.locator('#fn').count()) pauses += 1; return false; },
+    });
+    assert.equal(pauses, 0, 'no pause on the step whose saved values arrive late');
+    assert.equal(await tab.evaluate(() => window.advances), 2, 'Continue, then Save and Continue');
+    await tab.close();
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});
