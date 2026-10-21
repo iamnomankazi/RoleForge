@@ -283,3 +283,29 @@ test('rv2: schools and languages match by whole name; proficiency needs a whole 
     await browser.close();
   }
 });
+
+test('a Work Experience entry\'s Location is the employer\'s, never the candidate\'s city', async () => {
+  const withCity = { ...profile, candidate: { location: 'Example City, Finland' },
+    formRules: { current_location: { city: 'Example City', country: 'Finland', combined: 'Example City, Finland' } } };
+  const page = `<div id="root"><div data-automation-id="applyFlowPage">
+    <ol data-automation-id="progressBar"><li data-automation-id="progressBarActiveStep"><div>
+      <label>current step 3 of 6</label><label>My Experience</label></div></li></ol>
+    <main id="step"><div role="group" aria-labelledby="Work-Experience-1-panel"><h5 id="Work-Experience-1-panel">Work Experience 1</h5>
+      <label for="we-title">Job Title*</label><input id="we-title" name="jobTitle" value="Example Role" required>
+      <label for="we-company">Company*</label><input id="we-company" name="companyName" value="Example Org" required>
+      <label for="we-location">Location</label><input id="we-location" name="location" value="">
+    </div></main>
+    <div data-automation-id="pageFooter"><button type="submit" data-automation-id="pageFooterNextButton">Save and Continue</button></div>
+  </div></div>`;
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const tab = await browser.newPage();
+    await tab.route(BASE, (route) => route.fulfill({ contentType: 'text/html; charset=utf-8', body: page }));
+    await tab.goto(BASE);
+    const plan = buildOperationalFormPlan(await inspectOperationalApplicationForm(tab), withCity, {}, { context });
+    assert.ok(!plan.actions.some((action) => /Location/.test(action.label)), JSON.stringify(plan.actions.map((a) => [a.label, a.value])));
+    await tab.close();
+  } finally {
+    await browser.close();
+  }
+});

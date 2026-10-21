@@ -747,6 +747,17 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       preservedFields.push({ ...base, valueHash: hashFormValue(field.value), preserved: true });
       continue;
     }
+    // Inside a repeated entry (Work Experience 1, Education 2, ...) a field describes that entry, not the candidate:
+    // the employer's Location is not the candidate's city. Only the per-entry answers handled below (degree,
+    // language proficiency, "I am fluent") are filled; anything else is the user's.
+    const handledEntryField = (field.workdayBlockKind === 'education' && field.widget === 'workday-listbox' && semantics.semantic === 'degree')
+      || (field.workdayBlockKind === 'language' && ['language_proficiency', 'language_fluent'].includes(semantics.semantic));
+    if (/-panel$/i.test(field.workdayBlockLabelledBy || '') && !handledEntryField) {
+      if (field.required && !fieldAnswered(field)) {
+        unresolvedFields.push(manualField(field, semantics, 'Entry-specific field in a repeated Workday entry; fill it from that entry.'));
+      }
+      continue;
+    }
 
     if (semantics.category === 'preferred_location') {
       unresolvedFields.push(manualField(field, semantics, 'Preferred location is application-specific and has no exact approved value.'));
