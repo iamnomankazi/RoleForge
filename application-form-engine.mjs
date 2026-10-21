@@ -208,10 +208,11 @@ function listboxOptionMatches(label, action) {
       && subject(normalized) === subject(optionMatch.qualification);
   }
   if (optionMatch?.mode === 'proficiency') {
-    if (/\b(?:not|no|non|limited|without)\b/.test(normalized)) return false;
-    return (optionMatch.values || []).some((value) => (
-      new RegExp(`(?:^| )${escapeRegex(normalizeFormQuestion(value))}(?: |$)`).test(normalized)
-    ));
+    // The whole option must be an approved level label: "Advanced Beginner" or "Less than proficient" never pass.
+    // CEFR codes ("C1", "C2 - ") and bracketed notes are decoration.
+    const core = normalizeFormQuestion(cleanFormText(label).replace(/\([^)]*\)/g, ' ')
+      .replace(/\b[abc][12]\b/gi, ' ').replace(/[-–:/]+/g, ' '));
+    return (optionMatch.values || []).some((value) => core === normalizeFormQuestion(value));
   }
   return normalized === normalizeFormQuestion(action.value);
 }
@@ -257,7 +258,8 @@ function educationSchoolMatches(left, right) {
   const normalizeSchool = (value) => normalizeFormQuestion(cleanSchoolName(value));
   const a = normalizeSchool(left);
   const b = normalizeSchool(right);
-  return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)));
+  // Whole names only: "Indiana University of Pennsylvania" is not "University of Pennsylvania".
+  return Boolean(a && b && a === b);
 }
 
 function groundedDateSegments(value) {
@@ -305,7 +307,8 @@ function languageLevelForField(field, profile) {
   if (!blockLanguage) return null;
   const matches = cvLanguageLevels(profile).filter(([language]) => {
     const normalized = normalizeFormQuestion(language);
-    return blockLanguage === normalized || blockLanguage.includes(normalized) || normalized.includes(blockLanguage);
+    // Whole names only: Malay is not Malayalam.
+    return blockLanguage === normalized;
   });
   return matches.length === 1 ? matches[0][1] : null;
 }
@@ -949,9 +952,9 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
         && field.workdayBlockKind === 'language') {
       const level = languageLevelForField(field, profile);
       const valuesByLevel = {
-        Native: ['Native', 'Mother tongue'],
+        Native: ['Native', 'Native speaker', 'Mother tongue', 'Native or bilingual', 'Native or bilingual proficiency'],
         Fluent: ['Fluent', 'Advanced', 'Proficient'],
-        Beginner: ['Beginner', 'Basic', 'Elementary'],
+        Beginner: ['Beginner', 'Basic', 'Elementary', 'Novice', 'Elementary proficiency'],
       };
       if (!level) {
         if (field.required) unresolvedFields.push(manualField(field, semantics, 'Language proficiency is not grounded by the CV language entry.'));
@@ -1169,6 +1172,19 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
   if (withheldUploads.size) {
     for (let index = actions.length - 1; index >= 0; index -= 1) {
       if (actions[index].action === 'upload' && withheldUploads.has(actions[index].artifact.resolvedPath)) actions.splice(index, 1);
+    }
+  }
+  // A field RoleForge already committed that now differs (unchecked, cleared, changed) was corrected by the user at a
+  // manual pause or between passes: keep the user's state, never redo the action.
+  const committedEarlier = new Set((previousEvidence?.attemptLedger || [])
+    .filter((row) => row.success && row.stableFieldId && row.category !== 'file_upload')
+    .map((row) => row.stableFieldId));
+  for (let index = actions.length - 1; index >= 0; index -= 1) {
+    const action = actions[index];
+    if (action.action !== 'upload' && committedEarlier.has(action.stableFieldId)) {
+      preservedFields.push({ fieldId: action.fieldId, stableFieldId: action.stableFieldId, label: action.label,
+        category: action.category, semantic: action.semantic, preserved: true, userCorrected: true });
+      actions.splice(index, 1);
     }
   }
   const uploadTopology = inspectOperationalUploadTopology(snapshot);
@@ -3055,9 +3071,10 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         break;
       }
 
+      // This pass's own commits count too: a value the user changes at a manual pause is never redone.
       let plan = buildOperationalFormPlan(snapshot, profile, artifacts, {
         context,
-        previousEvidence: effectivePreviousEvidence,
+        previousEvidence: { ...effectivePreviousEvidence, attemptLedger: aggregate.attemptLedger },
         semanticResolutions: reasoningState.semanticResolutions,
       });
       const reasoningChangedPlan = await resolvePlanAmbiguitiesWithReasoning(
@@ -3066,7 +3083,7 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
       if (reasoningChangedPlan) {
         plan = buildOperationalFormPlan(snapshot, profile, artifacts, {
           context,
-          previousEvidence: effectivePreviousEvidence,
+          previousEvidence: { ...effectivePreviousEvidence, attemptLedger: aggregate.attemptLedger },
           semanticResolutions: reasoningState.semanticResolutions,
         });
       }
@@ -3173,7 +3190,12 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
             break;
           }
           // Execution history remains in the attempt ledger. Only still-uncommitted fields belong in the handoff.
+          // A bound document the user uploaded by hand shows as a Workday tile with its exact name; the input is gone.
+          const shownFiles = new Set(await page.evaluate(() => [...document.querySelectorAll('[data-automation-id="file-upload-item-name"]')]
+            .filter((element) => element.getClientRects().length > 0).map((element) => (element.textContent || '').trim()))
+            .catch(() => []));
           aggregate.unresolvedFields = aggregate.unresolvedFields.filter((row) => {
+            if (row.category === 'file_upload' && row.manualUploadPath && shownFiles.has(basename(row.manualUploadPath))) return false;
             const matches = freshSnapshot.fields.filter((field) => field.formId === freshSnapshot.applicationFormId
               && (field.fieldId === row.fieldId || stableFieldIdentity(field) === row.stableFieldId));
             if (matches.length !== 1) return true;

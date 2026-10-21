@@ -179,3 +179,107 @@ test('real Workday Experience panels preserve autofill, resolve opened choices, 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a value the user corrects at a manual pause is kept: an unchecked "I am fluent" box is not re-checked', async () => {
+  const { prepareOperationalApplicationForm } = await import('../application-form-engine.mjs');
+  const page = `<div id="root"><div data-automation-id="applyFlowPage">
+    <ol data-automation-id="progressBar"><li data-automation-id="progressBarActiveStep"><div>
+      <label>current step 3 of 6</label><label>My Experience</label></div></li></ol>
+    <main id="step">
+      <div role="group" aria-labelledby="Languages-1-panel"><h5 id="Languages-1-panel">Languages 1</h5>
+        <button type="button" id="language-1" name="language" value="internal-1" aria-label="Language English Required">English</button>
+        <label for="fluent-1">I am fluent in this language.</label><input type="checkbox" id="fluent-1" name="native">
+      </div>
+      <label for="title-1">Job Title*</label><input id="title-1" name="jobTitle" value="Example Role" required>
+      <label for="company-1">Company*</label><input id="company-1" name="companyName" value="Example Org" required>
+      <label for="mystery">Favourite tool*</label><input id="mystery" name="mystery" required>
+    </main>
+    <div data-automation-id="pageFooter"><button type="submit" id="next" data-automation-id="pageFooterNextButton">Save and Continue</button></div>
+  </div></div>
+  <script>
+    window.advances = 0;
+    document.getElementById('next').addEventListener('click', () => {
+      window.advances += 1;
+      window.fluentAtSave = document.getElementById('fluent-1').checked;
+      document.getElementById('step').innerHTML = '<h2>Application Questions</h2>';
+      document.querySelector('[data-automation-id="progressBarActiveStep"] label').textContent = 'current step 4 of 6';
+    });
+  </script>`;
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const tab = await browser.newPage();
+    await tab.route(BASE, (route) => route.fulfill({ contentType: 'text/html; charset=utf-8', body: page }));
+    await tab.goto(BASE);
+    let pauses = 0;
+    await prepareOperationalApplicationForm(tab, profile, {}, {
+      context, transitionTimeoutMs: 2_000, transitionStabilityMs: 0,
+      awaitManualFields: async (labels) => {
+        pauses += 1;
+        if (pauses > 1) return false; // the fake next step has no fields
+        assert.equal(await tab.isChecked('#fluent-1'), true, 'RoleForge checked the box for a Fluent language');
+        await tab.uncheck('#fluent-1');            // the user deliberately unchecks it
+        await tab.fill('#mystery', 'Spreadsheet'); // and answers the unknown question
+        return true;
+      },
+    });
+    assert.equal(await tab.evaluate(() => window.advances), 1, 'Save and Continue clicked after the pause');
+    assert.equal(await tab.evaluate(() => window.fluentAtSave), false, 'the user\'s unchecked box was kept');
+    await tab.close();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('rv2: schools and languages match by whole name; proficiency needs a whole approved level label', async () => {
+  const { prepareOperationalApplicationForm } = await import('../application-form-engine.mjs');
+  const strictProfile = { ...profile, cvText: '## Education\n\n### University of Pennsylvania\n\n**Master of Computer Science**\n\n'
+    + '## Languages\n\n- Malayalam: Fluent\n- English: Fluent\n' };
+  const page = `<div id="root"><div data-automation-id="applyFlowPage">
+    <ol data-automation-id="progressBar"><li data-automation-id="progressBarActiveStep"><div>
+      <label>current step 3 of 6</label><label>My Experience</label></div></li></ol>
+    <main id="step">
+      <label for="title-x">Job Title*</label><input id="title-x" name="jobTitle" value="Example Role" required>
+      <label for="company-x">Company*</label><input id="company-x" name="companyName" value="Example Org" required>
+      ${panel('Education 1', 'Indiana University of Pennsylvania', 'one')}
+      <div role="group" aria-labelledby="Languages-1-panel"><h5 id="Languages-1-panel">Languages 1</h5>
+        <button type="button" id="language-1" name="language" value="internal-1" aria-label="Language Malay Required">Malay</button>
+        <button type="button" id="malay-overall" name="malay-overall" aria-label="Overall Select One Required"
+          aria-required="true" aria-haspopup="listbox">Select One</button></div>
+      <div role="group" aria-labelledby="Languages-2-panel"><h5 id="Languages-2-panel">Languages 2</h5>
+        <button type="button" id="language-2" name="language" value="internal-2" aria-label="Language English Required">English</button>
+        <button type="button" id="english-overall" name="english-overall" aria-label="Overall Select One Required"
+          aria-required="true" aria-haspopup="listbox">Select One</button></div>
+    </main>
+    <div data-automation-id="pageFooter"><button type="submit" id="next" data-automation-id="pageFooterNextButton">Save and Continue</button></div>
+  </div></div>
+  <script>
+    document.addEventListener('click', (event) => {
+      const button = event.target.closest('button[aria-haspopup="listbox"]');
+      if (!button) return;
+      document.querySelectorAll('[role="listbox"]').forEach((list) => list.remove());
+      const list = document.createElement('ul'); list.setRole = null; list.setAttribute('role', 'listbox');
+      for (const text of ['Advanced Beginner', 'Less than proficient', 'Master of Engineering']) {
+        const option = document.createElement('li'); option.setAttribute('role', 'option'); option.textContent = text;
+        option.addEventListener('click', () => { button.textContent = text; list.remove(); });
+        list.append(option);
+      }
+      document.body.append(list);
+    });
+  </script>`;
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const tab = await browser.newPage();
+    await tab.route(BASE, (route) => route.fulfill({ contentType: 'text/html; charset=utf-8', body: page }));
+    await tab.goto(BASE);
+    const plan = buildOperationalFormPlan(await inspectOperationalApplicationForm(tab), strictProfile, {}, { context });
+    assert.ok(!plan.actions.some((action) => /Indiana|Malay Overall/.test(action.label)),
+      JSON.stringify(plan.actions.map((action) => action.label)));
+    await prepareOperationalApplicationForm(tab, strictProfile, {}, { context, transitionTimeoutMs: 1_000, transitionStabilityMs: 0 });
+    assert.equal(await tab.innerText('#degree-one'), 'Select One', 'Indiana University of Pennsylvania is not the CV school');
+    assert.equal(await tab.innerText('#malay-overall'), 'Select One', 'Malay is not Malayalam');
+    assert.equal(await tab.innerText('#english-overall'), 'Select One', '"Advanced Beginner" / "Less than proficient" are not Fluent');
+    await tab.close();
+  } finally {
+    await browser.close();
+  }
+});
