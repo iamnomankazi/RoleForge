@@ -51,7 +51,7 @@ import {
 } from './application-reasoning.mjs';
 
 const MAX_FIELD_ATTEMPTS = 2;
-const MAX_CONTROLLED_RESUMES = 2;
+const MAX_CONTROLLED_RESUMES = 10;
 export const MAX_PROGRESSION_TRANSITIONS = 8;
 const DEFAULT_PROGRESSION_TRANSITION_MS = 10 * 1000;
 const DEFAULT_PROGRESSION_STABILITY_MS = 600;
@@ -189,6 +189,7 @@ function controlAction(field, intended) {
   if (field.type === 'checkbox') return 'check';
   if (field.type === 'radio') return choiceMatches(field, intended) ? 'radio' : null;
   if (field.tag === 'select') return 'select';
+  if (field.widget === 'workday-listbox') return 'listbox';
   if (field.role === 'combobox' || field.autocomplete === 'list') return 'autocomplete';
   return 'fill';
 }
@@ -230,6 +231,7 @@ function isCommitted(field, action) {
     return (field.files || []).some((filename) => filename === action.artifact.intendedFilename);
   }
   if (action.action === 'check' || action.action === 'radio') return Boolean(field.checked);
+  if (action.action === 'listbox') return normalizeFormQuestion(field.value) === normalizeFormQuestion(action.value);
   if (action.action === 'select') {
     const option = matchingOption(field, action.value);
     return Boolean(option && (
@@ -472,6 +474,7 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       formId: field.formId || '',
       stableFieldId,
       id: field.id,
+      tag: field.tag,
       label: fieldQuestion(field),
       name: field.name,
       category: semantics.category,
@@ -578,7 +581,8 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       continue;
     }
     if (semantics.category === 'unknown') {
-      if (field.required) {
+      // Already answered (by the user at a manual-fields pause, or prefilled by the ATS): theirs to review.
+      if (field.required && !fieldAnswered(field)) {
         const narrativeShape = field.tag === 'textarea' || field.type === 'textarea'
           || (field.type === 'text' && Number(field.maxLength || 0) >= 120);
         const conservativeManualControl = field.type === 'checkbox';
@@ -602,6 +606,15 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       continue;
     }
 
+    // Workday pick-from-list fields (Country Phone Code, How Did You Hear About Us): a chosen item is kept as is;
+    // an empty one is the user's to pick. RoleForge never types into their search box.
+    if (field.widget === 'selectinput') {
+      if (!cleanFormText(field.value) && field.required) {
+        unresolvedFields.push(manualField(field, semantics, 'Workday pick-from-list field: choose the option in the browser.'));
+      }
+      continue;
+    }
+
     let resolved;
     try {
       resolved = answerForField(field, semantics, effectiveProfile, snapshot, artifacts, context, narrativeRouting);
@@ -618,6 +631,9 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       ? normalizeNarrativeText
       : cleanFormText;
     let value = normalizeValue(resolved.value);
+    // A value already in the field (entered by the user at a manual-fields pause, or prefilled by the ATS from their
+    // account) is theirs to review; it is not an unresolved field.
+    if (!value && fieldAnswered(field)) continue;
     if (!value) {
       const traineeSalary = semantics.semantic === 'salary' && isTraineeRole(context);
       if (field.required || traineeSalary || ['work_authorization', 'sponsorship_employer_support'].includes(semantics.category)) {
@@ -800,7 +816,13 @@ function installOperationalGuardInDocument({ finalTokenSource, finalTokenFlags, 
         if (element.closest('[hidden], [inert], [aria-hidden="true"]')) continue;
         const style = getComputedStyle(element);
         const rect = element.getBoundingClientRect();
-        if (style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity || 1) <= 0 || rect.width <= 0 || rect.height <= 0) continue;
+        // Workday's screen-reader-only step label counts when its active step in the progress bar is visible.
+        const activeStep = element.closest('[data-automation-id="progressBarActiveStep"]');
+        const activeRect = activeStep?.getBoundingClientRect();
+        const workdayStepLabel = Boolean(activeStep?.closest('[data-automation-id="progressBar"]') && activeRect
+          && activeRect.width > 0 && activeRect.height > 0 && getComputedStyle(activeStep).display !== 'none'
+          && getComputedStyle(activeStep).visibility !== 'hidden');
+        if (!workdayStepLabel && (style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity || 1) <= 0 || rect.width <= 0 || rect.height <= 0)) continue;
         const ownText = [...element.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE)
           .map((node) => node.textContent || '').join(' ').replace(/\s+/g, ' ').trim();
         const text = ownText || element.getAttribute('aria-label') || '';
@@ -1134,6 +1156,18 @@ async function exactLocator(page, action) {
       return locator;
     }
   }
+  // React ATSs (Workday) replace an input with a fresh copy after typing: same stable id, new RoleForge tag. When
+  // exactly one element on the page has that stable id and the same tag type, it is the same field; re-tag it.
+  if (action.id) {
+    const byId = page.locator(`[id="${String(action.id).replace(/"/g, '\\"')}"]`);
+    if (await byId.count() === 1) {
+      const tagName = await byId.evaluate((element) => element.tagName.toLowerCase());
+      if (!action.tag || tagName === action.tag) {
+        await byId.evaluate((element, fieldId) => element.setAttribute('data-career-ops-field-id', fieldId), expectedFieldId);
+        return byId;
+      }
+    }
+  }
   if (action.label && action.action !== 'upload' && action.formId) {
     const locator = page.locator(`[data-career-ops-form-id="${String(action.formId).replace(/"/g, '\\"')}"]`).getByLabel(action.label, { exact: true });
     if (await locator.count() === 1) {
@@ -1310,6 +1344,11 @@ async function performAction(page, action, visibleOptions, { deadlineMs, clock }
         attached: element.isConnected,
         files: element.files ? [...element.files].map((file) => file.name) : [],
       }));
+      // Workday consumes the file: the input empties or is removed and a tile shows the uploaded file's exact name.
+      if (state.files.length === 0
+          && await uploadedFileTileShown(page, action.artifact.intendedFilename, { deadlineMs, clock })) {
+        return action.artifact.intendedFilename;
+      }
       if (state.files.length !== 1 || state.files[0] !== action.artifact.intendedFilename) {
         throw new Error(
           `Exact upload input did not accept the intended artifact for ${action.semantic}: expected ${action.artifact.intendedFilename}; observed ${state.files.join(', ') || '(none)'}`,
@@ -1319,6 +1358,32 @@ async function performAction(page, action, visibleOptions, { deadlineMs, clock }
       await target.dispose();
     }
     return action.artifact.intendedFilename;
+  }
+  if (action.action === 'listbox') {
+    // Workday "Select One" button: open it, pick the option whose whole text matches, verify the button shows it.
+    // Option order varies per question, so never pick by position.
+    const wanted = normalizeFormQuestion(action.value);
+    await locator.click({ timeout: remainingTimeout(deadlineMs, clock) });
+    const options = page.locator('[role="listbox"]:visible [role="option"]');
+    await options.first().waitFor({ state: 'visible', timeout: Math.min(5_000, remainingTimeout(deadlineMs, clock)) });
+    const count = await options.count();
+    let match = null;
+    for (let index = 0; index < count; index += 1) {
+      if (normalizeFormQuestion(await options.nth(index).innerText()) === wanted) {
+        if (match) throw new Error(`Several dropdown options match ${action.value}`);
+        match = options.nth(index);
+      }
+    }
+    if (!match) {
+      await page.keyboard.press('Escape').catch(() => null);
+      throw new Error(`No exact dropdown option for ${action.value}`);
+    }
+    await match.click({ timeout: remainingTimeout(deadlineMs, clock) });
+    locator = await exactLocator(page, action);
+    if (normalizeFormQuestion(await locator.innerText()) !== wanted) {
+      throw new Error(`Dropdown selection did not remain committed: ${action.value}`);
+    }
+    return action.value;
   }
   if (action.action === 'select') {
     const selected = await locator.evaluate((element, intended) => {
@@ -1448,6 +1513,22 @@ async function openModal(page) {
     if (await modals.nth(index).isVisible()) return modals.nth(index);
   }
   return null;
+}
+
+// A Workday upload tile ([data-automation-id="file-upload-item-name"]) whose whole text is exactly the file name.
+async function uploadedFileTileShown(page, filename, { deadlineMs, clock }) {
+  const until = Math.min(deadlineMs ?? Infinity, clock() + 30_000);
+  do {
+    // Shown and finished: Workday shows loading dots until the upload is processed ("Successfully Uploaded!").
+    const shown = await page.evaluate((name) => [...document.querySelectorAll('[data-automation-id="file-upload-item-name"]')]
+      .some((element) => element.getClientRects().length > 0 && (element.textContent || '').trim() === name)
+      && ![...document.querySelectorAll('[data-automation-id="file-loading-dots"]')]
+        .some((element) => element.getClientRects().length > 0), filename)
+      .catch(() => false);
+    if (shown) return true;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  } while (clock() < until);
+  return false;
 }
 
 async function attachmentVerified(page, artifact) {
@@ -1940,6 +2021,13 @@ export async function executeOperationalFormPlan(page, plan, options = {}) {
   }
 }
 
+// A radio or checkbox carries its option value whether or not it is chosen; only checked counts as answered.
+function fieldAnswered(field) {
+  return ['radio', 'checkbox'].includes(String(field.type || '').toLowerCase())
+    ? Boolean(field.checked)
+    : Boolean(cleanFormText(field.value));
+}
+
 function requiredEmpty(field) {
   return field.visible !== false && field.required && !field.disabled
     && !cleanFormText(field.value) && !field.checked && !(field.files || []).length;
@@ -2247,9 +2335,14 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
   transitionStabilityMs = DEFAULT_PROGRESSION_STABILITY_MS,
   waitForTransitionImpl = waitForApplicationStateTransition,
   reasoningProvider = null,
+  // Interactive runs: (labels) => Promise<boolean>. Lists the fields RoleForge cannot fill and resolves true once the
+  // user has filled them in the browser (Enter), so the step is re-checked and progression continues.
+  awaitManualFields = null,
+  // Interactive runs: (line) => void. Live log of the detected step, the progression control and each transition.
+  progressLog = null,
 } = {}) {
   const effectiveLimits = resolveOperationalFormLimits(profile, limits || {});
-  const sessionDeadlineMs = clock() + effectiveLimits.sessionMs;
+  let sessionDeadlineMs = clock() + effectiveLimits.sessionMs;
   const currentArtifactHashes = new Set([
     artifacts?.cv?.sha256,
     artifacts?.coverLetter?.sha256,
@@ -2332,7 +2425,9 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
   };
   const visited = new Set();
   const historicalVisited = new Set(progression.visitedFingerprints);
-  const progressionDeadlineMs = Math.min(sessionDeadlineMs, clock() + Math.min(progressionSessionMs, effectiveLimits.sessionMs));
+  let manualWaits = 0;
+  let settleRetries = 0;
+  let progressionDeadlineMs = Math.min(sessionDeadlineMs, clock() + Math.min(progressionSessionMs, effectiveLimits.sessionMs));
   const aggregate = {
     completed: [], uploadedArtifacts: [...(effectivePreviousEvidence?.uploadedArtifacts || [])], committedSelections: [], unresolvedFields: [],
     answerRecords: [],
@@ -2440,7 +2535,33 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         outcome = { ...reviewed, gate: { state: 'review_required', reason: `CAPTCHA requires manual completion (${reviewed.evidence.captcha.classification}).` } };
         break;
       }
-      if (reviewed.evidence.unresolvedFields.length || reviewed.evidence.validationErrors.length) {
+      // A document with no upload control on this step ("upload:*", e.g. a cover letter) is settled at the end of the
+      // flow and never blocks moving to the next step.
+      const blockingUnresolved = reviewed.evidence.unresolvedFields
+        .filter((row) => !String(row.stableFieldId || '').startsWith('upload:'));
+      // A form that momentarily fails verification is a page still rendering (Workday after an upload or sign-in):
+      // re-inspect the settled page before treating anything as unresolved.
+      if (blockingUnresolved.some((row) => row.fieldId === 'application-form-unverified')
+          && settleRetries < 15 && clock() < progressionDeadlineMs) {
+        settleRetries += 1;
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        visited.delete(stateFingerprint);
+        continue;
+      }
+      if ((blockingUnresolved.length || reviewed.evidence.validationErrors.length) && awaitManualFields && manualWaits < 12) {
+        manualWaits += 1;
+        const waitStarted = clock();
+        const labels = [...blockingUnresolved.map((row) => cleanFormText(row.label || row.semantic || row.fieldId)),
+          ...reviewed.evidence.validationErrors.map((text) => `error: ${cleanFormText(text)}`)];
+        if (await awaitManualFields(labels)) {
+          const waited = clock() - waitStarted;
+          sessionDeadlineMs += waited;
+          progressionDeadlineMs += waited;
+          visited.delete(stateFingerprint);
+          continue;
+        }
+      }
+      if (blockingUnresolved.length || reviewed.evidence.validationErrors.length) {
         outcome = { ...reviewed, gate: { state: 'review_required', reason: 'Controlled form preparation found unresolved or invalid fields; review is required.' } };
         break;
       }
@@ -2539,9 +2660,27 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         }
         break;
       }
-      if (currentPlan.ambiguousActions.length || currentPlan.progressionActions.length !== 1) {
-        const reason = currentPlan.ambiguousActions.length
-          ? 'Application progression control is ambiguous; no control was activated.'
+      // Beside exactly one verified progression control, only another continue/submit-like control is a real
+      // ambiguity; "Delete <file>", "Back to Job Posting" and similar never compete with Continue.
+      const controlText = (control) => cleanFormText(control.label || control.text || control.value);
+      const competingAmbiguous = currentPlan.progressionActions.length === 1
+        ? currentPlan.ambiguousActions.filter((control) => PROGRESSION_ACTION_LABEL.test(controlText(control))
+          || /\b(?:next|continue|proceed|review|apply|submit|send|complete|finish|finali[sz]e|confirm)\b/i.test(controlText(control)))
+        : currentPlan.ambiguousActions;
+      if (competingAmbiguous.length || currentPlan.progressionActions.length !== 1) {
+        // Client-rendered ATS pages (Workday) keep re-rendering right after an upload or a fill; a single snapshot can
+        // catch Continue mid-render. Re-inspect the settled page before giving up.
+        if (settleRetries < 15 && clock() < progressionDeadlineMs) {
+          settleRetries += 1;
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
+          visited.delete(stateFingerprint);
+          continue;
+        }
+        const why = (control) => `${controlText(control)} [fields=${control.candidateFieldCount}, step=${
+          control.stepIndicator ? `${control.stepIndicator.current}/${control.stepIndicator.total}` : 'none'}, workflow=${
+          control.workflowVerified}, form=${control.formId || 'none'}/${control.applicationFormId || 'none'}, type=${control.type}]`;
+        const reason = competingAmbiguous.length
+          ? `Application progression control is ambiguous (${competingAmbiguous.map(why).join('; ')}); no control was activated.`
           : 'A unique verified progression control was not available; no control was activated.';
         outcome = { ...reviewed, gate: { state: 'review_required', reason } };
         break;
@@ -2560,6 +2699,8 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
 
       const control = currentPlan.progressionActions[0];
       const startedAt = clock();
+      const liveStep = control.stepIndicator ? `${control.stepIndicator.current}/${control.stepIndicator.total}` : 'none';
+      progressLog?.(`[form] step ${liveStep}: "${cleanFormText(control.label)}" classified ${classifyApplicationControl(control)}; clicking it`);
       try {
         await activateProgressionControl(page, control, {
           applicationIdentity,
@@ -2587,6 +2728,9 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         outcome = { gate: transitionGate, snapshot: transition.snapshot };
         break;
       }
+      progressLog?.(`[form] transition after "${cleanFormText(control.label)}": ${transition.timedOut ? 'timed out'
+        : transition.fingerprint === currentStateFingerprint ? 'no change' : 'page changed'} in ${
+        transition.durationMs ?? Math.max(0, clock() - startedAt)} ms`);
       if (transition.timedOut || transition.fingerprint === currentStateFingerprint) {
         outcome = { ...reviewed, gate: { state: 'review_required', reason: 'Progression activation produced no verified application-state transition.' } };
         break;
@@ -2603,7 +2747,8 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         outcome = { ...reviewed, gate: { state: 'review_required', reason: `Application continuity check failed: ${cleanFormText(continuity?.reason || 'unverified application identity')}` } };
         break;
       }
-      if (visited.has(transition.fingerprint) || historicalVisited.has(transition.fingerprint)) {
+      // Loops are detected within this pass. A restarted run legitimately re-walks steps an earlier pass visited.
+      if (visited.has(transition.fingerprint)) {
         progression.transitions.push({
           controlId: control.controlId, label: control.label, before: currentStateFingerprint,
           after: transition.fingerprint, durationMs: transition.durationMs, loopDetected: true,

@@ -481,7 +481,16 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
     // Formless application pages (Ashby, Workday) render fields in plain containers. When no visible <form> holds
     // applicant fields, the smallest container holding them and a submit-like control acts as the form.
     const fieldSelector = 'input, textarea, select, [role="combobox"]';
-    const applicantField = (element) => visible(element)
+    // Workday hides the real file input behind a visible drop zone with a "Select files" button.
+    const fileInVisibleUploadArea = (element) => {
+      if ((element.type || '').toLowerCase() !== 'file') return false;
+      let area = element.parentElement;
+      for (let depth = 0; area && depth < 4; depth += 1, area = area.parentElement) {
+        if (visible(area)) return [...area.querySelectorAll('button, [role="button"]')].some(visible);
+      }
+      return false;
+    };
+    const applicantField = (element) => (visible(element) || fileInVisibleUploadArea(element))
       && !['hidden', 'submit', 'button', 'reset', 'image', 'search'].includes((element.type || '').toLowerCase());
     // Only a real form that looks like an application suppresses discovery (a newsletter box or a header job
     // search with keyword/location/department fields does not): applicant-named fields or a file input.
@@ -494,14 +503,23 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
     });
     // Only a verified application progress indicator may widen a virtual form or give it identity: Workday's own
     // progress bar or an explicit step hook. A generic aria-current="step" (product tours, onboarding) never does.
-    const applicationStepElement = (element) => visible(element)
+    // Workday's step text ("current step 1 of 6") is a screen-reader-only label inside the visible active step.
+    const inVisibleWorkdayActiveStep = (element) => {
+      const active = element.closest('[data-automation-id="progressBarActiveStep"]');
+      return Boolean(active && active.closest('[data-automation-id="progressBar"]') && visible(active));
+    };
+    const applicationStepElement = (element) => (visible(element) || inVisibleWorkdayActiveStep(element))
       && !element.closest('[role="dialog"], [role="alertdialog"], [role="tooltip"], dialog, [aria-modal="true"]')
       && (element.hasAttribute('data-career-ops-step')
         || Boolean(element.closest('[data-automation-id="progressBarActiveStep"]')?.closest('[data-automation-id="progressBar"]')));
     const isVirtualForm = (element) => Boolean(element?.hasAttribute?.('data-career-ops-virtual-form'));
     if (!realFormHasFields && !document.querySelector('[data-career-ops-virtual-form]')) {
       const loose = [...document.querySelectorAll(fieldSelector)].filter((element) => applicantField(element) && !element.closest('form'));
-      if (loose.length >= 3 || loose.some((element) => (element.type || '').toLowerCase() === 'file')) {
+      // After a Workday upload the input is gone; the tile naming the uploaded file stands in for it.
+      const uploadedTiles = [...document.querySelectorAll('[data-automation-id="file-upload-item-name"]')]
+        .filter((element) => visible(element) && !element.closest('form'));
+      if (!loose.length && uploadedTiles.length) loose.push(...uploadedTiles);
+      if (loose.length >= 3 || loose.some((element) => (element.type || '').toLowerCase() === 'file' || uploadedTiles.includes(element))) {
         let container = loose[0].parentElement;
         while (container && !loose.every((element) => container.contains(element))) container = container.parentElement;
         const submitLike = (root) => [...root.querySelectorAll('button, [role="button"], input[type="submit"]')]
@@ -528,8 +546,11 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
         form.setAttribute('data-career-ops-form-id', `form-${++globalThis.__careerOpsFormCounter}`);
       }
     }
-    const fieldElements = [...document.querySelectorAll('input, textarea, select, [role="combobox"]')]
-      .filter((element) => !['hidden', 'submit', 'button', 'reset', 'image'].includes((element.type || '').toLowerCase()));
+    // Workday "Select One" dropdowns are buttons that open a listbox (Country, Phone Device Type).
+    const isWorkdayListbox = (element) => element.tagName === 'BUTTON' && element.getAttribute('aria-haspopup') === 'listbox';
+    const fieldElements = [...document.querySelectorAll('input, textarea, select, [role="combobox"], button[aria-haspopup="listbox"]')]
+      .filter((element) => isWorkdayListbox(element)
+        || !['hidden', 'submit', 'button', 'reset', 'image'].includes((element.type || '').toLowerCase()));
     const usedFieldIds = new Set();
     for (const element of fieldElements) {
       const existing = String(element.getAttribute('data-career-ops-field-id') || '').trim();
@@ -696,7 +717,7 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
           formId: owningForm?.getAttribute('data-career-ops-form-id') || '',
           id: element.id || '',
           tag: element.tagName.toLowerCase(),
-          type: (element.type || element.tagName).toLowerCase(),
+          type: isWorkdayListbox(element) ? 'listbox' : (element.type || element.tagName).toLowerCase(),
           role: element.getAttribute('role') || '',
           name: element.getAttribute('name') || '',
           label: fieldText,
@@ -707,7 +728,16 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
           disabled: element.disabled || element.getAttribute('aria-disabled') === 'true',
           visible: visible(element),
           autocomplete: element.getAttribute('aria-autocomplete') || element.getAttribute('autocomplete') || '',
-          value: element.value || '',
+          // Workday search-and-pick widgets (country phone code, how did you hear) are inputs inside a multiselect.
+          widget: isWorkdayListbox(element) ? 'workday-listbox' : element.getAttribute('data-uxi-widget-type') || '',
+          // A Workday pick-from-list field keeps its search box empty; the choice is a selected-item chip. A Workday
+          // dropdown button shows its choice as its text ("Select One" when empty).
+          value: isWorkdayListbox(element)
+            ? (/^select one$/i.test((element.innerText || '').trim()) ? '' : (element.innerText || '').replace(/\s+/g, ' ').trim())
+            : element.value || (element.getAttribute('data-uxi-widget-type') === 'selectinput'
+              ? [...(element.closest('[data-automation-id="multiSelectContainer"]')?.querySelectorAll('[data-automation-id="selectedItem"]') || [])]
+                .filter(visible).map((item) => (item.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean).join(', ')
+              : ''),
           checked: Boolean(element.checked),
           files: element.files ? [...element.files].map((file) => file.name) : [],
           multiple: Boolean(element.multiple),
@@ -718,7 +748,11 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
     const applicationFieldPattern = /(?:first.?name|last.?name|full.?name|e-?mail|phone|linkedin|github|resume|r[ée]sum[ée]|\bcv\b|cover letter|work authori[sz]|sponsor|current location|city|country|university|degree|salary|how did you hear)/i;
     const applicationSpecificFieldPattern = /(?:linkedin|github|resume|\bcv\b|cover letter|work authori[sz]|sponsor|how did you hear)/i;
     const stepFromElement = (element) => {
-      if (!visible(element)) return null;
+      // Workday's "current step 1 of 6" is a screen-reader-only label (hidden by CSS) inside the visible active step
+      // of its progress bar; it counts when that active step is visible.
+      const workdayActiveStep = element.closest('[data-automation-id="progressBarActiveStep"]');
+      if (!visible(element) && !(workdayActiveStep && visible(workdayActiveStep)
+        && workdayActiveStep.closest('[data-automation-id="progressBar"]'))) return null;
       const ownText = [...element.childNodes]
         .filter((node) => node.nodeType === Node.TEXT_NODE)
         .map((node) => node.textContent || '').join(' ').replace(/\s+/g, ' ').trim();
@@ -759,7 +793,7 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
     const scoredForms = forms.map((form) => {
       const candidates = [...form.querySelectorAll('input, textarea, select, [role="combobox"]')]
         .filter((field) => !['hidden', 'submit', 'button', 'reset', 'image'].includes((field.type || '').toLowerCase()));
-      const visibleCandidates = candidates.filter(visible);
+      const visibleCandidates = candidates.filter((field) => visible(field) || fileInVisibleUploadArea(field));
       const visibleControls = [...form.querySelectorAll(controlSelector)]
         .filter(visible);
       const score = visibleCandidates.filter((field) => applicationFieldPattern.test(textFor(field))
@@ -785,12 +819,15 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
         // numbered application workflow (Workday "step 3 of 6") that is the application.
         || (form.hasAttribute('data-career-ops-virtual-form')
           && [...form.querySelectorAll('[data-automation-id="progressBarActiveStep"], [aria-current="step"], [data-career-ops-step]')].some(applicationStepElement));
+      // Workday Autofill after an upload: the input is replaced by a tile naming the uploaded file.
+      const workdayUploadedStep = isVirtualForm(form) && hasFormStepEvidence
+        && [...form.querySelectorAll('[data-automation-id="file-upload-item-name"]')].some(visible);
       const associationBonus = structurallyAssociated || hasFormStepEvidence || hasApplicationAction ? 100 : 0;
       return {
         form,
         score: score + applicationSpecificSignals * 4 + associationBonus,
-        applicationQualified: visible(form) && candidates.length > 0
-          && (visibleCandidates.length > 0 || hasApplicationAction)
+        applicationQualified: visible(form)
+          && ((candidates.length > 0 && (visibleCandidates.length > 0 || hasApplicationAction)) || workdayUploadedStep)
           && independentApplicationIdentity,
       };
     }).filter((row) => row.applicationQualified).sort((a, b) => b.score - a.score);
@@ -844,7 +881,9 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
           formMethod: (element.getAttribute('formmethod') || form?.getAttribute('method') || 'get').toLowerCase(),
           formActionLooksTerminal: /(?:submit|send|complete|finish|finali[sz]e|confirm|apply)(?:[-_\/]|[A-Z]|\?|$)/i.test(formAction),
           insideApplicationForm: Boolean(form),
-          candidateFieldCount: formFields.filter(visible).length,
+          // A Workday step whose upload became a tile naming the uploaded file still holds that field.
+          candidateFieldCount: formFields.filter(visible).length + (isVirtualForm(form)
+            ? [...form.querySelectorAll('[data-automation-id="file-upload-item-name"]')].filter(visible).length : 0),
           applicationFormId,
           workflowVerified: Boolean(form && form === uniqueTopForm),
           hasRemainingStep: Boolean(stepIndicator && stepIndicator.total > stepIndicator.current),
@@ -854,7 +893,10 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
       });
     const bodyText = document.body?.innerText || '';
     const validationErrorEvidence = [...document.querySelectorAll('[role="alert"], .error, .validation-error, [aria-invalid="true"]')]
-      .filter(visible).map((element) => {
+      .filter(visible)
+      // Workday's screen-reader live region announces upload status ("<file> loading", "Successfully Uploaded").
+      .filter((element) => !element.closest('[data-automation-id="ariaLive"]'))
+      .map((element) => {
         const text = (element.innerText || element.getAttribute('aria-label') || '').trim();
         const owningForm = element.form || element.closest('form, [data-career-ops-virtual-form]');
         const formId = owningForm?.getAttribute('data-career-ops-form-id') || '';

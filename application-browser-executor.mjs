@@ -112,6 +112,8 @@ export async function prepareFormPassWithEvidence(page, browserContext, contract
     resumeMode,
     passId,
     reasoningProvider,
+    awaitManualFields: process.stdin.isTTY ? (labels) => awaitManualFieldsInTerminal(contract, labels) : null,
+    progressLog: process.stdout.isTTY ? (line) => console.log(line) : null,
   });
   const screenshotAfter = await safeScreenshot(page, afterPath);
   // Local page copy (gitignored evidence) so unsupported ATS steps can be fixed from a saved fixture.
@@ -338,7 +340,8 @@ export function classifyFormSnapshot(snapshot) {
     || (pathLooksLikeApplication && signalIndexes.size >= 1 && formCount > 0)
     || (pathLooksLikeApplication && formCount > 0 && fields.length >= 5 && hasTerminalPostControl)
     // Workday's first application step is a résumé upload on an /apply/ path with no <form>.
-    || (pathLooksLikeApplication && fields.some((field) => normalized(field.type) === 'file'))
+    || (pathLooksLikeApplication && (snapshot?.fields || []).some((field) => normalized(field.type) === 'file'
+      && (field.visible !== false || field.uploadAreaVisible)))
   );
 
   return {
@@ -562,6 +565,15 @@ export function isCompatibleDestination({ listingUrl, applyUrl = null, currentUr
   return Boolean(identity?.verified);
 }
 
+// ATS step pages (Workday ".../apply") omit the title or the company (Workday tenant "cw" for Cushman & Wakefield):
+// the listing's exact requisition on a known ATS host plus one visible match identifies the job.
+export function requisitionBoundIdentity(identity, listingUrl, currentUrl) {
+  if (identity?.verified) return true;
+  const listingRequisition = requisitionIdentity(listingUrl);
+  return Boolean((identity?.companyMatch || identity?.titleMatch) && listingRequisition
+    && isKnownApplicationHost(currentUrl) && requisitionIdentity(currentUrl) === listingRequisition);
+}
+
 export function verifyApplicationContinuity({ beforeUrl, currentUrl, snapshot, candidate }) {
   let before;
   let current;
@@ -671,6 +683,15 @@ export async function collectPageSnapshot(page) {
       role: element.getAttribute('role') || '',
       text: textFor(element),
       visible: visible(element),
+      // Workday hides the real file input behind a visible drop zone with a "Select files" button.
+      uploadAreaVisible: (() => {
+        if ((element.getAttribute('type') || '').toLowerCase() !== 'file' || visible(element)) return false;
+        let area = element.parentElement;
+        for (let depth = 0; area && depth < 4; depth += 1, area = area.parentElement) {
+          if (visible(area)) return Array.from(area.querySelectorAll('button, [role="button"]')).some(visible);
+        }
+        return false;
+      })(),
     }));
     const candidatePattern = /first.?name|given.?name|last.?name|family.?name|surname|full.?name|your name|candidate name|e-?mail|phone|mobile|resume|curriculum|\bcv\b|linkedin/i;
     const visibleApplicationDialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], dialog[open]'))
@@ -1420,10 +1441,7 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
         && isKnownApplicationHost(snapshot.currentUrl)) {
       compatible = true;
     }
-    // ATS intermediate steps (Workday ".../apply") omit the title; the exact requisition in the URL identifies the job.
-    const listingRequisition = requisitionIdentity(listingUrl);
-    if (!compatible && identity.companyMatch && isKnownApplicationHost(snapshot.currentUrl)
-        && listingRequisition && requisitionIdentity(snapshot.currentUrl) === listingRequisition) {
+    if (!compatible && requisitionBoundIdentity(identity, listingUrl, snapshot.currentUrl)) {
       compatible = true;
     }
     if (!compatible) {
@@ -1498,6 +1516,28 @@ function subscribeToEnter(callback) {
   const input = createInterface({ input: process.stdin, terminal: false });
   input.on('line', callback);
   return () => input.close();
+}
+
+// Fields RoleForge cannot fill (unknown questions, unsupported widgets, validation errors) are completed by the user in
+// the open page; Enter re-checks the step and form filling continues. The final submit stays the user's.
+function awaitManualFieldsInTerminal(contract, labels) {
+  const until = new Date(Date.now() + DEFAULT_HUMAN_WAIT_MS).toLocaleTimeString();
+  console.log(`\n${contract.candidate.company} — ${contract.candidate.title}: fill these in the browser, then click this`
+    + ` terminal and press Enter before ${until} (do not click Submit):`);
+  for (const label of [...new Set(labels)]) console.log(`  - ${label}`);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      unsubscribe();
+      console.log(`No Enter received by ${until}; stopping here. Everything filled so far stays in the browser.`);
+      resolve(false);
+    }, DEFAULT_HUMAN_WAIT_MS);
+    const unsubscribe = subscribeToEnter(() => {
+      clearTimeout(timer);
+      unsubscribe();
+      console.log(`Enter received at ${new Date().toLocaleTimeString()}; re-checking the step.`);
+      resolve(true);
+    });
+  });
 }
 
 function candidateResult(contract, state) {
@@ -1656,6 +1696,9 @@ async function handoffHumanGate(page, contract, gate, stage, options, { root, ex
           executionLock.heartbeat();
           if (page.isClosed()) break;
           if (clock() >= deadline) break;
+          // After sign-in Workday redirects and renders the step client-side; judge the settled page.
+          await waitForRenderedContent(page, Math.max(1, Math.min(10_000, deadline - clock())));
+          if (page.isClosed()) break;
           snapshot = await collectPageSnapshot(page);
           const identityNow = verifyVisibleIdentity(snapshot, fresh.candidate);
           const compatible = compatibleHumanDestination(fresh, snapshot.currentUrl, identityNow, gateUrl);
@@ -1664,7 +1707,7 @@ async function handoffHumanGate(page, contract, gate, stage, options, { root, ex
             if (live?.result !== 'active') return move('blocked', snapshot.currentUrl,
               `Human handoff posting liveness failed: ${inline(live?.reason || 'unconfirmed').slice(0, 300)}`);
             const form = classifyFormSnapshot(snapshot);
-            if (!identityNow.verified || !form.actualForm || !snapshot.applicationFormId) return move('review_required', snapshot.currentUrl,
+            if (!requisitionBoundIdentity(identityNow, fresh.candidate.listingUrl, snapshot.currentUrl) || !form.actualForm || !snapshot.applicationFormId) return move('review_required', snapshot.currentUrl,
               `Human handoff requires review: ${identityNow.reason}; ${form.reason}`);
             return move('actual_form_reached', snapshot.currentUrl,
               'Fresh exact-candidate liveness, identity, destination, gate absence, and actual form verified.',

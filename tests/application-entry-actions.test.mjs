@@ -8,6 +8,7 @@ import {
   dismissCookieBanner,
   collectPageSnapshot,
   followSafeApplicationEntryFlow,
+  requisitionBoundIdentity,
   selectSafeApplyContinuation,
 } from '../application-browser-executor.mjs';
 
@@ -785,4 +786,36 @@ test('decorated or screen-reader-repeated Apply labels are application-entry act
   // Teamtailor: <button> with the default type=submit outside any form only opens the application.
   assert.equal(classifyApplicationEntryAction({ tag: 'button', type: 'submit', text: 'Apply now!', visible: true }, scope).safe, true);
   assert.equal(classifyApplicationEntryAction({ tag: 'button', type: 'submit', text: 'Apply now!', visible: true, inForm: true }, scope).safe, false);
+});
+
+test('Workday apply step without the company name continues only for the listing\'s exact requisition', async () => {
+  const listingUrl = 'https://xy.wd1.myworkdayjobs.com/external/job/Amsterdam/Data-Engineer_R100001';
+  const step = (href) => `<title>Data Engineer</title><h2>Data Engineer</h2><h3>Start Your Application</h3>
+    <a href="${href}" data-automation-id="autofillWithResume">Autofill with Resume</a>`;
+  for (const [applyPath, expected] of [['/external/job/Amsterdam/Data-Engineer_R100001/apply', true],
+    ['/external/job/Amsterdam/Data-Engineer_R999999/apply', false]]) {
+    const applyUrl = `https://xy.wd1.myworkdayjobs.com${applyPath}`;
+    await withFixture({
+      [listingUrl]: `<h1>Acme Data Engineer</h1><p>Role description</p><a href="${applyPath}">Apply</a>`,
+      [applyUrl]: step(`${applyPath}/autofillWithResume`),
+    }, async ({ context, page }) => {
+      await page.goto(listingUrl);
+      const result = await followSafeApplicationEntryFlow(
+        context, page, await collectPageSnapshot(page), CANDIDATE, { listingUrl },
+      );
+      assert.equal(result.identity.companyMatch, false);
+      assert.equal(result.hops[0].destinationUrl, applyUrl);
+      if (expected) assert.doesNotMatch(result.reason || '', /destination is incompatible/);
+      else assert.match(result.reason, /destination is incompatible/);
+    });
+  }
+});
+
+test('after sign-in a Workday step with only the title is the job only on the listing\'s exact requisition', () => {
+  const listing = 'https://xy.wd1.myworkdayjobs.com/external/job/Amsterdam/Data-Engineer_R100001';
+  const titleOnly = { verified: false, companyMatch: false, titleMatch: true };
+  assert.equal(requisitionBoundIdentity(titleOnly, listing, `${listing.replace('/external/', '/en-US/external/')}/apply/autofillWithResume`), true);
+  assert.equal(requisitionBoundIdentity(titleOnly, listing, listing.replace('R100001', 'R100002') + '/apply'), false);
+  assert.equal(requisitionBoundIdentity({ verified: false, companyMatch: false, titleMatch: false }, listing, `${listing}/apply`), false);
+  assert.equal(requisitionBoundIdentity(titleOnly, listing, 'https://careers.example.test/job/Data-Engineer_R100001'), false);
 });

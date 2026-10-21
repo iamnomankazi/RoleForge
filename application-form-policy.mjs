@@ -231,6 +231,7 @@ export function classifyFieldSemantics(field = {}) {
   const selectorShape = field.tag === 'select'
     || field.role === 'combobox'
     || field.autocomplete === 'list'
+    || ['selectinput', 'workday-listbox'].includes(field.widget)
     || (field.options || []).length > 0;
   const optionText = (field.options || []).flatMap((option) => [option?.label, option?.value]).join(' ');
   if (field.type === 'file') {
@@ -296,12 +297,12 @@ export function classifyFieldSemantics(field = {}) {
   if (selectorShape && /dial(?:ing)? code|calling code|phone prefix|country prefix/.test(text)) {
     return { category: 'identity_contact', semantic: 'phone_dial_code' };
   }
-  if (selectorShape && /phone country|country code/.test(text)) {
+  if (selectorShape && /phone country|country (?:phone )?code/.test(text)) {
     return /\+\s*\d{1,4}/.test(optionText)
       ? { category: 'identity_contact', semantic: 'phone_dial_code' }
       : { category: 'identity_contact', semantic: 'phone_country' };
   }
-  if (/phone|mobile|telephone/.test(text)) return { category: 'identity_contact', semantic: 'phone' };
+  if (/phone|mobile|telephone/.test(text) && !/extension|device type|phone type/.test(text)) return { category: 'identity_contact', semantic: 'phone' };
   if (/linkedin/.test(text)) return { category: 'identity_contact', semantic: 'linkedin' };
   if (/github/.test(text)) return { category: 'identity_contact', semantic: 'github' };
   if (/portfolio|website|personal site/.test(text)) return { category: 'identity_contact', semantic: 'website' };
@@ -570,6 +571,7 @@ function selectorShape(field = {}) {
   return field.tag === 'select'
     || field.role === 'combobox'
     || field.autocomplete === 'list'
+    || ['selectinput', 'workday-listbox'].includes(field.widget)
     || (field.options || []).length > 0;
 }
 
@@ -720,7 +722,8 @@ export function canonicalFieldValue(profile, semantics, {
     }
     let value = identity[semantic] ?? null;
     if (semantic === 'phone' && pairedPhoneSelector(field, snapshot.fields)) {
-      const dialCode = identity.phone_dial_code;
+      // The country code lives in its own control; without a configured dial code use the stored number's own prefix.
+      const dialCode = identity.phone_dial_code || cleanFormText(value).match(/^\+\d{1,4}(?=[\s-])/)?.[0] || null;
       if (dialCode) value = cleanFormText(value).replace(new RegExp(`^${dialCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s-]*`), '');
     }
     return value;

@@ -834,3 +834,154 @@ test('review-15: "Old CV ().pdf" and a display:contents name beside an empty inp
     rmSync(docs.dir, { recursive: true, force: true });
   }
 });
+
+// Live Cushman & Wakefield Workday (2026-10-21): the real file input is hidden beside a visible drop zone.
+test('Workday Autofill with a hidden file input behind "Select file" is the form and receives the bound CV', async () => {
+  const { classifyFormSnapshot, collectPageSnapshot } = await import('../application-browser-executor.mjs');
+  const hiddenUpload = autofillStep.replace(
+    '<input type="file" data-automation-id="file-upload-input-ref">',
+    `<div data-automation-id="file-upload-drop-zone"><div>Drop file here</div><div>or</div>
+      <button type="button" data-automation-id="select-files" onclick="this.closest('[data-automation-id=resumeUpload]').querySelector('input').click()"><span>Select file</span></button></div>
+    <input type="file" data-automation-id="file-upload-input-ref" style="display:none">`);
+  assert.notEqual(hiddenUpload, autofillStep);
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    const page = await servedPage(browser, flowPage.replace(JSON.stringify(autofillStep), JSON.stringify(hiddenUpload))
+      .replace(autofillStep, hiddenUpload));
+    const snapshot = await collectPageSnapshot(page);
+    assert.equal(classifyFormSnapshot(snapshot).actualForm, true);
+    assert.ok(snapshot.applicationFormId);
+    // Like the live page: Workday takes the file, removes the input and shows a tile with the file's name.
+    await page.evaluate(() => document.addEventListener('change', (event) => {
+      if (event.target.type !== 'file') return;
+      const name = event.target.files[0].name;
+      event.target.closest('[data-automation-id=resumeUpload]').innerHTML =
+        '<div><div data-automation-id="file-upload-item-name">' + name + '</div><div>506.63 KB</div></div>';
+    }, true));
+    const result = await prepareOperationalApplicationForm(page, profile, docs.value, {
+      context, transitionTimeoutMs: 2_000, transitionStabilityMs: 0,
+    });
+    assert.ok(result.evidence.uploadedArtifacts.some((row) => row.sha256 === docs.value.cv.sha256), 'bound CV uploaded on Autofill');
+    assert.equal(await page.evaluate(() => window.advances), 2, 'Autofill -> My Information -> Review');
+    assert.equal(await page.evaluate(() => window.submits), 0, 'Review Submit never clicked');
+    await page.close();
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});
+
+test('Workday Autofill that only shows the uploaded file tile (no input) still continues to the next step', async () => {
+  const uploaded = autofillStep.replace(
+    '<input type="file" data-automation-id="file-upload-input-ref"><span id="picked"></span>',
+    '<div><div data-automation-id="file-upload-item-name">Example_CV.pdf</div><div>506.63 KB</div></div>');
+  assert.notEqual(uploaded, autofillStep);
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    const page = await servedPage(browser, flowPage.replace(JSON.stringify(autofillStep), JSON.stringify(uploaded))
+      .replace(autofillStep, uploaded));
+    await prepareOperationalApplicationForm(page, profile, docs.value, {
+      context, transitionTimeoutMs: 2_000, transitionStabilityMs: 0,
+    });
+    assert.equal(await page.evaluate(() => window.advances), 2, 'Autofill -> My Information -> Review');
+    assert.equal(await page.evaluate(() => window.submits), 0, 'Review Submit never clicked');
+    await page.close();
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});
+
+// Live Workday (Cushman & Wakefield 2026-10-21): "current step N of M" is a screen-reader-only label hidden by CSS.
+test('Workday flow continues when the progress bar step text is a CSS-hidden screen-reader label', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    const hiddenStepText = '<style>[data-automation-id="progressBar"] li label:first-of-type'
+      + '{position:absolute;width:0;height:0;overflow:hidden}</style>';
+    const page = await servedPage(browser, hiddenStepText + flowPage);
+    await prepareOperationalApplicationForm(page, profile, docs.value, {
+      context, transitionTimeoutMs: 2_000, transitionStabilityMs: 0,
+    });
+    assert.equal(await page.evaluate(() => window.advances), 2, 'Autofill -> My Information -> Review');
+    assert.equal(await page.evaluate(() => window.submits), 0, 'Review Submit never clicked');
+    await page.close();
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});
+
+// Live Workday My Information (Cushman & Wakefield 2026-10-21), structure only: pick-from-list fields keep their
+// choice in a chip, "Select One" dropdowns are buttons, the phone country code is its own control.
+const myInfoLive = ({ source = '', phoneType = 'Select One' } = {}) => {
+  const chip = (text) => (text ? `<ul data-automation-id="selectedItemList"><li><div data-automation-id="selectedItem"><p>${text}</p></div></li></ul>` : '');
+  const pick = (id, label, text) => `<div data-automation-id="formField-${id}"><label for="${id}"><span>${label}<abbr>*</abbr></span></label>
+    <div data-automation-id="multiSelectContainer" data-uxi-widget-type="multiselect">${chip(text)}
+    <input id="${id}" placeholder="Search" aria-required="true" data-uxi-widget-type="selectinput"></div></div>`;
+  return shell(`<div data-automation-id="applyFlowMyInfoPage"><h2>My Information</h2>
+    ${pick('source--source', 'How Did You Hear About Us?', source)}
+    <div data-automation-id="formField-legalName--firstName"><label for="fn">Given Name(s)*</label><input id="fn" required value="Alex"></div>
+    <div data-automation-id="formField-legalName--lastName"><label for="ln">Family Name*</label><input id="ln" required value="Example"></div>
+    <div data-automation-id="formField-city"><label for="address--city">Postal District or City</label><input id="address--city" name="city"></div>
+    <div data-automation-id="formField-phoneType"><label for="phoneNumber--phoneType">Phone Device Type<abbr>*</abbr></label>
+      <button type="button" id="phoneNumber--phoneType" aria-haspopup="listbox" aria-required="true">${phoneType}</button></div>
+    ${pick('phoneNumber--countryPhoneCode', 'Country Phone Code', 'Finland (+358)')}
+    <div data-automation-id="formField-phoneNumber"><label for="phoneNumber--phoneNumber">Phone Number*</label>
+      <input id="phoneNumber--phoneNumber" name="phoneNumber" required value="40 123 4567"></div>
+    <div data-automation-id="formField-extension"><label for="phoneNumber--extension">Phone Extension</label><input id="phoneNumber--extension" name="extension"></div>
+  </div>`, '<button type="submit" data-automation-id="pageFooterNextButton">Save and Continue</button>', progress(2, 6, 'My Information'));
+};
+
+test('Workday My Information: chips count as values, Select One buttons are fields, phone keeps its separate code', async () => {
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await servedPage(browser, myInfoLive({ source: '' }), BASE.replace('autofillWithResume', 'myInformation'));
+    const plan = buildOperationalFormPlan(await inspectOperationalApplicationForm(page), profile, {}, { context });
+    const manual = plan.unresolvedFields.map((row) => row.label);
+    const filled = Object.fromEntries(plan.actions.map((action) => [action.label, action.value]));
+    assert.ok(manual.some((label) => /How Did You Hear/.test(label)), 'empty pick-from-list is the user\'s to choose');
+    assert.ok(manual.some((label) => /Phone Device Type/.test(label)), '"Select One" button is a required empty field');
+    assert.ok(!manual.some((label) => /Country Phone Code/.test(label)), 'a chosen chip is a value');
+    assert.ok(!Object.keys(filled).some((label) => /Country Phone Code|How Did You Hear|Extension|Device/.test(label)),
+      'never types into a pick-from-list, the extension or a device-type dropdown');
+    assert.ok(!Object.entries(filled).some(([label, value]) => /Phone Number/.test(label) && /^\+/.test(value)),
+      'phone number goes without the country code that has its own control');
+    await page.close();
+
+    const chosen = await servedPage(browser, myInfoLive({ source: 'Company Website', phoneType: 'Mobile' }),
+      BASE.replace('autofillWithResume', 'myInformation2'));
+    const chosenPlan = buildOperationalFormPlan(await inspectOperationalApplicationForm(chosen), profile, {}, { context });
+    assert.ok(!chosenPlan.unresolvedFields.some((row) => /How Did You Hear|Phone Device Type/.test(row.label)),
+      'chosen values are kept, not re-asked');
+    await chosen.close();
+  } finally {
+    await browser.close();
+  }
+});
+
+test('a field that React re-renders with the same id after typing is re-acquired, not reported as changed', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    const page = await servedPage(browser, `${shell(infoStep.replace('<input id="em" type="email" required>',
+      '<input id="em" type="email" required><span id="host"><input id="address--city" name="city" aria-label="City"></span>'),
+    '<button type="submit" data-automation-id="pageFooterNextButton">Save and Continue</button>', progress(2, 3, 'My Information'))}
+    <script>document.addEventListener('input', (e) => { if (e.target.id !== 'address--city' || e.target.dataset.fresh) return;
+      const copy = document.createElement('input'); copy.id = 'address--city'; copy.name = 'city'; copy.setAttribute('aria-label', 'City');
+      copy.dataset.fresh = '1'; copy.value = e.target.value; e.target.replaceWith(copy); });</script>`,
+    BASE.replace('autofillWithResume', 'rerender'));
+    const result = await prepareOperationalApplicationForm(page, profile, docs.value, {
+      context, transitionTimeoutMs: 1_000, transitionStabilityMs: 0,
+    });
+    assert.ok(!result.evidence.unresolvedFields.some((row) => /could not be reacquired/.test(row.reason || '')),
+      JSON.stringify(result.evidence.unresolvedFields.map((row) => row.reason)));
+    assert.equal(await page.inputValue('#address--city'), 'Example City');
+    await page.close();
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});
