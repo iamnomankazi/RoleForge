@@ -197,8 +197,21 @@ function controlAction(field, intended) {
 function listboxOptionMatches(label, action) {
   const normalized = normalizeFormQuestion(label);
   const optionMatch = action.optionMatch || null;
-  if (optionMatch?.mode === 'contains_any') {
-    return (optionMatch.values || []).some((value) => normalized.includes(normalizeFormQuestion(value)));
+  if (optionMatch?.mode === 'degree') {
+    const level = optionMatch.level.toLowerCase();
+    if (new RegExp(`^${level}(?:s| s)?(?: degree)?$`).test(normalized)) return true;
+    const subject = (value) => normalizeFormQuestion(value).split(' ')
+      .filter((word) => !['master', 'masters', 'bachelor', 'bachelors', 's', 'degree', 'of', 'in'].includes(word))
+      .sort().join(' ');
+    return new RegExp(`^${level}(?:s| s)?\\b`).test(normalized)
+      && Boolean(subject(optionMatch.qualification))
+      && subject(normalized) === subject(optionMatch.qualification);
+  }
+  if (optionMatch?.mode === 'proficiency') {
+    if (/\b(?:not|no|non|limited|without)\b/.test(normalized)) return false;
+    return (optionMatch.values || []).some((value) => (
+      new RegExp(`(?:^| )${escapeRegex(normalizeFormQuestion(value))}(?: |$)`).test(normalized)
+    ));
   }
   return normalized === normalizeFormQuestion(action.value);
 }
@@ -493,6 +506,7 @@ export async function inspectOperationalApplicationForm(page) {
         workdayBlockKind,
         workdayBlockHeading: repeatedPanelHeading,
         workdayBlockId: repeatedPanel?.id || '',
+        workdayBlockLabelledBy: repeatedPanel?.getAttribute('aria-labelledby') || '',
         workdaySchool,
         workdayLanguage: workdayBlockKind === 'language' ? clean(languageName) : '',
         workdayUploadSectionHeading: (element.type || '').toLowerCase() === 'file'
@@ -502,6 +516,8 @@ export async function inspectOperationalApplicationForm(page) {
         workdayDateGroupId: dateGroupId,
         workdayDateSegments: dateSegments,
         workdayDateGroupRequired: /\*/.test([dateQuestion, groupLabel, directQuestion].filter(Boolean).join(' '))
+          || dateQuestionGroup?.getAttribute('aria-required') === 'true'
+          || dateWrapper?.getAttribute('aria-required') === 'true'
           || dateSegments.some((segment) => segment.required),
         workdayDatePrimary: Boolean(dateGroupId && dateSegments.length
           && dateSegments.find((segment) => segment.segment === 'month')?.fieldId === fieldId),
@@ -566,6 +582,16 @@ function manualField(field, semantics, reason, missingInformation = null, reason
     reasonCode,
     missingInformation,
     manualActionRequired: true,
+  };
+}
+
+function selectionConflict(field, semantics, existingValue, groundedValue) {
+  return {
+    ...manualField(field, semantics,
+      `Existing selection (${existingValue}) differs from the grounded value (${groundedValue}); review is required.`,
+      { existingValue, groundedValue }),
+    existingValue,
+    groundedValue,
   };
 }
 
@@ -703,14 +729,18 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       name: field.name,
       category: semantics.category,
       semantic: semantics.semantic,
+      locatorSemantic: classifyFieldSemantics(field).semantic,
+      workdayBlockId: field.workdayBlockId || '',
+      workdayBlockLabelledBy: field.workdayBlockLabelledBy || '',
       resolutionKey: fieldResolutionKey(field, snapshot.applicationFormId),
       semanticResolutionKind: semanticResolution?.kind || null,
       narrativeRouting,
     };
 
-    // Workday's CV autofill can populate repeated education entries before RoleForge sees them. Keep any
-    // non-empty text input in those entries exactly as supplied; it is never a canonical profile target.
-    if (field.workdayBlockKind === 'education' && field.type === 'text' && cleanFormText(field.value)) {
+    // Workday's CV autofill can populate repeated experience and education entries. Keep their existing text,
+    // including role descriptions, instead of replacing it with a canonical or generated answer.
+    if ((field.workdayBlockKind === 'education' || field.workdayBlockLabelledBy)
+        && ['text', 'textarea'].includes(field.type) && !field.widget && cleanFormText(field.value)) {
       preservedFields.push({ ...base, valueHash: hashFormValue(field.value), preserved: true });
       continue;
     }
@@ -884,7 +914,7 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       };
       if (selectedItems.length) {
         if (isCommitted(field, planned)) preservedFields.push({ ...base, valueHash: planned.valueHash, preserved: true });
-        else unresolvedFields.push(manualField(field, semantics, 'A different Workday selection is already present; RoleForge did not replace it.'));
+        else unresolvedFields.push(selectionConflict(field, semantics, selectedItems.join(', '), value));
       } else actions.push(planned);
       continue;
     }
@@ -906,11 +936,12 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
         ...base,
         action: 'listbox',
         value: targets[0],
-        optionMatch: { mode: 'contains_any', values: [targets[0]] },
+        optionMatch: { mode: 'degree', level: targets[0], qualification: matchingEntries[0].degree },
         valueHash: hashFormValue(targets[0]),
         retryBudget: 1,
       };
       if (isCommitted(field, planned)) preservedFields.push({ ...base, valueHash: planned.valueHash, preserved: true });
+      else if (fieldAnswered(field)) unresolvedFields.push(selectionConflict(field, semantics, field.value, matchingEntries[0].degree));
       else actions.push(planned);
       continue;
     }
@@ -930,11 +961,12 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
         ...base,
         action: 'listbox',
         value: level,
-        optionMatch: { mode: 'contains_any', values: valuesByLevel[level] },
+        optionMatch: { mode: 'proficiency', values: valuesByLevel[level] },
         valueHash: hashFormValue(level),
         retryBudget: 1,
       };
       if (isCommitted(field, planned)) preservedFields.push({ ...base, valueHash: planned.valueHash, preserved: true });
+      else if (fieldAnswered(field)) unresolvedFields.push(selectionConflict(field, semantics, field.value, level));
       else actions.push(planned);
       continue;
     }
@@ -947,7 +979,7 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       } else if (level === 'Beginner') {
         const planned = { ...base, action: 'uncheck', value: 'No', valueHash: hashFormValue('No'), retryBudget: 1 };
         if (isCommitted(field, planned)) preservedFields.push({ ...base, valueHash: planned.valueHash, preserved: true });
-        else actions.push(planned);
+        else unresolvedFields.push(selectionConflict(field, semantics, 'Fluent', level));
       } else if (!level && field.required) {
         unresolvedFields.push(manualField(field, semantics, 'The fluent checkbox language level is not grounded by the CV.'));
       }
@@ -1104,6 +1136,8 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
     }
     if (isCommitted(field, planned)) {
       preservedFields.push({ ...base, valueHash: planned.valueHash, preserved: true });
+    } else if (field.widget === 'workday-listbox' && fieldAnswered(field)) {
+      unresolvedFields.push(selectionConflict(field, semantics, field.value, value));
     } else {
       actions.push(planned);
     }
@@ -1147,6 +1181,7 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
   }
   return {
     actions,
+    plannedFieldIds: applicationFields.map((field) => field.fieldId),
     preservedFields,
     preservedUploads,
     unresolvedFields: dedupeRows(unresolvedFields),
@@ -1533,15 +1568,32 @@ async function exactLocator(page, action) {
       return locator;
     }
   }
-  // React ATSs (Workday) replace an input with a fresh copy after typing: same stable id, new RoleForge tag. When
-  // exactly one element on the page has that stable id and the same tag type, it is the same field; re-tag it.
-  if (action.id) {
+  // React can replace a control after typing. A stable DOM id alone is insufficient: repeated panels and other
+  // forms can reuse it. Verify ownership and the fresh field's meaning before transferring the planned identity.
+  if (action.id && action.formId) {
     const byId = page.locator(`[id="${String(action.id).replace(/"/g, '\\"')}"]`);
     if (await byId.count() === 1) {
-      const tagName = await byId.evaluate((element) => element.tagName.toLowerCase());
-      if (!action.tag || tagName === action.tag) {
-        await byId.evaluate((element, fieldId) => element.setAttribute('data-career-ops-field-id', fieldId), expectedFieldId);
-        return byId;
+      const identity = await byId.evaluate((element) => ({
+        tag: element.tagName.toLowerCase(),
+        formId: (element.form || element.closest('form, [data-career-ops-virtual-form]'))
+          ?.getAttribute('data-career-ops-form-id') || '',
+        blockId: element.closest('[role="group"][aria-labelledby$="-panel"]')?.id || '',
+        blockLabelledBy: element.closest('[role="group"][aria-labelledby$="-panel"]')?.getAttribute('aria-labelledby') || '',
+        fieldId: element.getAttribute('data-career-ops-field-id') || '',
+      }));
+      const belongsToAnotherField = identity.fieldId && identity.fieldId !== expectedFieldId
+        && (action.plannedFieldIds || []).includes(identity.fieldId);
+      if ((!action.tag || identity.tag === action.tag) && identity.formId === action.formId
+          && identity.blockId === (action.workdayBlockId || '')
+          && identity.blockLabelledBy === (action.workdayBlockLabelledBy || '') && !belongsToAnotherField) {
+        const snapshot = await inspectOperationalApplicationForm(page);
+        const field = snapshot.fields.find((item) => item.id === action.id);
+        if (snapshot.applicationFormId === action.formId && field?.formId === action.formId
+            && classifyFieldSemantics(field).semantic === (action.locatorSemantic || action.semantic)
+            && normalizeFormQuestion(fieldQuestion(field)) === normalizeFormQuestion(action.label)) {
+          await byId.evaluate((element, fieldId) => element.setAttribute('data-career-ops-field-id', fieldId), expectedFieldId);
+          return byId;
+        }
       }
     }
   }
@@ -1860,6 +1912,11 @@ async function performAction(page, action, visibleOptions, { deadlineMs, clock }
   if (action.action === 'listbox') {
     // Workday "Select One" button: open it, pick the option whose whole text matches, verify the button shows it.
     // Option order varies per question, so never pick by position.
+    const existing = cleanFormText(await locator.innerText());
+    if (existing && !/^select one$/i.test(existing)) {
+      if (listboxOptionMatches(existing, action)) return action.value;
+      throw new Error(`Existing selection (${existing}) differs from the grounded value (${action.optionMatch?.qualification || action.value}); review is required.`);
+    }
     await locator.click({ timeout: remainingTimeout(deadlineMs, clock) });
     const options = await workdayListboxOptions(page, locator, { deadlineMs, clock });
     try {
@@ -2375,7 +2432,8 @@ async function executeOperationalFormPlanGuarded(page, plan, {
   let sessionLimitReached = false;
   let gate = null;
   for (let actionIndex = 0; actionIndex < plan.actions.length; actionIndex += 1) {
-    const action = plan.actions[actionIndex];
+    const action = { ...plan.actions[actionIndex], plannedFieldIds: plan.plannedFieldIds
+      || [...plan.actions, ...(plan.preservedFields || []), ...(plan.unresolvedFields || [])].map((row) => row.fieldId) };
     gate = await inspectLiveHumanGate(page, 'field_filling');
     if (gate) break;
     if (classifyHumanOnlyField(action)) {
@@ -2558,6 +2616,7 @@ export async function executeOperationalFormPlan(page, plan, options = {}) {
 
 // A radio or checkbox carries its option value whether or not it is chosen; only checked counts as answered.
 function fieldAnswered(field) {
+  if (field.widget === 'selectinput') return (field.selectedItems || []).some((value) => cleanFormText(value));
   return ['radio', 'checkbox'].includes(String(field.type || '').toLowerCase())
     ? Boolean(field.checked)
     : Boolean(cleanFormText(field.value));
@@ -2565,7 +2624,8 @@ function fieldAnswered(field) {
 
 function requiredEmpty(field) {
   return field.visible !== false && field.required && !field.disabled
-    && !cleanFormText(field.value) && !field.checked && !(field.files || []).length;
+    && !(field.widget === 'selectinput' ? fieldAnswered(field) : cleanFormText(field.value) || field.checked)
+    && !(field.files || []).length;
 }
 
 export async function reviewOperationalApplicationForm(page, profile, artifacts, execution, {
@@ -3098,6 +3158,33 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
           labels.push(label);
         }
         if (await awaitManualFields(labels)) {
+          const freshSnapshot = await inspectOperationalApplicationForm(page);
+          const sameOrigin = isSameVerifiedApplicationOrigin(currentSnapshot.url, freshSnapshot.url);
+          const continuity = typeof context.verifyApplicationContinuity === 'function'
+            ? await context.verifyApplicationContinuity({
+              beforeUrl: currentSnapshot.url, currentUrl: freshSnapshot.url,
+              snapshot: freshSnapshot, candidate: context.candidate,
+            })
+            : { verified: currentSnapshot.url.split('#')[0] === freshSnapshot.url.split('#')[0] };
+          if (!sameOrigin || !continuity?.verified || !currentSnapshot.applicationFormId
+              || freshSnapshot.applicationFormId !== currentSnapshot.applicationFormId) {
+            outcome = { ...reviewed, gate: { state: 'review_required',
+              reason: 'Application identity or verified form changed during manual completion; no further fields were filled.' } };
+            break;
+          }
+          // Execution history remains in the attempt ledger. Only still-uncommitted fields belong in the handoff.
+          aggregate.unresolvedFields = aggregate.unresolvedFields.filter((row) => {
+            const matches = freshSnapshot.fields.filter((field) => field.formId === freshSnapshot.applicationFormId
+              && (field.fieldId === row.fieldId || stableFieldIdentity(field) === row.stableFieldId));
+            if (matches.length !== 1) return true;
+            const field = matches[0];
+            if (field.ariaInvalid) return true;
+            if (field.workdayDateGroupId) {
+              return !(field.workdayDateSegments || []).every((segment) => cleanFormText(segment.value)
+                || !(field.workdayDateGroupRequired || segment.required));
+            }
+            return !fieldAnswered(field) && !(field.files || []).length;
+          });
           const waited = clock() - waitStarted;
           sessionDeadlineMs += waited;
           progressionDeadlineMs += waited;
@@ -3280,7 +3367,7 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         break;
       }
       const continuity = typeof context.verifyApplicationContinuity === 'function'
-        ? context.verifyApplicationContinuity({
+        ? await context.verifyApplicationContinuity({
           beforeUrl: currentSnapshot.url,
           currentUrl: transition.snapshot?.url,
           snapshot: transition.snapshot,

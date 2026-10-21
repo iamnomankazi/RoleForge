@@ -226,7 +226,7 @@ const experienceProfile = {
 function experienceFlow() {
   const degreePanel = (index, school, id) => `<section data-automation-id="education-${index}">
     <label for="school-${index}">School or University*</label><input id="school-${index}" value="${school}">
-    ${listbox(id, 'Degree', index === 1 ? ['Master of Science', 'Bachelor of Engineering'] : ['Bachelor of Engineering', 'Master of Science'])}
+    ${listbox(id, 'Degree', index === 1 ? ['Master', 'Bachelor of Engineering'] : ['Bachelor of Information Technology', 'Master of Science'])}
     <button type="button">Add Another</button></section>`;
   const languagePanel = (language, id, options) => `<fieldset role="group" aria-labelledby="heading-${language.toLowerCase()}">
     <h3 id="heading-${language.toLowerCase()}">${language}</h3>
@@ -292,8 +292,8 @@ test('My Experience fills only existing education and language blocks from CV en
       awaitManualFields: async (labels) => { manualCalls.push(labels); return false; },
     });
     assert.deepEqual(manualCalls, []);
-    assert.equal(await page.locator('#degree-master').innerText(), 'Master of Science');
-    assert.equal(await page.locator('#degree-bachelor').innerText(), 'Bachelor of Engineering');
+    assert.equal(await page.locator('#degree-master').innerText(), 'Master');
+    assert.equal(await page.locator('#degree-bachelor').innerText(), 'Bachelor of Information Technology');
     for (const language of ['english', 'hindi', 'finnish']) {
       const expected = language === 'english' ? 'Fluent' : language === 'hindi' ? 'Mother tongue' : 'Elementary';
       for (const skill of ['overall', 'reading', 'writing', 'speaking', 'listening']) {

@@ -50,7 +50,7 @@ function fixture() {
       ${panel('Education 2', 'Example College', 'two')}
       ${panel('Education 3', 'Unlisted Institute', 'three')}
       ${languagePanel('English', 'english', ['Fluent', 'Beginner'])}
-      ${languagePanel('Spanish', 'spanish', ['Elementary', 'Fluent'], true)}
+      ${languagePanel('Spanish', 'spanish', ['Elementary', 'Fluent'])}
       <div role="group" aria-labelledby="graduation-question">
         <label id="graduation-question">What is your expected graduation date?*</label>
         <div role="group" data-automation-id="dateInputWrapper" aria-labelledby="graduation-question">
@@ -74,8 +74,8 @@ function fixture() {
     window.reviewSubmitClicks = 0;
     document.getElementById('review-submit').addEventListener('click', () => { window.reviewSubmitClicks += 1; });
     const choices = {
-      'degree-one': ['Bachelor of Engineering', 'Master of Science'],
-      'degree-two': ['Master of Science', 'Bachelor of Engineering'],
+      'degree-one': ['Bachelor of Engineering', 'Master'],
+      'degree-two': ['Master of Science', 'Bachelor of Information Technology'],
       'degree-three': ['Master of Science', 'Bachelor of Engineering'],
       english: ['Fluent', 'Beginner'], spanish: ['Elementary', 'Fluent'],
     };
@@ -130,7 +130,7 @@ test('real Workday Experience panels preserve autofill, resolve opened choices, 
       'prefilled school inputs are never replaced');
     assert.equal(plan.actions.filter((action) => action.semantic === 'language_proficiency').length, 10);
     assert.ok(plan.actions.some((action) => action.semantic === 'language_fluent' && action.action === 'check'));
-    assert.ok(plan.actions.some((action) => action.semantic === 'language_fluent' && action.action === 'uncheck'));
+    assert.ok(plan.preservedFields.some((field) => field.semantic === 'language_fluent' && /Spanish/.test(field.label)));
     assert.ok(plan.actions.some((action) => action.semantic === 'cv_upload' && action.artifact === artifact));
     assert.deepEqual(plan.actions.find((action) => action.action === 'date').dateSegments
       .map((segment) => [segment.segment, segment.value]), [['month', '12'], ['day', '31'], ['year', '2026']]);
@@ -142,8 +142,8 @@ test('real Workday Experience panels preserve autofill, resolve opened choices, 
     assert.equal(await page.locator('#school-one').inputValue(), 'Example University');
     assert.equal(await page.locator('#school-two').inputValue(), 'Example College');
     assert.equal(await page.locator('#school-three').inputValue(), 'Unlisted Institute');
-    assert.equal(await page.locator('#degree-one').innerText(), 'Master of Science');
-    assert.equal(await page.locator('#degree-two').innerText(), 'Bachelor of Engineering');
+    assert.equal(await page.locator('#degree-one').innerText(), 'Master');
+    assert.equal(await page.locator('#degree-two').innerText(), 'Bachelor of Information Technology');
     assert.equal(await page.locator('#english-overall').innerText(), 'Fluent');
     assert.equal(await page.locator('#spanish-overall').innerText(), 'Elementary');
     assert.equal(await page.locator('#fluent-english').isChecked(), true);

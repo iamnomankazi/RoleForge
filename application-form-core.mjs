@@ -742,10 +742,10 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
           // dropdown button shows its choice as its text ("Select One" when empty).
           value: isWorkdayListbox(element)
             ? (/^select one$/i.test((element.innerText || '').trim()) ? '' : (element.innerText || '').replace(/\s+/g, ' ').trim())
-            : element.value || (element.getAttribute('data-uxi-widget-type') === 'selectinput'
+            : element.getAttribute('data-uxi-widget-type') === 'selectinput'
               ? [...(element.closest('[data-automation-id="multiSelectContainer"]')?.querySelectorAll('[data-automation-id="selectedItem"]') || [])]
                 .filter(visible).map((item) => (item.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean).join(', ')
-              : ''),
+              : element.value || '',
           selectedItems: element.getAttribute('data-uxi-widget-type') === 'selectinput'
             ? [...(element.closest('[data-automation-id="multiSelectContainer"]')?.querySelectorAll('[data-automation-id="selectedItem"]') || [])]
               .filter(visible).map((item) => (item.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean)
