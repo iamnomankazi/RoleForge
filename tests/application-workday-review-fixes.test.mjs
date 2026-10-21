@@ -61,7 +61,9 @@ async function planFor(page, customProfile = profile) {
 }
 
 test('manual continuation verifies requisition, origin, and the same application form before filling again', async () => {
-  for (const change of ['requisition', 'fallback-requisition', 'origin', 'form']) {
+  // A rebuilt form on the same origin and exact requisition (a page refresh) is the same application and may
+  // continue; another requisition or origin never does.
+  for (const change of ['requisition', 'fallback-requisition', 'origin']) {
     const page = await served(`${firstName}<label for="manual">Favorite office*</label><input id="manual" required>`);
     try {
       let pauses = 0;

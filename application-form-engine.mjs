@@ -2991,7 +2991,9 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
     }
     : previousEvidence;
   const reasoningState = createReasoningState(profile, reasoningProvider, effectivePreviousEvidence);
-  if (resumeMode !== 'initial'
+  // The resume budget bounds unattended retries. In a supervised run (awaitManualFields: a person at the terminal
+  // presses Enter for every resume) the person is the bound.
+  if (resumeMode !== 'initial' && !awaitManualFields
       && Number(effectivePreviousEvidence?.passBudget?.controlledResumeUsed || 0) >= MAX_CONTROLLED_RESUMES) {
     const snapshot = await inspectOperationalApplicationForm(page);
     reasoningState.semanticVerification.disposition = 'review_required';
@@ -3201,8 +3203,10 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
               snapshot: freshSnapshot, candidate: context.candidate,
             })
             : { verified: currentSnapshot.url.split('#')[0] === freshSnapshot.url.split('#')[0] };
+          // A page refresh (Workday "Something went wrong" -> F5) rebuilds the virtual form under a new id: the same
+          // exact application (origin + requisition continuity) with a verified form is still the same application.
           if (!sameOrigin || !continuity?.verified || !currentSnapshot.applicationFormId
-              || freshSnapshot.applicationFormId !== currentSnapshot.applicationFormId) {
+              || !freshSnapshot.applicationFormId) {
             outcome = { ...reviewed, gate: { state: 'review_required',
               reason: 'Application identity or verified form changed during manual completion; no further fields were filled.' } };
             break;
