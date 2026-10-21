@@ -232,8 +232,53 @@ function cvEducationEntries(profile) {
     const start = heading.index + heading[0].length;
     const end = headings[index + 1]?.index ?? section.length;
     const degree = section.slice(start, end).match(/^\s*\*\*([^*]+)\*\*/m)?.[1] || '';
-    return { school: cleanFormText(heading[1]), degree: cleanFormText(degree) };
+    return { school: cleanSchoolName(heading[1]), degree: cleanFormText(degree) };
   }).filter((entry) => entry.school && entry.degree);
+}
+
+function cleanSchoolName(value) {
+  return cleanFormText(value).replace(/^the\s+/i, '');
+}
+
+function educationSchoolMatches(left, right) {
+  const normalizeSchool = (value) => normalizeFormQuestion(cleanSchoolName(value));
+  const a = normalizeSchool(left);
+  const b = normalizeSchool(right);
+  return Boolean(a && b && (a === b || a.includes(b) || b.includes(a)));
+}
+
+function groundedDateSegments(value) {
+  const text = cleanFormText(value);
+  let year;
+  let month;
+  let day;
+  let match = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (match) [, year, month, day] = match;
+  if (!match) {
+    match = text.match(/^(\d{1,2})[/.](\d{1,2})[/.](\d{4})$/);
+    if (match) {
+      const first = Number(match[1]);
+      const second = Number(match[2]);
+      if (first > 12 && second <= 12) [, day, month, year] = match;
+      else if (second > 12 && first <= 12) [, month, day, year] = match;
+      else return null;
+    }
+  }
+  if (!match) {
+    match = text.match(/^(\d{1,2})[/.](\d{4})$/);
+    if (match) [, month, year] = match;
+  }
+  if (!match) {
+    match = text.match(/^(\d{4})-(\d{1,2})$/);
+    if (match) [, year, month] = match;
+  }
+  if (!match && /^\d{4}$/.test(text)) year = text;
+  if (!year || !/^\d{4}$/.test(String(year))) return null;
+  const values = { year: String(year), month: month ? String(Number(month)).padStart(2, '0') : '', day: day ? String(Number(day)).padStart(2, '0') : '' };
+  if (values.month && (Number(values.month) < 1 || Number(values.month) > 12)) return null;
+  if (values.day && (Number(values.day) < 1 || Number(values.day) > 31)) return null;
+  if (values.day && values.month && Number(values.day) > new Date(Date.UTC(Number(values.year), Number(values.month), 0)).getUTCDate()) return null;
+  return values;
 }
 
 function cvLanguageLevels(profile) {
@@ -247,8 +292,7 @@ function languageLevelForField(field, profile) {
   if (!blockLanguage) return null;
   const matches = cvLanguageLevels(profile).filter(([language]) => {
     const normalized = normalizeFormQuestion(language);
-    return blockLanguage === normalized || blockLanguage.includes(` ${normalized} `)
-      || blockLanguage.startsWith(`${normalized} `) || blockLanguage.endsWith(` ${normalized}`);
+    return blockLanguage === normalized || blockLanguage.includes(normalized) || normalized.includes(blockLanguage);
   });
   return matches.length === 1 ? matches[0][1] : null;
 }
@@ -310,7 +354,12 @@ function isCommitted(field, action) {
     return (field.files || []).some((filename) => filename === action.artifact.intendedFilename);
   }
   if (action.action === 'check' || action.action === 'radio') return Boolean(field.checked);
+  if (action.action === 'uncheck') return !field.checked;
   if (action.action === 'listbox') return listboxOptionMatches(field.value, action);
+  if (action.action === 'date') return (action.dateSegments || []).every((segment) => (
+    cleanFormText(action.workdayDateSegments?.find((current) => current.fieldId === segment.fieldId)?.value)
+      === segment.value
+  ));
   if (action.action === 'pick') return pickFieldCommitted(field, action);
   if (action.action === 'select') {
     const option = matchingOption(field, action.value);
@@ -365,26 +414,62 @@ export async function inspectOperationalApplicationForm(page) {
         || control.getAttribute('aria-label') || referencedLabel(control));
       const controlValue = (control) => clean(control?.value || control?.innerText
         || [...(control?.querySelectorAll?.('[data-automation-id="selectedItem"]') || [])].map((item) => item.innerText).join(' '));
-      const educationPanel = element.closest('[data-automation-id^="education-"]');
-      const languageGroup = labelledGroup || element.closest('[data-automation-id*="language" i]')
+      const repeatedPanel = element.closest('[role="group"][aria-labelledby$="-panel"]');
+      const repeatedPanelHeading = referencedLabel(repeatedPanel);
+      const educationPanel = (/^education\b/i.test(repeatedPanelHeading) ? repeatedPanel : null)
+        || element.closest('[data-automation-id^="education-"]');
+      const repeatedLanguagePanel = repeatedPanel
+        && (/^languages?\b/i.test(repeatedPanelHeading) || repeatedPanel.querySelector('[name="language"]'))
+        ? repeatedPanel : null;
+      const languageGroup = repeatedLanguagePanel || labelledGroup || element.closest('[data-automation-id*="language" i]')
         || (element.hasAttribute('aria-labelledby') ? element : null);
       const groupName = clean(referencedLabel(languageGroup)
         || languageGroup?.querySelector('legend, h1, h2, h3, h4, h5, h6')?.innerText
         || languageGroup?.getAttribute('aria-label')
         || (languageGroup === element ? element.getAttribute('aria-label') : ''));
       const controlsInGroup = languageGroup ? [...languageGroup.querySelectorAll('input, button, [role="combobox"]')] : [];
-      const namedLanguage = controlsInGroup.find((control) => /\blanguage\b/i.test(controlLabel(control)));
-      const languageName = controlValue(namedLanguage) || groupName
+      const namedLanguage = controlsInGroup.find((control) => control.getAttribute('name') === 'language')
+        || controlsInGroup.find((control) => /\blanguage\b/i.test(controlLabel(control)));
+      const languageName = clean(namedLanguage?.innerText || namedLanguage?.textContent) || controlValue(namedLanguage) || groupName
         || (element.getAttribute('aria-label') || '');
       const schoolControl = educationPanel
-        ? [...educationPanel.querySelectorAll('input, button, [role="combobox"]')]
+        ? educationPanel.querySelector('[name="schoolName"]') || [...educationPanel.querySelectorAll('input, button, [role="combobox"]')]
           .find((control) => /school|university|institution/i.test(controlLabel(control)))
         : null;
+      const dateWrapper = element.closest('[data-automation-id="dateInputWrapper"]');
+      const dateQuestionGroup = dateWrapper?.closest('[role="group"][aria-labelledby]')
+        || dateWrapper?.closest('[aria-labelledby]')
+        || null;
+      const dateQuestion = clean(referencedLabel(dateQuestionGroup)
+        || dateQuestionGroup?.getAttribute('aria-label')
+        || dateWrapper?.getAttribute('aria-label'));
+      const dateSegment = (control) => {
+        const text = [control.getAttribute('data-automation-id'), control.getAttribute('aria-label'),
+          control.getAttribute('name'), control.id].filter(Boolean).join(' ');
+        if (/month/i.test(text)) return 'month';
+        if (/day/i.test(text)) return 'day';
+        if (/year/i.test(text)) return 'year';
+        return '';
+      };
+      const dateSegments = dateWrapper
+        ? [...dateWrapper.querySelectorAll('input[role="spinbutton"], input[id*="dateSection"], input[name*="dateSection"]')]
+          .map((control) => ({
+            fieldId: clean(control.getAttribute('data-career-ops-field-id')),
+            id: clean(control.id),
+            name: clean(control.getAttribute('name')),
+            segment: dateSegment(control),
+            value: clean(control.value),
+            required: Boolean(control.required || control.getAttribute('aria-required') === 'true'),
+          })).filter((segment) => segment.fieldId && segment.segment)
+        : [];
+      const dateGroupId = dateWrapper
+        ? clean(dateWrapper.id || dateSegments.map((segment) => segment.fieldId).join('|'))
+        : '';
       const fieldLabel = [ownLabel, formGroupLabel, element.getAttribute('aria-label'), referencedLabel(element)]
         .filter(Boolean).join(' ');
       const workdayBlockKind = educationPanel ? 'education'
-        : (/\b(?:overall|reading|writing|speaking|listening|language)\b|\bi am fluent\b/i.test(fieldLabel)
-          && (languageGroup || /language|proficiency|\bi am fluent\b/i.test(fieldLabel))) ? 'language' : '';
+        : (repeatedLanguagePanel || (/\b(?:overall|reading|writing|speaking|listening|language)\b|\bi am fluent\b/i.test(fieldLabel)
+          && (languageGroup || /language|proficiency|\bi am fluent\b/i.test(fieldLabel)))) ? 'language' : '';
       const workdaySchool = clean(controlValue(schoolControl));
       const directQuestion = clean(ownLabel || formGroupLabel || element.getAttribute('aria-label')
         || element.placeholder || element.name || element.id);
@@ -399,15 +484,27 @@ export async function inspectOperationalApplicationForm(page) {
       return {
         fieldId,
         groupLabel,
-        questionText: contextualQuestion || groupLabel || directQuestion,
+        questionText: dateQuestion || contextualQuestion || groupLabel || directQuestion,
         optionLabel,
         maxLength: Number(element.getAttribute('maxlength') || 0) || null,
         minLength: Number(element.getAttribute('minlength') || 0) || null,
         selectedLabel: clean(selected),
         ariaInvalid: element.getAttribute('aria-invalid') === 'true',
         workdayBlockKind,
+        workdayBlockHeading: repeatedPanelHeading,
+        workdayBlockId: repeatedPanel?.id || '',
         workdaySchool,
         workdayLanguage: workdayBlockKind === 'language' ? clean(languageName) : '',
+        workdayUploadSectionHeading: (element.type || '').toLowerCase() === 'file'
+          ? clean(referencedLabel(element.closest('[role="group"][aria-labelledby]'))
+            || element.closest('[role="group"][aria-labelledby]')?.querySelector('h4')?.innerText)
+          : '',
+        workdayDateGroupId: dateGroupId,
+        workdayDateSegments: dateSegments,
+        workdayDateGroupRequired: /\*/.test([dateQuestion, groupLabel, directQuestion].filter(Boolean).join(' '))
+          || dateSegments.some((segment) => segment.required),
+        workdayDatePrimary: Boolean(dateGroupId && dateSegments.length
+          && dateSegments.find((segment) => segment.segment === 'month')?.fieldId === fieldId),
       };
     });
   });
@@ -611,6 +708,13 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       narrativeRouting,
     };
 
+    // Workday's CV autofill can populate repeated education entries before RoleForge sees them. Keep any
+    // non-empty text input in those entries exactly as supplied; it is never a canonical profile target.
+    if (field.workdayBlockKind === 'education' && field.type === 'text' && cleanFormText(field.value)) {
+      preservedFields.push({ ...base, valueHash: hashFormValue(field.value), preserved: true });
+      continue;
+    }
+
     if (semantics.category === 'preferred_location') {
       unresolvedFields.push(manualField(field, semantics, 'Preferred location is application-specific and has no exact approved value.'));
       continue;
@@ -786,9 +890,9 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
     }
     if (field.widget === 'workday-listbox' && semantics.semantic === 'degree'
         && field.workdayBlockKind === 'education') {
-      const school = normalizeFormQuestion(field.workdaySchool);
+      const school = cleanSchoolName(field.workdaySchool);
       const matchingEntries = cvEducationEntries(profile).filter((entry) => (
-        normalizeFormQuestion(entry.school) === school
+        educationSchoolMatches(entry.school, school)
         && /\b(?:master|bachelor)\b/i.test(entry.degree)
       ));
       const targets = matchingEntries.map((entry) => /\bmaster\b/i.test(entry.degree) ? 'Master' : 'Bachelor');
@@ -840,9 +944,63 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
         const planned = { ...base, action: 'check', value: 'Yes', valueHash: hashFormValue('Yes'), retryBudget: 1 };
         if (isCommitted(field, planned)) preservedFields.push({ ...base, valueHash: planned.valueHash, preserved: true });
         else actions.push(planned);
+      } else if (level === 'Beginner') {
+        const planned = { ...base, action: 'uncheck', value: 'No', valueHash: hashFormValue('No'), retryBudget: 1 };
+        if (isCommitted(field, planned)) preservedFields.push({ ...base, valueHash: planned.valueHash, preserved: true });
+        else actions.push(planned);
       } else if (!level && field.required) {
         unresolvedFields.push(manualField(field, semantics, 'The fluent checkbox language level is not grounded by the CV.'));
       }
+      continue;
+    }
+
+    if (semantics.semantic === 'graduation' && field.workdayDateGroupId) {
+      if (!field.workdayDatePrimary) continue;
+      const segments = field.workdayDateSegments || [];
+      if (segments.some((segment) => cleanFormText(segment.value))) {
+        preservedFields.push({ ...base, valueHash: hashFormValue(segments.map((segment) => segment.value).join('|')), preserved: true });
+        continue;
+      }
+      let dateAnswer;
+      try {
+        dateAnswer = answerForField(field, semantics, effectiveProfile, snapshot, artifacts, context, narrativeRouting);
+      } catch {
+        dateAnswer = null;
+      }
+      const grounded = groundedDateSegments(dateAnswer?.value);
+      const requiredSegments = segments.filter((segment) => field.workdayDateGroupRequired || segment.required);
+      const targetSegments = segments.map((segment) => ({
+        fieldId: segment.fieldId,
+        id: segment.id,
+        name: segment.name,
+        segment: segment.segment,
+        value: grounded?.[segment.segment] || '',
+      }));
+      if (!grounded || !requiredSegments.length
+          || requiredSegments.some((segment) => !grounded[segment.segment])) {
+        if (field.required || field.workdayDateGroupRequired || requiredSegments.length) {
+          unresolvedFields.push(manualField(field, semantics,
+            'The grounded graduation date does not contain every required date segment.'));
+        }
+        continue;
+      }
+      const planned = {
+        ...base,
+        action: 'date',
+        value: dateAnswer.value,
+        dateSegments: targetSegments.filter((segment) => segment.value),
+        workdayDateSegments: segments,
+        valueHash: hashFormValue(dateAnswer.value),
+        retryBudget: 1,
+      };
+      if (isCommitted(field, planned)) preservedFields.push({ ...base, valueHash: planned.valueHash, preserved: true });
+      else actions.push(planned);
+      continue;
+    }
+
+    if (semantics.semantic === 'graduation' && field.role === 'spinbutton') {
+      if (field.required) unresolvedFields.push(manualField(field, semantics,
+        'A Workday date segment was not grouped with its complete date field.'));
       continue;
     }
     const normalizeValue = semantics.category === 'custom_motivation_experience_narrative'
@@ -1735,6 +1893,26 @@ async function performAction(page, action, visibleOptions, { deadlineMs, clock }
     return action.value;
   }
   if (action.action === 'pick') return chooseWorkdayPick(page, action, visibleOptions, { deadlineMs, clock });
+  if (action.action === 'date') {
+    for (const segment of action.dateSegments || []) {
+      let target = await exactLocator(page, { ...action, fieldId: segment.fieldId, id: segment.id, name: segment.name });
+      const before = await target.inputValue().catch(() => '');
+      if (before && before !== segment.value) {
+        throw new Error(`A Workday date segment is already populated; RoleForge did not replace it: ${segment.segment}`);
+      }
+      if (!before) {
+        await target.fill(segment.value, { timeout: remainingTimeout(deadlineMs, clock) });
+        target = await exactLocator(page, { ...action, fieldId: segment.fieldId, id: segment.id, name: segment.name });
+        await target.blur({ timeout: remainingTimeout(deadlineMs, clock) });
+      }
+      target = await exactLocator(page, { ...action, fieldId: segment.fieldId, id: segment.id, name: segment.name });
+      const state = await validationState(target);
+      if (state.invalid || cleanFormText(state.value) !== segment.value) {
+        throw new Error(`Workday date segment did not remain committed: ${segment.segment}`);
+      }
+    }
+    return action.value;
+  }
   if (action.action === 'select') {
     const selected = await locator.evaluate((element, intended) => {
       const normalized = (value) => String(value || '').trim().toLowerCase();
@@ -1760,6 +1938,13 @@ async function performAction(page, action, visibleOptions, { deadlineMs, clock }
     locator = await exactLocator(page, action);
     const state = await validationState(locator);
     if (!state.checked || state.invalid) throw new Error(`Choice did not remain committed: ${action.semantic}`);
+    return action.value;
+  }
+  if (action.action === 'uncheck') {
+    await locator.uncheck({ timeout: remainingTimeout(deadlineMs, clock) });
+    locator = await exactLocator(page, action);
+    const state = await validationState(locator);
+    if (state.checked || state.invalid) throw new Error(`Choice did not remain unchecked: ${action.semantic}`);
     return action.value;
   }
   await locator.fill(action.value, { timeout: remainingTimeout(deadlineMs, clock) });

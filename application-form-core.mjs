@@ -694,6 +694,14 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
         }
         element.setAttribute('data-career-ops-field-id', fieldId);
         let fieldText = textFor(element);
+        if ((element.type || '').toLowerCase() === 'file') {
+          const uploadSection = element.closest('[role="group"][aria-labelledby]');
+          const sectionHeading = (uploadSection?.getAttribute('aria-labelledby') || '').split(/\s+/)
+            .filter(Boolean).map((id) => document.getElementById(id)?.innerText || '').join(' ')
+            || uploadSection?.querySelector('h4')?.innerText
+            || '';
+          if (sectionHeading) fieldText = `${fieldText} ${sectionHeading}`.trim();
+        }
         // Upload tiles often hide an unlabelled file input; its purpose is the tile's short text ("CV", "Cover Letter").
         // Workday names the purpose in an ancestor's automation id ("resumeUpload") or a nearby heading.
         if ((element.type || '').toLowerCase() === 'file' && !/resume|r[ée]sum[ée]|\bcv\b|cover|motivation|curriculum/i.test(fieldText)) {

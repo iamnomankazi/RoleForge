@@ -145,6 +145,7 @@ function fieldText(field) {
     field?.questionText,
     field?.groupLabel,
     field?.label,
+    field?.workdayUploadSectionHeading,
     field?.name,
     field?.placeholder,
   ].filter(Boolean).join(' '));
@@ -627,11 +628,11 @@ function configuredUniversity(profile) {
     profile?.formRules?.education?.university
       || profile?.education?.university
       || profile?.currentStatus?.university,
-  );
+  ).replace(/^the\s+/i, '');
   if (explicit) return explicit;
   const summary = cleanFormText(profile?.currentStatus?.summary);
   const match = summary.match(/\b(?:at|from)\s+(.+?)(?:[.;]|$)/i);
-  return cleanFormText(match?.[1]) || null;
+  return cleanFormText(match?.[1]).replace(/^the\s+/i, '') || null;
 }
 
 const COUNTRY_CODES = `AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ
