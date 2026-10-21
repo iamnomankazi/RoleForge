@@ -112,7 +112,7 @@ export async function prepareFormPassWithEvidence(page, browserContext, contract
     resumeMode,
     passId,
     reasoningProvider,
-    awaitManualFields: process.stdin.isTTY ? (labels) => awaitManualFieldsInTerminal(contract, labels) : null,
+    awaitManualFields: process.stdin.isTTY ? (labels) => awaitManualFieldsInTerminal(contract, labels, { page }) : null,
     progressLog: process.stdout.isTTY ? (line) => console.log(line) : null,
   });
   const screenshotAfter = await safeScreenshot(page, afterPath);
@@ -1520,24 +1520,60 @@ function subscribeToEnter(callback) {
 
 // Fields RoleForge cannot fill (unknown questions, unsupported widgets, validation errors) are completed by the user in
 // the open page; Enter re-checks the step and form filling continues. The final submit stays the user's.
-function awaitManualFieldsInTerminal(contract, labels) {
-  const until = new Date(Date.now() + DEFAULT_HUMAN_WAIT_MS).toLocaleTimeString();
-  console.log(`\n${contract.candidate.company} — ${contract.candidate.title}: fill these in the browser, then click this`
-    + ` terminal and press Enter before ${until} (do not click Submit):`);
-  for (const label of [...new Set(labels)]) console.log(`  - ${label}`);
+function waitForEnterOnPage(page, input) {
+  const browser = page.context().browser();
+  if (!input.isTTY || page.isClosed() || browser?.isConnected() === false) return Promise.resolve(false);
   return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      unsubscribe();
-      console.log(`No Enter received by ${until}; stopping here. Everything filled so far stays in the browser.`);
-      resolve(false);
-    }, DEFAULT_HUMAN_WAIT_MS);
-    const unsubscribe = subscribeToEnter(() => {
-      clearTimeout(timer);
-      unsubscribe();
-      console.log(`Enter received at ${new Date().toLocaleTimeString()}; re-checking the step.`);
-      resolve(true);
-    });
+    const terminal = createInterface({ input, terminal: false });
+    const finish = (entered) => {
+      terminal.removeListener('line', onEnter);
+      terminal.removeListener('close', onEnd);
+      page.removeListener('close', onEnd);
+      browser?.removeListener('disconnected', onEnd);
+      terminal.close();
+      resolve(entered);
+    };
+    const onEnter = () => finish(true);
+    const onEnd = () => finish(false);
+    terminal.once('line', onEnter);
+    terminal.once('close', onEnd);
+    page.once('close', onEnd);
+    browser?.once('disconnected', onEnd);
+    if (page.isClosed() || browser?.isConnected() === false) onEnd();
   });
+}
+
+export async function awaitManualFieldsInTerminal(contract, labels, {
+  page, input = process.stdin, log = console.log,
+} = {}) {
+  if (!input.isTTY) return false;
+  log(`\n${contract.candidate.company} — ${contract.candidate.title}: fill these in the browser, then click this`
+    + ' terminal and press Enter (Ctrl+C to stop; do not click Submit):');
+  for (const label of [...new Set(labels)]) log(`  - ${label}`);
+  const entered = await waitForEnterOnPage(page, input);
+  if (entered) log(`Enter received at ${new Date().toLocaleTimeString()}; re-checking the step.`);
+  return entered;
+}
+
+export async function continueReviewRequiredOnPage({
+  page, browser, state, readPreparation, resume, headless = false,
+}, { input = process.stdin, log = console.log } = {}) {
+  if (!input.isTTY || headless) return state;
+  while (state?.state === 'review_required' && browser.isConnected() && !page.isClosed()) {
+    const preparation = readPreparation() || {};
+    for (const field of preparation.unresolvedFields || []) {
+      log(`  - Unresolved: ${inline(field.label || field.semantic)}${field.reason ? `: ${inline(field.reason)}` : ''}`);
+    }
+    for (const error of preparation.validationErrors || []) {
+      log(`  - Validation: ${inline(typeof error === 'string' ? error : error.message || error.text || error.label || error.reason)}`);
+    }
+    await page.bringToFront().catch(() => {});
+    log('Fix these in the browser, then press Enter here to continue from this page (Ctrl+C to stop; the final submit stays yours)');
+    if (!await waitForEnterOnPage(page, input) || page.isClosed() || !browser.isConnected()) break;
+    state = await resume();
+    if (state?.resumeSkipped) break;
+  }
+  return state;
 }
 
 function candidateResult(contract, state) {
@@ -1553,11 +1589,23 @@ function candidateResult(contract, state) {
   };
 }
 
-async function waitForCandidateReview(browser, ownsBrowser, state, options, dependencies) {
+async function waitForCandidateReview(browser, ownsBrowser, state, options, dependencies, environment) {
+  if (ownsBrowser && options.keepOpen && options.prepareForm && environment?.page) {
+    const { page, context, contract, root, executionLock } = environment;
+    state = await continueReviewRequiredOnPage({
+      page, browser, state, headless: options.headless,
+      readPreparation: () => loadExecutionContract(contract.manifestPath, contract.candidate.candidate_id,
+        { root, requireCoverLetter: true }).candidateState.formPreparation,
+      resume: () => executeCandidateLocked({
+        ...options, resumeLogin: false, resumePreparation: true, continueOnPage: true, deferHumanHandoff: true,
+      }, { root, executionLock, dependencies: { ...dependencies, browserSession: { browser, context, page } } }),
+    }, dependencies);
+  }
   if (!ownsBrowser || !options.keepOpen || state.state === 'human_action_required'
-      || !shouldKeepBrowserOpen(state) || !browser.isConnected()) return;
+      || environment?.page?.isClosed() || !shouldKeepBrowserOpen(state) || !browser.isConnected()) return state;
   console.log(`${state.state}. The final action remains untouched. Close the task browser to finish.`);
   await (dependencies.waitForBrowserClose || ((active) => new Promise((done) => active.once('disconnected', done))))(browser);
+  return state;
 }
 
 function compatibleHumanDestination(contract, currentUrl, identity, gateUrl) {
@@ -1943,7 +1991,8 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
           earlyForm.humanGate || { cause: 'login', evidence: ['legacy_login_gate'] }, 'listing', options,
           { root, executionLock, dependencies });
       }
-      await waitForCandidateReview(browser, ownsBrowser, finalState, options, dependencies);
+      finalState = await waitForCandidateReview(browser, ownsBrowser, finalState, options, dependencies,
+        { page: applicationPage, context, contract, root, executionLock });
       return candidateResult(contract, finalState);
     }
     if (browserLiveness.result !== 'active' && apiLiveness?.result !== 'active' && !domConfirmsSafeEntry) {
@@ -2017,8 +2066,9 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
             entryFlow.form.humanGate || { cause: 'login', evidence: ['legacy_login_gate'] }, 'application_entry', options,
             { root, executionLock, dependencies });
         }
-        await waitForCandidateReview(browser, ownsBrowser, finalState, options, dependencies);
-      return candidateResult(contract, finalState);
+        finalState = await waitForCandidateReview(browser, ownsBrowser, finalState, options, dependencies,
+          { page: applicationPage, context, contract, root, executionLock });
+        return candidateResult(contract, finalState);
       }
       if (!entryFlow.compatible) {
         finalState = recordTransition(
@@ -2068,7 +2118,8 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
       finalState = await prepareResumedForm(applicationPage, contract, root, executionLock, options, dependencies, 'initial');
     }
 
-    await waitForCandidateReview(browser, ownsBrowser, finalState, options, dependencies);
+    finalState = await waitForCandidateReview(browser, ownsBrowser, finalState, options, dependencies,
+      { page: applicationPage, context, contract, root, executionLock });
 
     return {
       batchId: contract.manifest.batchId,
@@ -2189,7 +2240,8 @@ async function executePreparationResume(options, contract, { root, executionLock
   try {
     const listingPage = sharedSession?.page || await context.newPage();
     if (options.continueOnPage === true && options.resumePreparation === true
-        && fromState === 'human_action_required' && sharedSession?.page) {
+        && ['review_required', 'human_action_required'].includes(fromState)
+        && sharedSession?.page) {
       if (listingPage.isClosed()) {
         return { ...candidateResult(contract, contract.candidateState), resumeSkipped: 'page_closed' };
       }
@@ -2205,13 +2257,52 @@ async function executePreparationResume(options, contract, { root, executionLock
       }
       const identity = verifyVisibleIdentity(snapshot, contract.candidate);
       const gate = contract.candidateState.humanAction;
-      if (!compatibleHumanDestination(contract, snapshot.currentUrl, identity, gate.currentUrl)) {
+      if (!compatibleHumanDestination(contract, snapshot.currentUrl, identity, gate?.currentUrl)) {
         return { ...candidateResult(contract, contract.candidateState), resumeSkipped: 'incompatible_destination' };
       }
       if (dependencies.onCandidatePage) await dependencies.onCandidatePage(listingPage, contract);
-      finalState = await finishHumanHandoff(listingPage, contract, gate,
-        gate.stage || 'application_entry', options, { root, executionLock, dependencies });
-      await waitForCandidateReview(browser, ownsBrowser, finalState, options, dependencies);
+      const form = classifyFormSnapshot(snapshot);
+      if (form.humanGate || form.loginRequired || ['human_action_required', 'login_required'].includes(fromState)) {
+        finalState = await finishHumanHandoff(listingPage, contract, form.humanGate || gate
+          || { cause: 'login', evidence: ['legacy_login_gate'] },
+        gate?.stage || 'application_entry', options, { root, executionLock, dependencies });
+      } else {
+        let live = api;
+        if (!live || live.result === 'unsupported') {
+          live = await (dependencies.checkHumanResumeLiveness || checkHumanResumeLiveness)(listingPage, listingUrl, 20_000);
+        }
+        if (listingPage.isClosed()) return { ...candidateResult(contract, contract.candidateState), resumeSkipped: 'page_closed' };
+        const fresh = loadExecutionContract(contract.manifestPath, contract.candidate.candidate_id,
+          { root, requireCoverLetter: true });
+        executionLock.heartbeat();
+        if (fresh.candidateState.state !== fromState) throw new Error('Same-page resume state changed concurrently');
+        // Re-read the page after the asynchronous live check without navigating it.
+        snapshot = await collectPageSnapshot(listingPage);
+        const identityNow = verifyVisibleIdentity(snapshot, contract.candidate);
+        const formNow = classifyFormSnapshot(snapshot);
+        if (!compatibleHumanDestination(contract, snapshot.currentUrl, identityNow, gate?.currentUrl)) {
+          return { ...candidateResult(contract, contract.candidateState), resumeSkipped: 'incompatible_destination' };
+        }
+        if (formNow.humanGate || formNow.loginRequired) {
+          finalState = await finishHumanHandoff(listingPage, contract, formNow.humanGate
+            || { cause: 'login', evidence: ['legacy_login_gate'] },
+          'form_progression', options, { root, executionLock, dependencies });
+        } else {
+          if (live?.result !== 'active'
+              || !requisitionBoundIdentity(identityNow, listingUrl, snapshot.currentUrl)
+              || !formNow.actualForm || !snapshot.applicationFormId) {
+            return { ...candidateResult(contract, contract.candidateState), resumeSkipped: 'form_revalidation_failed' };
+          }
+          if (fromState === 'review_required') {
+            transition(contract.manifestPath, contract.candidate.candidate_id, 'actual_form_reached', snapshot.currentUrl,
+              'Same-page resume revalidated the exact candidate, liveness, destination, and actual form.',
+              fromState, executionLock.token, null, null, root);
+          }
+          finalState = options.prepareForm
+            ? await prepareResumedForm(listingPage, fresh, root, executionLock, options, dependencies, 'same_page_resume')
+            : loadExecutionContract(contract.manifestPath, contract.candidate.candidate_id, { root }).candidateState;
+        }
+      }
       return candidateResult(contract, finalState);
     }
     if (dependencies.onCandidatePage) await dependencies.onCandidatePage(listingPage, contract);
@@ -2227,8 +2318,9 @@ async function executePreparationResume(options, contract, { root, executionLock
       const state = finalState = await finishHumanHandoff(listingPage, contract, form.humanGate
         || contract.candidateState.humanAction || { cause: 'login', evidence: ['legacy_login_gate'] },
         'listing', options, { root, executionLock, dependencies });
-      await waitForCandidateReview(browser, ownsBrowser, state, options, dependencies);
-      return candidateResult(contract, state);
+      finalState = await waitForCandidateReview(browser, ownsBrowser, state, options, dependencies,
+        { page: listingPage, context, contract, root, executionLock });
+      return candidateResult(contract, finalState);
     }
     const domConfirmsSafeEntry = listingSnapshotConfirmsSafeEntry(listingSnapshot, contract.candidate, {
       listingUrl,
@@ -2261,8 +2353,9 @@ async function executePreparationResume(options, contract, { root, executionLock
       const state = finalState = await finishHumanHandoff(page, contract, entryFlow.form.humanGate
         || { cause: 'login', evidence: ['legacy_login_gate'] }, 'application_entry', options,
         { root, executionLock, dependencies });
-      await waitForCandidateReview(browser, ownsBrowser, state, options, dependencies);
-      return candidateResult(contract, state);
+      finalState = await waitForCandidateReview(browser, ownsBrowser, state, options, dependencies,
+        { page, context, contract, root, executionLock });
+      return candidateResult(contract, finalState);
     }
     if (!entryFlow.form.actualForm || !entryFlow.compatible) {
       if (entryFlow.manualReviewRequired && entryFlow.compatible) {
@@ -2282,8 +2375,9 @@ async function executePreparationResume(options, contract, { root, executionLock
       const state = finalState = await finishHumanHandoff(page, contract, contract.candidateState.humanAction
         || { cause: 'login', evidence: ['legacy_login_gate'] }, 'application_entry', options,
         { root, executionLock, dependencies });
-      await waitForCandidateReview(browser, ownsBrowser, state, options, dependencies);
-      return candidateResult(contract, state);
+      finalState = await waitForCandidateReview(browser, ownsBrowser, state, options, dependencies,
+        { page, context, contract, root, executionLock });
+      return candidateResult(contract, finalState);
     }
     if (['review_required', 'blocked'].includes(fromState)) {
       transition(
@@ -2292,20 +2386,17 @@ async function executePreparationResume(options, contract, { root, executionLock
         fromState, executionLock.token, { entryActions: entryFlow.hops }, null, root,
       );
     }
-    const state = finalState = options.prepareForm
+    finalState = options.prepareForm
       ? await prepareResumedForm(page, contract, root, executionLock, options, dependencies)
       : loadExecutionContract(contract.manifestPath, contract.candidate.candidate_id, { root }).candidateState;
-    await waitForCandidateReview(browser, ownsBrowser, state, options, dependencies);
-    return {
-      batchId: contract.manifest.batchId,
-      candidate: listingUrl,
-      state: state.state,
-      currentUrl: state.currentUrl,
-      submissionAvailable: false,
-      trackerUpdated: false,
-      ...(state.deferred === true ? { deferred: true } : {}),
-    };
+    finalState = await waitForCandidateReview(browser, ownsBrowser, finalState, options, dependencies,
+      { page, context, contract, root, executionLock });
+    return candidateResult(contract, finalState);
   } catch (error) {
+    if (options.continueOnPage && sharedSession?.page
+        && (sharedSession.page.isClosed() || !browser.isConnected())) {
+      return { ...candidateResult(contract, contract.candidateState), resumeSkipped: 'page_closed' };
+    }
     const current = loadExecutionContract(contract.manifestPath, contract.candidate.candidate_id, { root, requireCoverLetter: true }).candidateState.state;
     if (['actual_form_reached', 'review_required'].includes(current)) {
       const state = transition(

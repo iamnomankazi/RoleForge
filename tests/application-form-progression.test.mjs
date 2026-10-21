@@ -740,10 +740,10 @@ test('generic markerless signup wizard fails closed in the operational runtime',
   }
 });
 
-test('operational locator never transfers a planned field identity across DOM replacement', async () => {
+test('operational locator reacquires a unique stable id and tag after React replacement but refuses unsafe identities', async () => {
   const browser = await chromium.launch({ headless: true });
   try {
-    for (const mutation of ['missing-stamp', 'different-stamp', 'duplicate-stamp', 'unchanged']) {
+    for (const mutation of ['missing-stamp', 'different-stamp', 'ambiguous-id', 'different-tag', 'missing-id', 'duplicate-stamp', 'unchanged']) {
       const page = await browser.newPage();
       await page.setContent(`
         <form id="application"><label for="email">Email</label><input id="email" name="email" type="email" required>
@@ -752,12 +752,16 @@ test('operational locator never transfers a planned field identity across DOM re
       const snapshot = await inspectOperationalApplicationForm(page);
       const plan = buildOperationalFormPlan(snapshot, profile, {}, { context });
       const fieldId = plan.actions[0].fieldId;
-      if (mutation === 'missing-stamp') {
-        await page.locator('#email').evaluate((element) => {
-          const replacement = element.cloneNode(true);
+      if (['missing-stamp', 'ambiguous-id', 'different-tag', 'missing-id'].includes(mutation)) {
+        await page.locator('#email').evaluate((element, mutation) => {
+          const replacement = mutation === 'different-tag' ? document.createElement('textarea') : element.cloneNode(true);
+          replacement.id = element.id;
+          replacement.name = element.name;
           replacement.removeAttribute('data-career-ops-field-id');
+          if (mutation === 'missing-id') replacement.removeAttribute('id');
           element.replaceWith(replacement);
-        });
+          if (mutation === 'ambiguous-id') document.body.append(replacement.cloneNode(true));
+        }, mutation);
       } else if (mutation === 'different-stamp') {
         await page.locator('#email').evaluate((element) => {
           const replacement = element.cloneNode(true);
@@ -774,11 +778,12 @@ test('operational locator never transfers a planned field identity across DOM re
       }
       const execution = await executeOperationalFormPlan(page, plan, { limits: { maxAttempts: 1 } });
       const values = await page.locator(`input[data-career-ops-field-id="${fieldId}"]`).evaluateAll((elements) => elements.map((element) => element.value));
-      if (mutation === 'unchanged') {
+      if (['unchanged', 'missing-stamp', 'different-stamp'].includes(mutation)) {
         assert.deepEqual(values, [profile.candidate.email], mutation);
         assert.equal(execution.unresolvedFields.length, 0, mutation);
       } else {
-        assert.equal(await page.locator('#email').inputValue(), '', mutation);
+        assert.deepEqual(await page.locator('input, textarea').evaluateAll((elements) => elements.map((element) => element.value)),
+          mutation === 'ambiguous-id' || mutation === 'duplicate-stamp' ? ['', ''] : [''], mutation);
         assert.equal(values.every((value) => value === ''), true, mutation);
         assert.equal(execution.unresolvedFields.some((row) => row.semantic === 'email'), true, mutation);
         assert.match(execution.attemptLedger.at(-1).validationEvidence, mutation === 'duplicate-stamp'

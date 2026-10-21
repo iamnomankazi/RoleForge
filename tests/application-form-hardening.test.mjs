@@ -946,7 +946,7 @@ test('26. process recovery carries the persisted ledger and restores only live-e
   await recovered.close();
 });
 
-test('a second controlled recovery supports an existing reviewed batch and then exhausts the bound', async () => {
+test('controlled recovery supports an existing reviewed batch through ten resumes and then exhausts the bound', async () => {
   const page = await browser.newPage();
   await page.setContent(`
     <form><label for="email">Email</label><input id="email" required><button type="submit">Submit application</button></form>
@@ -961,13 +961,26 @@ test('a second controlled recovery supports an existing reviewed batch and then 
     context: formContext, previousEvidence: prior, resumeMode: 'process_recovery',
   });
   assert.equal(second.evidence.passBudget.controlledResumeUsed, 2);
-  assert.equal(second.evidence.passBudget.controlledResumeAllowed, 2);
+  assert.equal(second.evidence.passBudget.controlledResumeAllowed, 10);
   assert.equal(await page.locator('#email').inputValue(), profile.candidate.email);
+  let previousEvidence = second.evidence;
+  for (let used = 3; used <= 10; used += 1) {
+    await page.locator('#email').fill('');
+    const resumed = await prepareOperationalApplicationForm(page, profile, {}, {
+      context: formContext, previousEvidence, resumeMode: 'process_recovery',
+    });
+    assert.equal(resumed.evidence.passBudget.controlledResumeUsed, used);
+    assert.equal(resumed.evidence.passBudget.controlledResumeAllowed, 10);
+    assert.equal(await page.locator('#email').inputValue(), profile.candidate.email);
+    assert.equal(resumed.evidence.finalAction.activated, false);
+    previousEvidence = resumed.evidence;
+  }
   await page.locator('#email').fill('');
   const exhausted = await prepareOperationalApplicationForm(page, profile, {}, {
-    context: formContext, previousEvidence: second.evidence, resumeMode: 'process_recovery',
+    context: formContext, previousEvidence, resumeMode: 'process_recovery',
   });
   assert.match(exhausted.gate.reason, /budget is exhausted/);
+  assert.equal(await page.locator('#email').inputValue(), '');
   assert.equal(exhausted.evidence.finalAction.activated, false);
   await page.close();
 });

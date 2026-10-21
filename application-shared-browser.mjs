@@ -30,6 +30,7 @@ import {
 } from './application-batch.mjs';
 import {
   assertExecutorState,
+  continueReviewRequiredOnPage,
   executeCandidateInBrowserContext,
 } from './application-browser-executor.mjs';
 import { LIVENESS_CONTEXT_OPTIONS } from './liveness-browser.mjs';
@@ -316,6 +317,32 @@ export async function runSharedBrowserSession({ batchIds, root = ROOT, humanWait
     }
 
     const loadState = dependencies.loadState || loadBatchState;
+    for (const entry of plan) {
+      const state = entry.resumeResult || entry.result;
+      if (state?.state !== 'review_required' || !pageIsOpen(entry.page, context)) continue;
+      try {
+        entry.resumeResult = await continueReviewRequiredOnPage({
+          page: entry.page,
+          browser,
+          state,
+          readPreparation: () => loadState(entry.manifestPath, { root }).state.candidates[0].formPreparation,
+          resume: () => execute({
+            manifest: entry.manifestPath,
+            candidateId: entry.candidateId,
+            headless: false,
+            keepOpen: true,
+            resumeLogin: false,
+            resumePreparation: true,
+            continueOnPage: true,
+            deferHumanHandoff: true,
+            prepareForm: true,
+            ...(humanWaitMs == null ? {} : { humanWaitMs }),
+          }, executorEnvironment(entry, executorDependenciesByEntry.get(entry) || {})),
+        }, dependencies);
+      } catch (error) {
+        entry.resumeError = String(error?.message || error);
+      }
+    }
     const summary = {
       browserMode: 'one_shared_headed_context',
       candidateCount: plan.length,
