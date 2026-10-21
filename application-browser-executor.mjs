@@ -1547,8 +1547,7 @@ export async function awaitManualFieldsInTerminal(contract, labels, {
   page, input = process.stdin, log = console.log,
 } = {}) {
   if (!input.isTTY) return false;
-  log(`\n${contract.candidate.company} — ${contract.candidate.title}: fill these in the browser, then click this`
-    + ' terminal and press Enter (Ctrl+C to stop; do not click Submit):');
+  log(`\n${contract.candidate.company} - ${contract.candidate.title}: Fill these in the browser, then press Enter here. RoleForge clicks Save and Continue itself; your own clicks on Save and Continue/Submit are blocked while RoleForge controls the page. The final Submit stays yours.`);
   for (const label of [...new Set(labels)]) log(`  - ${label}`);
   const entered = await waitForEnterOnPage(page, input);
   if (entered) log(`Enter received at ${new Date().toLocaleTimeString()}; re-checking the step.`);
@@ -1568,7 +1567,7 @@ export async function continueReviewRequiredOnPage({
       log(`  - Validation: ${inline(typeof error === 'string' ? error : error.message || error.text || error.label || error.reason)}`);
     }
     await page.bringToFront().catch(() => {});
-    log('Fix these in the browser, then press Enter here to continue from this page (Ctrl+C to stop; the final submit stays yours)');
+    log('Fix these in the browser. Fill these in the browser, then press Enter here. RoleForge clicks Save and Continue itself; your own clicks on Save and Continue/Submit are blocked while RoleForge controls the page. The final Submit stays yours.');
     if (!await waitForEnterOnPage(page, input) || page.isClosed() || !browser.isConnected()) break;
     state = await resume();
     if (state?.resumeSkipped) break;

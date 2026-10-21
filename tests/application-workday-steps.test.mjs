@@ -62,7 +62,13 @@ const flowPage = `${shell(autofillStep, '<button type="submit" id="next" data-au
     if (step === 3) { document.getElementById('progress').querySelector('[data-automation-id="progressBarInactiveStep"]')?.remove(); }
   };
   render();
-  document.addEventListener('change', (e) => { if (e.target.type === 'file') document.getElementById('picked').textContent = e.target.files[0].name; });
+  document.addEventListener('change', (e) => {
+    if (e.target.type !== 'file') return;
+    const picked = document.getElementById('picked');
+    if (picked) picked.textContent = e.target.files[0].name;
+    const upload = e.target.closest('[data-automation-id="resumeUpload"]');
+    if (upload) upload.innerHTML = '<div data-automation-id="file-upload-item"><div data-automation-id="file-upload-item-name">' + e.target.files[0].name + '</div><div>Successfully Uploaded</div></div>';
+  });
   document.getElementById('next').addEventListener('click', () => {
     if (step === 3) { window.submits += 1; return; }
     if (step === 2 && ['fn', 'ln', 'em'].some((id) => !document.getElementById(id).value)) return;
@@ -857,7 +863,7 @@ test('Workday Autofill with a hidden file input behind "Select file" is the form
       if (event.target.type !== 'file') return;
       const name = event.target.files[0].name;
       event.target.closest('[data-automation-id=resumeUpload]').innerHTML =
-        '<div><div data-automation-id="file-upload-item-name">' + name + '</div><div>506.63 KB</div></div>';
+        '<div data-automation-id="file-upload-item"><div><div data-automation-id="file-upload-item-name">' + name + '</div><div>506.63 KB</div><div>Successfully Uploaded</div></div></div>';
     }, true));
     const result = await prepareOperationalApplicationForm(page, profile, docs.value, {
       context, transitionTimeoutMs: 2_000, transitionStabilityMs: 0,
@@ -872,7 +878,7 @@ test('Workday Autofill with a hidden file input behind "Select file" is the form
   }
 });
 
-test('Workday Autofill that only shows the uploaded file tile (no input) still continues to the next step', async () => {
+test('Workday Autofill with the exact bound CV but no safe Delete control pauses instead of continuing empty', async () => {
   const uploaded = autofillStep.replace(
     '<input type="file" data-automation-id="file-upload-input-ref"><span id="picked"></span>',
     '<div><div data-automation-id="file-upload-item-name">Example_CV.pdf</div><div>506.63 KB</div></div>');
@@ -882,11 +888,13 @@ test('Workday Autofill that only shows the uploaded file tile (no input) still c
   try {
     const page = await servedPage(browser, flowPage.replace(JSON.stringify(autofillStep), JSON.stringify(uploaded))
       .replace(autofillStep, uploaded));
-    await prepareOperationalApplicationForm(page, profile, docs.value, {
+    const result = await prepareOperationalApplicationForm(page, profile, docs.value, {
       context, transitionTimeoutMs: 2_000, transitionStabilityMs: 0,
     });
-    assert.equal(await page.evaluate(() => window.advances), 2, 'Autofill -> My Information -> Review');
+    assert.equal(await page.evaluate(() => window.advances), 0, 'the Autofill step is not advanced silently');
     assert.equal(await page.evaluate(() => window.submits), 0, 'Review Submit never clicked');
+    assert.equal(result.gate?.state, 'review_required');
+    assert.ok(result.evidence.unresolvedFields.some((row) => /no exact Delete button/i.test(row.label)));
     await page.close();
   } finally {
     await browser.close();
@@ -1012,7 +1020,12 @@ test('a Workday step whose saved values arrive late is read after it settles: no
         document.getElementById('next').textContent = 'Submit';
       }
     });
-    document.addEventListener('change', (e) => { if (e.target.type === 'file') document.getElementById('picked').textContent = e.target.files[0].name; });
+    document.addEventListener('change', (e) => {
+      if (e.target.type !== 'file') return;
+      const picked = document.getElementById('picked'); if (picked) picked.textContent = e.target.files[0].name;
+      const upload = e.target.closest('[data-automation-id="resumeUpload"]');
+      if (upload) upload.innerHTML = '<div data-automation-id="file-upload-item"><div data-automation-id="file-upload-item-name">' + e.target.files[0].name + '</div><div>Successfully Uploaded</div></div>';
+    });
   </script>`;
   const browser = await chromium.launch({ headless: true });
   const docs = documents();

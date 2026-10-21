@@ -542,9 +542,23 @@ async function inspectOperationalApplicationFormOnce(page) {
       };
     });
   });
+  const workdayEmptySections = await page.evaluate(() => {
+    const sections = [
+      ['Work Experience', 'Work-Experience-section'],
+      ['Education', 'Education-section'],
+      ['Languages', 'Languages-section'],
+    ];
+    return sections.flatMap(([label, id]) => {
+      const section = document.querySelector(`[role="group"][aria-labelledby="${id}"]`);
+      if (!section) return [];
+      const entryCount = section.querySelectorAll('[role="group"][aria-labelledby$="-panel"]').length;
+      return entryCount === 0 ? [{ label, entryCount }] : [];
+    });
+  }).catch(() => []);
   const byId = new Map(metadata.map((row) => [row.fieldId, row]));
   return {
     ...snapshot,
+    workdayEmptySections,
     fields: snapshot.fields.map((field) => ({ ...field, ...(byId.get(field.fieldId) || {}) })),
   };
 }
@@ -691,6 +705,26 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
   const applicationFormId = cleanFormText(snapshot?.applicationFormId);
   const applicationFields = (snapshot.fields || []).filter((field) => !hasVerifiedFormKey
     || (applicationFormId && field.formId === applicationFormId && field.applicationFormOwned !== false));
+  const cvSectionEntries = {
+    'Work Experience': [markdownSection(profile?.cvText, 'Experience'), markdownSection(profile?.cvText, 'Work Experience')]
+      .some((section) => cleanFormText(section)),
+    Education: Boolean(cleanFormText(markdownSection(profile?.cvText, 'Education'))),
+    Languages: Boolean(cleanFormText(markdownSection(profile?.cvText, 'Languages'))),
+  };
+  for (const section of snapshot.workdayEmptySections || []) {
+    if (!cvSectionEntries[section.label]) continue;
+    const label = `${section.label} has no entries (Workday did not parse the CV); add them or press Enter to continue`;
+    unresolvedFields.push({
+      fieldId: `workday-empty-${section.label.toLowerCase().replace(/\s+/g, '-')}`,
+      stableFieldId: `workday-empty-entry:${section.label.toLowerCase().replace(/\s+/g, '-')}`,
+      label,
+      category: 'workday_entry_section',
+      semantic: 'empty_cv_entry_section',
+      reason: label,
+      missingInformation: null,
+      manualActionRequired: true,
+    });
+  }
   const visibleFields = applicationFields.filter((field) => {
     if (field.disabled) return false;
     const semantics = classifyFieldSemantics(field);
@@ -1959,6 +1993,14 @@ async function performAction(page, action, visibleOptions, { deadlineMs, clock }
         attached: element.isConnected,
         files: element.files ? [...element.files].map((file) => file.name) : [],
       }));
+      const workdayAutofill = await page.evaluate(() => Boolean(document.querySelector('[data-automation-id="applyFlowAutoFillPage"]')))
+        .catch(() => false);
+      if (workdayAutofill) {
+        if (!await uploadedFileTileShown(page, action.artifact.intendedFilename, { deadlineMs, clock })) {
+          throw new Error(`Workday did not finish parsing the exact CV upload: ${action.artifact.intendedFilename}`);
+        }
+        return action.artifact.intendedFilename;
+      }
       // Workday consumes the file: the input empties or is removed and a tile shows the uploaded file's exact name.
       if (state.files.length === 0
           && await uploadedFileTileShown(page, action.artifact.intendedFilename, { deadlineMs, clock })) {
@@ -2178,14 +2220,254 @@ async function uploadedFileTileShown(page, filename, { deadlineMs, clock }) {
   do {
     // Shown and finished: Workday shows loading dots until the upload is processed ("Successfully Uploaded!").
     const shown = await page.evaluate((name) => [...document.querySelectorAll('[data-automation-id="file-upload-item-name"]')]
-      .some((element) => element.getClientRects().length > 0 && (element.textContent || '').trim() === name)
-      && ![...document.querySelectorAll('[data-automation-id="file-loading-dots"]')]
-        .some((element) => element.getClientRects().length > 0), filename)
+      .some((element) => {
+        if (element.getClientRects().length === 0 || (element.textContent || '').trim() !== name) return false;
+        for (let row = element.parentElement; row && !row.matches('[data-automation-id="applyFlowAutoFillPage"]'); row = row.parentElement) {
+          const rowText = (row.innerText || '').replace(/\s+/g, ' ');
+          const rowFileCount = row.querySelectorAll('[data-automation-id="file-upload-item-name"]').length;
+          const loading = [...row.querySelectorAll('[data-automation-id="file-loading-dots"]')]
+            .some((item) => item.getClientRects().length > 0);
+          if (/successfully uploaded/i.test(rowText) && rowFileCount === 1) return !loading;
+          if (rowText.length > 500) break;
+        }
+        return false;
+      }), filename)
       .catch(() => false);
     if (shown) return true;
     await new Promise((resolve) => setTimeout(resolve, 250));
   } while (clock() < until);
   return false;
+}
+
+async function reparseBoundWorkdayResume(page, artifact, uploadedThisPass, progressLog) {
+  if (!artifact?.intendedFilename || uploadedThisPass.has(artifact.intendedFilename)) return { changed: false };
+  const filename = artifact.intendedFilename;
+  const tileState = await page.evaluate((name) => {
+    const step = document.querySelector('[data-automation-id="applyFlowAutoFillPage"]');
+    if (!step) return null;
+    const names = [...step.querySelectorAll('[data-automation-id="file-upload-item-name"]')]
+      .filter((tile) => tile.getClientRects().length > 0).map((tile) => (tile.textContent || '').trim()).filter(Boolean);
+    return { names, exact: names.includes(name) };
+  }, filename).catch(() => null);
+  if (!tileState) return { changed: false };
+  if (!tileState.exact) {
+    const different = [...new Set(tileState.names)];
+    if (!different.length) return { changed: false };
+    const attached = different.join(', ');
+    progressLog?.(`[form] Workday Autofill has a different resume tile (${attached}); leaving it for user review`);
+    return { changed: false, unresolved: {
+      fieldId: 'workday-different-resume', stableFieldId: `workday:different-resume:${attached}`,
+      label: `A different file is already attached here (${attached}); RoleForge did not replace it. Review it; the bound file is ${artifact.resolvedPath}`,
+      category: 'file_upload', semantic: 'cv_upload', manualUploadPath: artifact.resolvedPath,
+      reason: `A different file is already attached here (${attached}); RoleForge did not replace it. Review it.`,
+      manualActionRequired: true,
+    } };
+  }
+
+  const marker = `career-ops-reparse-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const scopes = await page.evaluate(({ name, marker }) => {
+    const step = document.querySelector('[data-automation-id="applyFlowAutoFillPage"]');
+    const tile = step && [...step.querySelectorAll('[data-automation-id="file-upload-item-name"]')]
+      .find((item) => item.getClientRects().length > 0 && (item.textContent || '').trim() === name);
+    if (!tile) return [];
+    const result = [];
+    for (let node = tile.parentElement, depth = 0; node && step.contains(node); node = node.parentElement, depth += 1) {
+      const key = `${marker}-${depth}`;
+      node.setAttribute('data-career-ops-reparse-scope', key);
+      result.push({ key, depth });
+      if (node === step) break;
+    }
+    return result;
+  }, { name: filename, marker }).catch(() => []);
+  let removed = false;
+  try {
+    for (const scopeInfo of scopes) {
+      const scope = page.locator(`[data-career-ops-reparse-scope="${scopeInfo.key}"]`);
+      const exactTiles = await scope.locator('[data-automation-id="file-upload-item-name"]')
+        .evaluateAll((tiles, name) => tiles.filter((tile) => (tile.textContent || '').trim() === name).length === 1
+          && tiles.length === 1, filename).catch(() => false);
+      if (!exactTiles) continue;
+      const button = scope.getByRole('button', { name: `Delete ${filename}`, exact: true });
+      if (await button.count() !== 1) continue;
+      const safe = await button.evaluate((element) => element.tagName !== 'BUTTON'
+        || (element.type || '').toLowerCase() !== 'submit').catch(() => false);
+      if (!safe) continue;
+      await assertNotFinal(button);
+      progressLog?.(`[form] Workday Autofill already has the bound CV "${filename}"; deleting its exact tile so Workday parses this pass's upload`);
+      await button.click({ timeout: 5_000 });
+      const deadline = Date.now() + 30_000;
+      do {
+        const ready = await page.evaluate((name) => {
+          const step = document.querySelector('[data-automation-id="applyFlowAutoFillPage"]');
+          if (!step) return false;
+          const oldTile = [...step.querySelectorAll('[data-automation-id="file-upload-item-name"]')]
+            .some((item) => (item.textContent || '').trim() === name);
+          return !oldTile
+            && Boolean(step.querySelector('[data-automation-id="file-upload-drop-zone"]'))
+            && Boolean(step.querySelector('input[type="file"][data-automation-id="file-upload-input-ref"]'));
+        }, filename).catch(() => false);
+        if (ready) {
+          removed = true;
+          progressLog?.(`[form] Workday Autofill drop zone returned; re-uploading the exact bound CV "${filename}"`);
+          return { changed: true };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      } while (Date.now() < deadline);
+      return { changed: false, unresolved: {
+        fieldId: 'workday-resume-reparse', stableFieldId: `workday:resume-reparse:${filename}`,
+        label: 'Workday could not restore the CV upload control; review the Autofill step before continuing',
+        category: 'file_upload', semantic: 'cv_upload',
+        reason: 'The exact bound CV tile was deleted, but the Workday drop zone and hidden file input did not return.',
+        manualActionRequired: true,
+      } };
+    }
+    return { changed: false, unresolved: {
+      fieldId: 'workday-resume-reparse', stableFieldId: `workday:resume-reparse:${filename}`,
+      label: 'Workday has the bound CV but no exact Delete button; review the Autofill step before continuing',
+      category: 'file_upload', semantic: 'cv_upload',
+      reason: `No button with the exact accessible name "Delete ${filename}" was found in the bound CV tile.`,
+      manualActionRequired: true,
+    } };
+  } finally {
+    await page.evaluate((prefix) => [...document.querySelectorAll('[data-career-ops-reparse-scope]')]
+      .filter((element) => (element.getAttribute('data-career-ops-reparse-scope') || '').startsWith(`${prefix}-`))
+      .forEach((element) => element.removeAttribute('data-career-ops-reparse-scope')), marker).catch(() => {});
+    if (removed) progressLog?.(`[form] Workday CV tile removed; the normal verified upload action will attach "${filename}"`);
+  }
+}
+
+function cssAttributeValue(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+async function fillWorkdayWebsiteProfile(page, profile, pendingPanels, progressLog) {
+  const targets = [
+    ['LinkedIn', cleanFormText(profile?.candidate?.linkedin)],
+    ['GitHub', cleanFormText(profile?.candidate?.github)],
+  ].filter(([, value]) => value);
+  if (!targets.length) return { changed: false, unresolved: [] };
+  const sectionPresent = await page.evaluate(() => Boolean(document.querySelector('[role="group"][aria-labelledby="Websites-section"]')))
+    .catch(() => false);
+  if (!sectionPresent) return { changed: false, unresolved: [] };
+
+  let changed = false;
+  const unresolved = [];
+  for (const [label, url] of targets) {
+    const status = await page.evaluate((target) => {
+      const section = document.querySelector('[role="group"][aria-labelledby="Websites-section"]');
+      if (!section) return { present: false };
+      const panels = [...section.querySelectorAll('[role="group"][aria-labelledby$="-panel"]')];
+      const inputsFor = (panel) => [...panel.querySelectorAll('input[type="url"]')];
+      if (panels.some((panel) => inputsFor(panel).some((input) => input.value === target))) return { present: true, committed: true };
+      const headingFor = (panel) => (panel.getAttribute('aria-labelledby') || '').split(/\s+/)
+        .filter(Boolean).map((id) => document.getElementById(id)?.textContent || '').join(' ').replace(/\s+/g, ' ').trim();
+      return { present: true, committed: false, panels: panels.map((panel) => ({
+        key: panel.getAttribute('aria-labelledby') || '',
+        heading: headingFor(panel),
+        urlInputCount: inputsFor(panel).length,
+      })) };
+    }, url).catch(() => ({ present: false }));
+    if (!status.present || status.committed) continue;
+
+    let panelKey = pendingPanels.get(url) || '';
+    if (!panelKey || !status.panels.some((panel) => panel.key === panelKey)) {
+      const section = page.locator('[role="group"][aria-labelledby="Websites-section"]');
+      const add = section.getByRole('button', { name: 'Add', exact: true });
+      if (await add.count() !== 1) {
+        unresolved.push({
+          fieldId: `workday-website-${label.toLowerCase()}`, stableFieldId: `website:${label.toLowerCase()}`,
+          label: `${label} website could not be added automatically; add it in the Websites section before continuing`,
+          category: 'identity_contact', semantic: label.toLowerCase(), reason: 'The Websites section did not have one exact Add button.',
+          manualActionRequired: true,
+        });
+        continue;
+      }
+      const safe = await add.evaluate((element) => element.tagName !== 'BUTTON'
+        || (element.type || '').toLowerCase() !== 'submit').catch(() => false);
+      if (!safe) {
+        unresolved.push({
+          fieldId: `workday-website-${label.toLowerCase()}`, stableFieldId: `website:${label.toLowerCase()}`,
+          label: `${label} website could not be added automatically; add it in the Websites section before continuing`,
+          category: 'identity_contact', semantic: label.toLowerCase(), reason: 'The Websites Add control was a submit button.',
+          manualActionRequired: true,
+        });
+        continue;
+      }
+      const knownPanelKeys = new Set(status.panels.map((panel) => panel.key));
+      progressLog?.(`[form] adding ${label} through the Websites section's own Add button`);
+      await assertNotFinal(add);
+      await add.click({ timeout: 5_000 });
+      const deadline = Date.now() + 10_000;
+      do {
+        const nextPanel = await page.evaluate(({ knownKeys }) => {
+          const section = document.querySelector('[role="group"][aria-labelledby="Websites-section"]');
+          if (!section) return null;
+          for (const panel of section.querySelectorAll('[role="group"][aria-labelledby$="-panel"]')) {
+            const key = panel.getAttribute('aria-labelledby') || '';
+            const title = key.split(/\s+/).filter(Boolean)
+              .map((id) => document.getElementById(id)?.textContent || '').join(' ').replace(/\s+/g, ' ').trim();
+            if (!knownKeys.includes(key) && /^Websites\s+\d+$/i.test(title)) return { key, title };
+          }
+          return null;
+        }, { knownKeys: [...knownPanelKeys] }).catch(() => null);
+        if (nextPanel) {
+          panelKey = nextPanel.key;
+          pendingPanels.set(url, panelKey);
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      } while (Date.now() < deadline);
+      if (!panelKey) {
+        unresolved.push({
+          fieldId: `workday-website-${label.toLowerCase()}`, stableFieldId: `website:${label.toLowerCase()}`,
+          label: `${label} website panel did not appear; add it in the Websites section before continuing`,
+          category: 'identity_contact', semantic: label.toLowerCase(), reason: 'Workday did not render a new Websites N entry panel after Add.',
+          manualActionRequired: true,
+        });
+        continue;
+      }
+    }
+
+    const panel = page.locator(`[role="group"][aria-labelledby="${cssAttributeValue(panelKey)}"]`);
+    const urlInput = panel.locator('input[type="url"]');
+    const inputDeadline = Date.now() + 10_000;
+    let filled = false;
+    do {
+      const count = await urlInput.count().catch(() => 0);
+      if (count === 1) {
+        const existing = await urlInput.inputValue().catch(() => '');
+        if (existing === url) {
+          filled = true;
+          break;
+        }
+        if (existing) break;
+        await urlInput.fill(url, { timeout: 3_000 }).catch(() => {});
+        const committed = await page.evaluate(({ key, target }) => {
+          const panels = [...document.querySelectorAll('[role="group"][aria-labelledby$="-panel"]')]
+            .filter((item) => item.getAttribute('aria-labelledby') === key);
+          const inputs = panels.flatMap((item) => [...item.querySelectorAll('input[type="url"]')]);
+          return panels.length === 1 && inputs.length === 1 && inputs[0].value === target;
+        }, { key: panelKey, target: url }).catch(() => false);
+        if (committed) {
+          filled = true;
+          changed = true;
+          pendingPanels.delete(url);
+          progressLog?.(`[form] committed ${label} website in its new Workday Websites panel`);
+          break;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    } while (Date.now() < inputDeadline);
+    if (!filled) {
+      unresolved.push({
+        fieldId: `workday-website-${label.toLowerCase()}`, stableFieldId: `website:${label.toLowerCase()}`,
+        label: `${label} website did not remain committed; fill it in the Websites section before continuing`,
+        category: 'identity_contact', semantic: label.toLowerCase(), reason: 'The new Websites URL input did not retain the exact profile value.',
+        manualActionRequired: true,
+      });
+    }
+  }
+  return { changed, unresolved };
 }
 
 async function attachmentVerified(page, artifact) {
@@ -3093,6 +3375,8 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
   const settleQuietMs = transitionStabilityMs >= DEFAULT_PROGRESSION_STABILITY_MS ? 1_500 : 0;
   let settleRetries = 0;
   let progressionDeadlineMs = Math.min(sessionDeadlineMs, clock() + Math.min(progressionSessionMs, effectiveLimits.sessionMs));
+  const uploadedThisPass = new Set();
+  const pendingWebsitePanels = new Map();
   const aggregate = {
     completed: [], uploadedArtifacts: [...(effectivePreviousEvidence?.uploadedArtifacts || [])], committedSelections: [], unresolvedFields: [],
     answerRecords: [],
@@ -3125,6 +3409,17 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         break;
       }
 
+      const reparse = await reparseBoundWorkdayResume(page, artifacts?.cv, uploadedThisPass, progressLog);
+      if (reparse.changed) {
+        visited.delete(stateFingerprint);
+        continue;
+      }
+      const websiteFill = await fillWorkdayWebsiteProfile(page, profile, pendingWebsitePanels, progressLog);
+      if (websiteFill.changed && !websiteFill.unresolved.length) {
+        visited.delete(stateFingerprint);
+        continue;
+      }
+
       let plan = buildOperationalFormPlan(snapshot, profile, artifacts, {
         context,
         previousEvidence: effectivePreviousEvidence,
@@ -3142,6 +3437,11 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
           userCorrectionGuard: stepCommitted,
         });
       }
+      if (reparse.unresolved) plan.unresolvedFields.push(reparse.unresolved);
+      plan.unresolvedFields.push(...websiteFill.unresolved);
+      const transientWorkdayUnresolved = [reparse.unresolved, ...websiteFill.unresolved]
+        .filter(Boolean).map((row) => ({ ...row, transientWorkday: true }));
+      aggregate.unresolvedFields.push(...transientWorkdayUnresolved);
       const applicationFields = snapshot.fields.filter((field) => snapshot.applicationFormId
         && field.formId === snapshot.applicationFormId && field.applicationFormOwned !== false);
       plan.formFingerprint = digest(applicationFields.map((field) => stableFieldIdentity(field, classifyFieldSemantics(field))));
@@ -3162,6 +3462,9 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
       for (const key of ['completed', 'uploadedArtifacts', 'committedSelections', 'unresolvedFields']) {
         aggregate[key].push(...(execution[key] || []));
       }
+      for (const upload of execution.uploadedArtifacts || []) {
+        if (upload.filename) uploadedThisPass.add(upload.filename);
+      }
       aggregate.attemptLedger = execution.attemptLedger;
       for (const row of execution.attemptLedger.slice(ledgerBefore)) {
         if (row.success && row.stableFieldId && row.category !== 'file_upload') stepCommitted.add(row.stableFieldId);
@@ -3174,7 +3477,11 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         break;
       }
       if (!execution.sessionLimitReached) {
+        const uploadsBeforePending = aggregate.uploadedArtifacts.length;
         await uploadPendingDocuments(page, plan, artifacts, aggregate, snapshot.applicationFormId);
+        for (const upload of aggregate.uploadedArtifacts.slice(uploadsBeforePending)) {
+          if (upload.filename) uploadedThisPass.add(upload.filename);
+        }
       }
       addPreparedAnswers(reasoningState, plan, plan.formFingerprint, snapshot);
       const triggerReasons = verifierTriggerReasons(reasoningState, plan, aggregate);
@@ -3256,6 +3563,7 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
             .filter((element) => element.getClientRects().length > 0).map((element) => (element.textContent || '').trim()))
             .catch(() => []));
           aggregate.unresolvedFields = aggregate.unresolvedFields.filter((row) => {
+            if (row.transientWorkday) return false;
             if (row.category === 'file_upload' && row.manualUploadPath && shownFiles.has(basename(row.manualUploadPath))) return false;
             const matches = freshSnapshot.fields.filter((field) => field.formId === freshSnapshot.applicationFormId
               && (field.fieldId === row.fieldId || stableFieldIdentity(field) === row.stableFieldId));
