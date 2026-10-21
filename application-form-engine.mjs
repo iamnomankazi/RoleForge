@@ -661,6 +661,8 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
   context = {},
   previousEvidence = null,
   semanticResolutions = previousEvidence?.reasoning?.semanticResolutions || [],
+  // stableFieldIds RoleForge committed on the current step in this pass (cleared at every step change).
+  userCorrectionGuard = null,
 } = {}) {
   const actions = [];
   const preservedFields = [];
@@ -1185,11 +1187,10 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       if (actions[index].action === 'upload' && withheldUploads.has(actions[index].artifact.resolvedPath)) actions.splice(index, 1);
     }
   }
-  // A field RoleForge already committed that now differs (unchecked, cleared, changed) was corrected by the user at a
-  // manual pause or between passes: keep the user's state, never redo the action.
-  const committedEarlier = new Set((previousEvidence?.attemptLedger || [])
-    .filter((row) => row.success && row.stableFieldId && row.category !== 'file_upload')
-    .map((row) => row.stableFieldId));
+  // A field RoleForge already committed on this step that now differs (unchecked, cleared, changed) was corrected by
+  // the user at a manual pause: keep the user's state, never redo the action. (A page reload after a restart is not a
+  // correction: the guard only covers the current step of the current pass.)
+  const committedEarlier = userCorrectionGuard || new Set();
   for (let index = actions.length - 1; index >= 0; index -= 1) {
     const action = actions[index];
     if (action.action !== 'upload' && committedEarlier.has(action.stableFieldId)) {
@@ -3048,6 +3049,7 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
   const visited = new Set();
   const historicalVisited = new Set(progression.visitedFingerprints);
   let manualWaits = 0;
+  const stepCommitted = new Set();
   let settleRetries = 0;
   let progressionDeadlineMs = Math.min(sessionDeadlineMs, clock() + Math.min(progressionSessionMs, effectiveLimits.sessionMs));
   const aggregate = {
@@ -3082,11 +3084,11 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         break;
       }
 
-      // This pass's own commits count too: a value the user changes at a manual pause is never redone.
       let plan = buildOperationalFormPlan(snapshot, profile, artifacts, {
         context,
-        previousEvidence: { ...effectivePreviousEvidence, attemptLedger: aggregate.attemptLedger },
+        previousEvidence: effectivePreviousEvidence,
         semanticResolutions: reasoningState.semanticResolutions,
+        userCorrectionGuard: stepCommitted,
       });
       const reasoningChangedPlan = await resolvePlanAmbiguitiesWithReasoning(
         plan, snapshot, profile, context, reasoningState,
@@ -3094,8 +3096,9 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
       if (reasoningChangedPlan) {
         plan = buildOperationalFormPlan(snapshot, profile, artifacts, {
           context,
-          previousEvidence: { ...effectivePreviousEvidence, attemptLedger: aggregate.attemptLedger },
+          previousEvidence: effectivePreviousEvidence,
           semanticResolutions: reasoningState.semanticResolutions,
+          userCorrectionGuard: stepCommitted,
         });
       }
       const applicationFields = snapshot.fields.filter((field) => snapshot.applicationFormId
@@ -3106,6 +3109,7 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         batchId: context.batchId || null,
         candidateId: context.candidate?.candidate_id || null,
       }));
+      const ledgerBefore = aggregate.attemptLedger.length;
       const execution = await executeOperationalFormPlanGuarded(page, plan, {
         previousEvidence: { ...effectivePreviousEvidence, attemptLedger: aggregate.attemptLedger },
         clock,
@@ -3118,6 +3122,9 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         aggregate[key].push(...(execution[key] || []));
       }
       aggregate.attemptLedger = execution.attemptLedger;
+      for (const row of execution.attemptLedger.slice(ledgerBefore)) {
+        if (row.success && row.stableFieldId && row.category !== 'file_upload') stepCommitted.add(row.stableFieldId);
+      }
       aggregate.answerRecords = mergeAnswerRecords(aggregate.answerRecords, plan.answerRecords || []);
       aggregate.sessionLimitReached ||= execution.sessionLimitReached;
       aggregate.precomputedNarrativeCount += plan.answerRecords.length;
@@ -3384,6 +3391,7 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
       if (transitionGate) {
         if (!transition.timedOut && transition.fingerprint !== currentStateFingerprint) {
           progression.stepsAdvanced += 1;
+          stepCommitted.clear();
           progression.transitions.push({
             controlId: control.controlId, label: control.label, before: currentStateFingerprint,
             after: transition.fingerprint, durationMs: transition.durationMs ?? Math.max(0, clock() - startedAt),
@@ -3423,6 +3431,7 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         break;
       }
       progression.stepsAdvanced += 1;
+      stepCommitted.clear();
       progression.transitions.push({
         controlId: control.controlId,
         label: control.label,

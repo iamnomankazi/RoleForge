@@ -96,14 +96,22 @@ test('manual continuation verifies requisition, origin, and the same application
 
 test('stable DOM id reacquisition requires the original form, repeated block, label, and field semantics', async () => {
   for (const change of ['fresh', 'other-form', 'other-block', 'semantics', 'label', 'planned-stamp', 'duplicate-id']) {
-    const page = await served(`${firstName}<div id="block-a" role="group" aria-labelledby="work-a-panel">
-      <h3 id="work-a-panel">Work Experience 1</h3><label for="city">City</label><input id="city">
+    // Planned outside a repeated entry (entries only get per-entry answers), then the blocks become entries.
+    const page = await served(`${firstName}<div id="block-a" role="group" aria-labelledby="work-a-heading">
+      <h3 id="work-a-heading">Work Experience 1</h3><label for="city">City</label><input id="city">
       <label for="other-city">City</label><input id="other-city"></div>
-      <div id="block-b" role="group" aria-labelledby="work-b-panel"><h3 id="work-b-panel">Work Experience 2</h3></div>`);
+      <div id="block-b" role="group" aria-labelledby="work-b-heading"><h3 id="work-b-heading">Work Experience 2</h3></div>`);
     try {
       const plan = await planFor(page);
       plan.actions = plan.actions.filter((action) => action.id === 'city');
       assert.equal(plan.actions.length, 1);
+      await page.evaluate(() => {
+        for (const id of ['a', 'b']) {
+          document.getElementById(`work-${id}-heading`).id = `work-${id}-panel`;
+          document.getElementById(`block-${id}`).setAttribute('aria-labelledby', `work-${id}-panel`);
+        }
+      });
+      Object.assign(plan.actions[0], { workdayBlockId: 'block-a', workdayBlockLabelledBy: 'work-a-panel' });
       await page.evaluate((kind) => {
         const original = document.getElementById('city');
         const copy = original.cloneNode(true); copy.removeAttribute('data-career-ops-field-id'); original.replaceWith(copy);
