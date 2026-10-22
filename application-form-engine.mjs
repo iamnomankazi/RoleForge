@@ -2575,16 +2575,46 @@ async function chooseWorkdayEntryLanguage(page, panel, language, entryNumber, un
   await assertNotFinal(control);
   await control.click({ timeout: 5_000 });
   const options = await workdayListboxOptions(page, control, { deadlineMs: Date.now() + 5_000, clock: () => Date.now() });
-  const matches = [];
-  for (let index = 0; index < await options.count(); index += 1) {
-    const option = options.nth(index);
-    if (await option.isVisible().catch(() => false)
-        && normalizeFormQuestion(await option.innerText().catch(() => '')) === normalizeFormQuestion(language)) matches.push(option);
+  await options.first().waitFor({ state: 'visible', timeout: 5_000 }).catch(() => {});
+  const seen = new Set();
+  const findMatches = async () => {
+    const found = [];
+    for (let index = 0; index < await options.count(); index += 1) {
+      const option = options.nth(index);
+      if (!await option.isVisible().catch(() => false)) continue;
+      const text = cleanFormText(await option.innerText().catch(() => ''));
+      if (text) seen.add(text);
+      if (normalizeFormQuestion(text) === normalizeFormQuestion(language)) found.push(option);
+    }
+    return found;
+  };
+  let matches = await findMatches();
+  // The language list is long and only partly rendered: type the name (the listbox jumps to it), then scroll.
+  if (!matches.length) {
+    await page.keyboard.type(language, { delay: 40 }).catch(() => {});
+    await page.waitForTimeout(400);
+    matches = await findMatches();
+  }
+  for (let step = 0; !matches.length && step < 80; step += 1) {
+    const moved = await options.first().evaluate((option) => {
+      const list = option.closest('[role="listbox"]');
+      const scroller = [list, ...(list ? [...list.querySelectorAll('*')] : [])]
+        .find((element) => element && element.scrollHeight > element.clientHeight + 4) || list?.parentElement;
+      if (!scroller) return false;
+      const before = scroller.scrollTop;
+      scroller.scrollTop += Math.max(120, scroller.clientHeight * 0.8);
+      return scroller.scrollTop !== before;
+    }).catch(() => false);
+    if (!moved) break;
+    await page.waitForTimeout(120);
+    matches = await findMatches();
   }
   if (matches.length !== 1) {
     await page.keyboard.press('Escape').catch(() => {});
+    const sample = [...seen].slice(0, 12).join(' | ') || 'no options rendered';
     unresolved.push(workdayEntryManualRow('Languages', entryNumber, 'Language',
-      matches.length ? 'Several exact language options are available.' : 'No exact Workday language option matches the CV.'));
+      matches.length ? 'Several exact language options are available.'
+        : `No exact Workday language option matches the CV (options seen: ${sample}).`));
     return;
   }
   await matches[0].click({ timeout: 5_000 });
@@ -3920,7 +3950,8 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         const labels = [];
         const seenManualLabels = new Set();
         for (const label of [
-          ...blockingUnresolved.map((row) => cleanFormText(row.label || row.semantic || row.fieldId)),
+          ...blockingUnresolved.map((row) => cleanFormText(row.label || row.semantic || row.fieldId)
+            + (row.category === 'workday_entry_field' && row.reason ? ` (${cleanFormText(row.reason)})` : '')),
           ...reviewed.evidence.validationErrors.map((text) => `error: ${cleanFormText(text)}`),
         ]) {
           const key = normalizeFormQuestion(label);
