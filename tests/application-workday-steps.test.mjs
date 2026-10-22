@@ -841,7 +841,7 @@ test('review-15: "Old CV ().pdf" and a display:contents name beside an empty inp
   }
 });
 
-// Live Cushman & Wakefield Workday (2026-10-21): the real file input is hidden beside a visible drop zone.
+// Live Workday tenant (2026-10-21): the real file input is hidden beside a visible drop zone.
 test('Workday Autofill with a hidden file input behind "Select file" is the form and receives the bound CV', async () => {
   const { classifyFormSnapshot, collectPageSnapshot } = await import('../application-browser-executor.mjs');
   const hiddenUpload = autofillStep.replace(
@@ -902,7 +902,7 @@ test('Workday Autofill with the exact bound CV but no safe Delete control pauses
   }
 });
 
-// Live Workday (Cushman & Wakefield 2026-10-21): "current step N of M" is a screen-reader-only label hidden by CSS.
+// Live Workday tenant (2026-10-21): "current step N of M" is a screen-reader-only label hidden by CSS.
 test('Workday flow continues when the progress bar step text is a CSS-hidden screen-reader label', async () => {
   const browser = await chromium.launch({ headless: true });
   const docs = documents();
@@ -922,7 +922,7 @@ test('Workday flow continues when the progress bar step text is a CSS-hidden scr
   }
 });
 
-// Live Workday My Information (Cushman & Wakefield 2026-10-21), structure only: pick-from-list fields keep their
+// Live Workday My Information (2026-10-21), structure only: pick-from-list fields keep their
 // choice in a chip, "Select One" dropdowns are buttons, the phone country code is its own control.
 const myInfoLive = ({ source = '', phoneType = 'Select One' } = {}) => {
   const chip = (text) => (text ? `<ul data-automation-id="selectedItemList"><li><div data-automation-id="selectedItem"><p>${text}</p></div></li></ul>` : '');
@@ -994,7 +994,7 @@ test('a field that React re-renders with the same id after typing is re-acquired
   }
 });
 
-// Live Cushman & Wakefield 2026-10-21: after Continue, My Information is drawn first and Workday fills the saved
+// Live Workday tenant 2026-10-21: after Continue, My Information is drawn first and Workday fills the saved
 // values ~1 s later; read too early, prefilled required fields look empty and the run paused instead of continuing.
 test('a Workday step whose saved values arrive late is read after it settles: no pause, Save and Continue clicked', async () => {
   const lateStep = `<div data-automation-id="applyFlowMyInfoPage"><h2>My Information</h2>

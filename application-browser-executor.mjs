@@ -565,7 +565,7 @@ export function isCompatibleDestination({ listingUrl, applyUrl = null, currentUr
   return Boolean(identity?.verified);
 }
 
-// ATS step pages (Workday ".../apply") omit the title or the company (Workday tenant "cw" for Cushman & Wakefield):
+// ATS step pages (Workday ".../apply") omit the title or the company (a Workday tenant whose short name differs from the company):
 // the listing's exact requisition on a known ATS host plus one visible match identifies the job.
 export function requisitionBoundIdentity(identity, listingUrl, currentUrl) {
   if (identity?.verified) return true;
