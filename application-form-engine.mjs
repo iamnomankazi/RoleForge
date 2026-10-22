@@ -2139,18 +2139,43 @@ async function performAction(page, action, visibleOptions, { deadlineMs, clock }
       await page.keyboard.press('Escape').catch(() => null);
       throw error;
     }
-    const count = await options.count();
-    let match = null;
-    for (let index = 0; index < count; index += 1) {
-      const option = options.nth(index);
-      if (!await option.isVisible().catch(() => false)) continue;
-      if (listboxOptionMatches(await option.innerText(), action)) {
-        if (match) {
-          await page.keyboard.press('Escape').catch(() => null);
-          throw new Error(`Several dropdown options match ${action.value}`);
+    const findMatch = async () => {
+      const count = await options.count();
+      let found = null;
+      for (let index = 0; index < count; index += 1) {
+        const option = options.nth(index);
+        if (!await option.isVisible().catch(() => false)) continue;
+        if (listboxOptionMatches(await option.innerText().catch(() => ''), action)) {
+          if (found) {
+            await page.keyboard.press('Escape').catch(() => null);
+            throw new Error(`Several dropdown options match ${action.value}`);
+          }
+          found = option;
         }
-        match = option;
       }
+      return found;
+    };
+    let match = await findMatch();
+    // Long Workday lists (Language) render only part of their options: type the option's name (the listbox jumps
+    // to it), then scroll through the list. Still chosen by exact text, never by position.
+    if (!match && action.optionMatch?.mode !== 'proficiency' && action.optionMatch?.mode !== 'degree') {
+      await page.keyboard.type(cleanFormText(action.value), { delay: 40 }).catch(() => null);
+      await page.waitForTimeout(400);
+      match = await findMatch();
+    }
+    for (let step = 0; !match && step < 60; step += 1) {
+      const moved = await options.first().evaluate((option) => {
+        const list = option.closest('[role="listbox"]');
+        const scroller = [list, ...(list ? [...list.querySelectorAll('*')] : [])].find((element) => element && element.scrollHeight > element.clientHeight + 4)
+          || list?.parentElement;
+        if (!scroller) return false;
+        const before = scroller.scrollTop;
+        scroller.scrollTop += Math.max(120, scroller.clientHeight * 0.8);
+        return scroller.scrollTop !== before;
+      }).catch(() => false);
+      if (!moved) break;
+      await page.waitForTimeout(120);
+      match = await findMatch();
     }
     if (!match) {
       await page.keyboard.press('Escape').catch(() => null);
