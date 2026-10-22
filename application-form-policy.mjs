@@ -318,6 +318,9 @@ export function classifyFieldSemantics(field = {}) {
       && /\b(?:overall|reading|writing|speaking|listening)\b/.test(text)) {
     return { category: 'education', semantic: 'language_proficiency' };
   }
+  if (field.workdayBlockKind === 'education' && /field of study|major|subject/.test(text)) {
+    return { category: 'education', semantic: 'field_of_study' };
+  }
   if (/degree|qualification/.test(text)) return { category: 'education', semantic: 'degree' };
   if (/university|school|institution/.test(text)) return { category: 'education', semantic: 'university' };
   if (/graduat/.test(text)) return { category: 'education', semantic: 'graduation' };

@@ -135,19 +135,23 @@ test('Workday reparses an exact bound Autofill tile and never deletes a differen
   }
 });
 
-test('empty Workday entry sections with matching CV sections pause and do not save-and-continue', async () => {
+test('empty Workday entry sections with no usable CV entries pause and do not save-and-continue', async () => {
   const browser = await chromium.launch({ headless: true });
   try {
     const empty = `<div data-automation-id="applyFlowMyExperiencePage"><h2>My Experience</h2>
+      <label for="first">First Name</label><input id="first" value="Alex">
+      <label for="last">Last Name</label><input id="last" value="Example">
+      <label for="email">Email Address</label><input id="email" type="email" value="alex@example.test">
       <div role="group" aria-labelledby="Work-Experience-section"><h4 id="Work-Experience-section">Work Experience</h4></div>
       <div role="group" aria-labelledby="Education-section"><h4 id="Education-section">Education</h4></div>
       <div role="group" aria-labelledby="Languages-section"><h4 id="Languages-section">Languages</h4></div></div>`;
     const html = `${shell(empty, 'Save and Continue')}<script>window.advances=0;document.getElementById('next').addEventListener('click',()=>window.advances++);</script>`;
     const page = await servedPage(browser, html);
+    const noUsableEntries = `## Experience\n### Community volunteer\n- Helped at events\n\n## Education\n### Exchange semester\n**Exchange programme** | 2020\n\n## Languages\nNo language entries are listed.\n`;
     const snapshot = await inspectOperationalApplicationForm(page);
     assert.deepEqual(snapshot.workdayEmptySections.map((item) => item.label), ['Work Experience', 'Education', 'Languages']);
     let pausedLabels = [];
-    const result = await prepareOperationalApplicationForm(page, profile({ cvText }), {}, {
+    const result = await prepareOperationalApplicationForm(page, profile({ cvText: noUsableEntries }), {}, {
       context, transitionTimeoutMs: 300, transitionStabilityMs: 0,
       awaitManualFields: async (labels) => { pausedLabels = labels; return false; },
     });

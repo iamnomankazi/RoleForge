@@ -164,6 +164,12 @@ function fieldQuestion(field) {
   return cleanFormText(field.questionText || field.groupLabel || field.label);
 }
 
+function workdayEntryFieldLabel(field) {
+  const detail = fieldQuestion(field);
+  const entry = cleanFormText(field.workdayBlockHeading);
+  return entry ? `${entry}: ${detail}` : detail;
+}
+
 function optionsFor(field) {
   return (field.options || []).flatMap((option) => [
     { label: cleanFormText(option.label), value: cleanFormText(option.value) },
@@ -218,6 +224,9 @@ function listboxOptionMatches(label, action) {
 }
 
 function pickOptionMatches(label, action) {
+  if (action.pickKind === 'field_of_study') {
+    return normalizeFormQuestion(label) === normalizeFormQuestion(action.value);
+  }
   if (action.pickKind === 'phone_country') {
     const country = cleanFormText(action.value);
     const match = cleanFormText(label).match(/^(.+?)\s*\(\s*\+\d{1,4}\s*\)$/);
@@ -239,15 +248,83 @@ function markdownSection(markdown, name) {
   return match?.[1] || '';
 }
 
-function cvEducationEntries(profile) {
-  const section = markdownSection(profile?.cvText, 'Education');
+function markdownEntries(sectionName, profile) {
+  const section = markdownSection(profile?.cvText, sectionName);
   const headings = [...section.matchAll(/^###\s+(.+)\s*$/gm)];
   return headings.map((heading, index) => {
     const start = heading.index + heading[0].length;
     const end = headings[index + 1]?.index ?? section.length;
-    const degree = section.slice(start, end).match(/^\s*\*\*([^*]+)\*\*/m)?.[1] || '';
-    return { school: cleanSchoolName(heading[1]), degree: cleanFormText(degree) };
-  }).filter((entry) => entry.school && entry.degree);
+    return { heading: cleanFormText(heading[1]), body: section.slice(start, end) };
+  });
+}
+
+function cvExperienceEntries(profile) {
+  const entries = [];
+  const skipped = [];
+  for (const item of markdownEntries('Experience', profile)) {
+    const heading = item.heading.match(/^([^|\r\n]+?)\s+\|\s+([^|\r\n]+?)\s*$/);
+    if (!heading) {
+      skipped.push(item.heading);
+      continue;
+    }
+    const dateLine = item.body.match(/^\s*\*\*([^*\r\n]+)\*\*\s*$/m)?.[1] || '';
+    const range = parseExperienceDateRange(dateLine);
+    const bullets = item.body.split(/\r?\n/).filter((line) => /^\s*[-*]\s+\S/.test(line));
+    entries.push({
+      title: cleanFormText(heading[1]),
+      company: cleanFormText(heading[2]),
+      start: range?.start || null,
+      end: range?.end || null,
+      current: Boolean(range?.current),
+      description: bullets.join('\n'),
+    });
+  }
+  return { entries, skipped };
+}
+
+function parseExperienceDateRange(value) {
+  const monthNumbers = new Map([
+    ['jan', '01'], ['january', '01'], ['feb', '02'], ['february', '02'], ['mar', '03'], ['march', '03'],
+    ['apr', '04'], ['april', '04'], ['may', '05'], ['jun', '06'], ['june', '06'], ['jul', '07'], ['july', '07'],
+    ['aug', '08'], ['august', '08'], ['sep', '09'], ['sept', '09'], ['september', '09'], ['oct', '10'],
+    ['october', '10'], ['nov', '11'], ['november', '11'], ['dec', '12'], ['december', '12'],
+  ]);
+  const month = '(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)';
+  const match = cleanFormText(value).match(new RegExp(`^${month}\\s+(\\d{4})\\s*[-\\u2010-\\u2015]\\s*(${month}\\s+\\d{4}|Present|Current)$`, 'i'));
+  if (!match) return null;
+  const toDate = (monthName, year) => ({ month: monthNumbers.get(monthName.toLowerCase()), year });
+  const start = toDate(match[1], match[2]);
+  const current = /^(?:present|current)$/i.test(match[3]);
+  const endMatch = current ? null : match[3].match(new RegExp(`^${month}\\s+(\\d{4})$`, 'i'));
+  return { start, end: endMatch ? toDate(endMatch[1], endMatch[2]) : null, current };
+}
+
+function cvEducationData(profile) {
+  const entries = [];
+  const skipped = [];
+  for (const { heading: school, body } of markdownEntries('Education', profile)) {
+    const line = body.match(/^\s*\*\*([^*\r\n]+)\*\*(?:\s*\|\s*([^\r\n]+))?\s*$/m);
+    if (!line || !/\b(?:master|bachelor)(?:'|\u2019)?s?\b/i.test(line[1])) {
+      skipped.push(school);
+      continue;
+    }
+    const degree = cleanFormText(line[1]);
+    const subject = degree.match(/^[^,]+,\s*(.+)$/)?.[1]?.trim() || '';
+    const years = cleanFormText(line[2]).match(/\b(\d{4})\s*[-\u2010-\u2015]\s*(\d{4}|Present|Current)\b/i);
+    const expectedYear = cleanFormText(profile?.education?.expected_graduation_date).match(/\b(\d{4})\b/)?.[1] || '';
+    entries.push({
+      school,
+      degree,
+      subject,
+      firstYear: years?.[1] || '',
+      lastYear: years ? (/^(?:present|current)$/i.test(years[2]) ? expectedYear : years[2]) : '',
+    });
+  }
+  return { entries, skipped };
+}
+
+function cvEducationEntries(profile) {
+  return cvEducationData(profile).entries;
 }
 
 function cleanSchoolName(value) {
@@ -298,7 +375,7 @@ function groundedDateSegments(value) {
 
 function cvLanguageLevels(profile) {
   const section = markdownSection(profile?.cvText, 'Languages');
-  return [...section.matchAll(/^\s*[-*]\s*([^:\r\n]+):\s*(Native|Fluent|Beginner)\b[^\r\n]*$/gim)]
+  return [...section.matchAll(/^\s*[-*]\s*([^:\r\n]+):\s*([^\r\n]+?)\s*$/gm)]
     .map((match) => [cleanFormText(match[1]), cleanFormText(match[2])]);
 }
 
@@ -607,7 +684,7 @@ function manualField(field, semantics, reason, missingInformation = null, reason
   return {
     fieldId: field.fieldId,
     stableFieldId: stableFieldIdentity(field, semantics),
-    label: fieldQuestion(field),
+    label: workdayEntryFieldLabel(field),
     category: semantics.category,
     semantic: semantics.semantic,
     reason,
@@ -705,14 +782,18 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
   const applicationFormId = cleanFormText(snapshot?.applicationFormId);
   const applicationFields = (snapshot.fields || []).filter((field) => !hasVerifiedFormKey
     || (applicationFormId && field.formId === applicationFormId && field.applicationFormOwned !== false));
-  const cvSectionEntries = {
-    'Work Experience': [markdownSection(profile?.cvText, 'Experience'), markdownSection(profile?.cvText, 'Work Experience')]
-      .some((section) => cleanFormText(section)),
+  const cvSectionHasText = {
+    'Work Experience': Boolean(cleanFormText(markdownSection(profile?.cvText, 'Experience'))),
     Education: Boolean(cleanFormText(markdownSection(profile?.cvText, 'Education'))),
     Languages: Boolean(cleanFormText(markdownSection(profile?.cvText, 'Languages'))),
   };
+  const cvSectionHasUsableEntry = {
+    'Work Experience': cvExperienceEntries(profile).entries.length > 0,
+    Education: cvEducationEntries(profile).length > 0,
+    Languages: cvLanguageLevels(profile).length > 0,
+  };
   for (const section of snapshot.workdayEmptySections || []) {
-    if (!cvSectionEntries[section.label]) continue;
+    if (!cvSectionHasText[section.label] || cvSectionHasUsableEntry[section.label]) continue;
     const label = `${section.label} has no entries (Workday did not parse the CV); add them or press Enter to continue`;
     unresolvedFields.push({
       fieldId: `workday-empty-${section.label.toLowerCase().replace(/\s+/g, '-')}`,
@@ -779,7 +860,7 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       stableFieldId,
       id: field.id,
       tag: field.tag,
-      label: fieldQuestion(field),
+      label: workdayEntryFieldLabel(field),
       name: field.name,
       category: semantics.category,
       semantic: semantics.semantic,
@@ -801,7 +882,9 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
     // Inside a repeated entry (Work Experience 1, Education 2, ...) a field describes that entry, not the candidate:
     // the employer's Location is not the candidate's city. Only the per-entry answers handled below (degree,
     // language proficiency, "I am fluent") are filled; anything else is the user's.
-    const handledEntryField = (field.workdayBlockKind === 'education' && field.widget === 'workday-listbox' && semantics.semantic === 'degree')
+    const handledEntryField = (field.workdayBlockKind === 'education'
+      && ((field.widget === 'workday-listbox' && semantics.semantic === 'degree')
+        || (field.widget === 'selectinput' && semantics.semantic === 'field_of_study')))
       || (field.workdayBlockKind === 'language' && ['language_proficiency', 'language_fluent'].includes(semantics.semantic));
     if (/-panel$/i.test(field.workdayBlockLabelledBy || '') && !handledEntryField) {
       if (field.required && !fieldAnswered(field)) {
@@ -944,6 +1027,30 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       ));
       continue;
     }
+    if (field.widget === 'selectinput' && semantics.semantic === 'field_of_study'
+        && field.workdayBlockKind === 'education') {
+      const school = cleanSchoolName(field.workdaySchool);
+      const matchingEntries = cvEducationEntries(profile).filter((entry) => educationSchoolMatches(entry.school, school));
+      if (matchingEntries.length !== 1 || !matchingEntries[0].subject) {
+        unresolvedFields.push(manualField(field, semantics,
+          'The CV does not provide one exact subject for this education entry.'));
+        continue;
+      }
+      const subject = matchingEntries[0].subject;
+      const planned = {
+        ...base,
+        action: 'pick',
+        pickKind: 'field_of_study',
+        optionValues: [subject],
+        value: subject,
+        valueHash: hashFormValue(subject),
+        retryBudget: 1,
+      };
+      if (isCommitted(field, planned)) preservedFields.push({ ...base, valueHash: planned.valueHash, preserved: true });
+      else if (fieldAnswered(field)) unresolvedFields.push(selectionConflict(field, semantics, field.value, subject));
+      else actions.push(planned);
+      continue;
+    }
     if (field.widget === 'selectinput') {
       const value = cleanFormText(resolved.value);
       const selectedItems = Array.isArray(field.selectedItems)
@@ -1018,8 +1125,8 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
         Fluent: ['Fluent', 'Advanced', 'Proficient'],
         Beginner: ['Beginner', 'Basic', 'Elementary', 'Novice', 'Elementary proficiency'],
       };
-      if (!level) {
-        if (field.required) unresolvedFields.push(manualField(field, semantics, 'Language proficiency is not grounded by the CV language entry.'));
+      if (!level || !valuesByLevel[level]) {
+        unresolvedFields.push(manualField(field, semantics, 'Language proficiency is not an approved exact CV level.'));
         continue;
       }
       const planned = {
@@ -1045,8 +1152,8 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
         const planned = { ...base, action: 'uncheck', value: 'No', valueHash: hashFormValue('No'), retryBudget: 1 };
         if (isCommitted(field, planned)) preservedFields.push({ ...base, valueHash: planned.valueHash, preserved: true });
         else unresolvedFields.push(selectionConflict(field, semantics, 'Fluent', level));
-      } else if (!level && field.required) {
-        unresolvedFields.push(manualField(field, semantics, 'The fluent checkbox language level is not grounded by the CV.'));
+      } else {
+        unresolvedFields.push(manualField(field, semantics, 'The fluent checkbox language level is not an approved exact CV level.'));
       }
       continue;
     }
@@ -2340,6 +2447,217 @@ function cssAttributeValue(value) {
   return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
+function workdayEntryManualRow(section, entryNumber, field, reason) {
+  const slug = `${section}-${entryNumber}-${field}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  return {
+    fieldId: `workday-cv-entry-${slug}`,
+    stableFieldId: `workday-cv-entry:${slug}`,
+    label: `${section} ${entryNumber}: ${field}`,
+    category: 'workday_entry_field',
+    semantic: 'cv_entry_field',
+    reason,
+    missingInformation: null,
+    manualActionRequired: true,
+  };
+}
+
+async function workdaySectionPanels(page, sectionId) {
+  return page.evaluate((id) => {
+    const section = document.querySelector(`[role="group"][aria-labelledby="${id}"]`);
+    if (!section) return { present: false, panels: [] };
+    const panels = [...section.querySelectorAll('[role="group"][aria-labelledby$="-panel"]')];
+    return { present: true, panels: panels.map((panel) => ({
+      key: panel.getAttribute('aria-labelledby') || '',
+      title: (panel.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+        .map((labelId) => document.getElementById(labelId)?.textContent || '').join(' ')
+        .replace(/\s+/g, ' ').trim(),
+    })) };
+  }, sectionId).catch(() => ({ present: false, panels: [] }));
+}
+
+async function waitForWorkdayEntryPanel(page, sectionId, knownKeys, heading) {
+  const deadline = Date.now() + 10_000;
+  do {
+    const state = await workdaySectionPanels(page, sectionId);
+    const panel = state.panels.find((item) => !knownKeys.includes(item.key)
+      && new RegExp(`^${escapeRegex(heading)}\\s+\\d+$`, 'i').test(item.title));
+    if (panel) return panel;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  } while (Date.now() < deadline);
+  return null;
+}
+
+async function fillWorkdayEntryText(panel, selector, value, section, entryNumber, field, unresolved) {
+  if (!value) return;
+  const input = panel.locator(selector);
+  if (await input.count().catch(() => 0) !== 1) {
+    unresolved.push(workdayEntryManualRow(section, entryNumber, field, 'The new Workday entry does not have one exact matching field.'));
+    return;
+  }
+  const before = await input.inputValue().catch(() => '');
+  if (before && before !== value) {
+    unresolved.push(workdayEntryManualRow(section, entryNumber, field, 'The new Workday field already contains a different value; it was left unchanged.'));
+    return;
+  }
+  if (!before) await input.fill(value, { timeout: 5_000 }).catch(() => {});
+  const deadline = Date.now() + 5_000;
+  do {
+    const live = panel.locator(selector);
+    const current = await live.inputValue().catch(() => '');
+    if (current === value) {
+      await live.blur().catch(() => {});
+      const committed = await panel.locator(selector).inputValue().catch(() => '');
+      if (committed === value) return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  } while (Date.now() < deadline);
+  unresolved.push(workdayEntryManualRow(section, entryNumber, field, 'The Workday field did not retain the exact CV value.'));
+}
+
+async function fillWorkdayEntryDate(panel, suffix, segments, section, entryNumber, field, unresolved) {
+  if (!segments) {
+    unresolved.push(workdayEntryManualRow(section, entryNumber, field, 'The CV date line does not contain an exact supported date.'));
+    return;
+  }
+  const wrapper = panel.locator(`[data-automation-id="dateInputWrapper"][id$="--${suffix}"]`);
+  if (await wrapper.count().catch(() => 0) !== 1) {
+    unresolved.push(workdayEntryManualRow(section, entryNumber, field, 'The new Workday entry does not have one exact date group.'));
+    return;
+  }
+  for (const segment of ['month', 'year'].filter((part) => segments[part])) {
+    await fillWorkdayEntryText(wrapper, `input[id$="dateSection${segment[0].toUpperCase()}${segment.slice(1)}-input"]`,
+      segments[segment], section, entryNumber, field, unresolved);
+  }
+}
+
+async function chooseWorkdayEntryLanguage(page, panel, language, entryNumber, unresolved) {
+  const selector = 'button[aria-haspopup="listbox"][name="language"]';
+  let control = panel.locator(selector);
+  if (await control.count().catch(() => 0) !== 1) {
+    unresolved.push(workdayEntryManualRow('Languages', entryNumber, 'Language', 'The new Workday entry does not have one language dropdown.'));
+    return;
+  }
+  let current = cleanFormText(await control.innerText().catch(() => ''));
+  if (normalizeFormQuestion(current) === normalizeFormQuestion(language)) return;
+  if (current && !/^select one$/i.test(current)) {
+    unresolved.push(workdayEntryManualRow('Languages', entryNumber, 'Language', 'The new Workday language dropdown already contains a different choice.'));
+    return;
+  }
+  await assertNotFinal(control);
+  await control.click({ timeout: 5_000 });
+  const options = await workdayListboxOptions(page, control, { deadlineMs: Date.now() + 5_000, clock: () => Date.now() });
+  const matches = [];
+  for (let index = 0; index < await options.count(); index += 1) {
+    const option = options.nth(index);
+    if (await option.isVisible().catch(() => false)
+        && normalizeFormQuestion(await option.innerText().catch(() => '')) === normalizeFormQuestion(language)) matches.push(option);
+  }
+  if (matches.length !== 1) {
+    await page.keyboard.press('Escape').catch(() => {});
+    unresolved.push(workdayEntryManualRow('Languages', entryNumber, 'Language',
+      matches.length ? 'Several exact language options are available.' : 'No exact Workday language option matches the CV.'));
+    return;
+  }
+  await matches[0].click({ timeout: 5_000 });
+  const deadline = Date.now() + 5_000;
+  do {
+    control = panel.locator(selector);
+    current = cleanFormText(await control.innerText().catch(() => ''));
+    if (normalizeFormQuestion(current) === normalizeFormQuestion(language)) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  } while (Date.now() < deadline);
+  unresolved.push(workdayEntryManualRow('Languages', entryNumber, 'Language', 'The selected language did not remain committed.'));
+}
+
+async function fillWorkdayCvEntries(page, profile, progressLog, loggedSkips) {
+  const definitions = [
+    {
+      section: 'Work Experience', sectionId: 'Work-Experience-section', heading: 'Work Experience',
+      entries: cvExperienceEntries(profile).entries, kind: 'experience',
+    },
+    {
+      section: 'Education', sectionId: 'Education-section', heading: 'Education',
+      entries: cvEducationEntries(profile), kind: 'education',
+    },
+    {
+      section: 'Languages', sectionId: 'Languages-section', heading: 'Languages',
+      entries: cvLanguageLevels(profile).map(([language, level]) => ({ language, level })), kind: 'language',
+    },
+  ];
+  const experienceSkipped = cvExperienceEntries(profile).skipped;
+  const educationSkipped = cvEducationData(profile).skipped;
+  for (const [section, names] of [['Work Experience', experienceSkipped], ['Education', educationSkipped]]) {
+    for (const name of names) {
+      const key = `${section}:${name}`;
+      if (loggedSkips.has(key)) continue;
+      loggedSkips.add(key);
+      const reason = section === 'Work Experience' ? 'does not use the exact "Title | Company" heading format'
+        : 'is not a Master\'s or Bachelor\'s degree programme';
+      progressLog?.(`[form] ${section} CV item "${name}" ${reason}; left for user review`);
+    }
+  }
+
+  let changed = false;
+  const unresolved = [];
+  for (const definition of definitions) {
+    if (!definition.entries.length) continue;
+    const initial = await workdaySectionPanels(page, definition.sectionId);
+    if (!initial.present || initial.panels.length) continue;
+    for (let index = 0; index < definition.entries.length; index += 1) {
+      const entry = definition.entries[index];
+      const entryNumber = index + 1;
+      const state = await workdaySectionPanels(page, definition.sectionId);
+      const add = page.locator(`[role="group"][aria-labelledby="${cssAttributeValue(definition.sectionId)}"] [data-automation-id="add-button"]`);
+      if (await add.count().catch(() => 0) !== 1) {
+        unresolved.push(workdayEntryManualRow(definition.section, entryNumber, 'Entry', 'The section does not have one exact Add button.'));
+        break;
+      }
+      const unsafeSubmit = await add.evaluate((element) => (element.type || '').toLowerCase() === 'submit' && Boolean(element.form)).catch(() => true);
+      if (unsafeSubmit) {
+        unresolved.push(workdayEntryManualRow(definition.section, entryNumber, 'Entry', 'The section Add button is a submit control and was not clicked.'));
+        break;
+      }
+      progressLog?.(`[form] adding ${definition.section} ${entryNumber} from cv.md through its own Add button`);
+      await assertNotFinal(add);
+      await add.click({ timeout: 5_000 });
+      const created = await waitForWorkdayEntryPanel(page, definition.sectionId, state.panels.map((panel) => panel.key), definition.heading);
+      if (!created) {
+        unresolved.push(workdayEntryManualRow(definition.section, entryNumber, 'Entry', 'Workday did not render a new entry panel after Add.'));
+        break;
+      }
+      changed = true;
+      const entryName = definition.kind === 'experience' ? `${entry.title} | ${entry.company}`
+        : definition.kind === 'education' ? entry.school : entry.language;
+      progressLog?.(`[form] added ${created.title} (${entryName}) from cv.md`);
+      const panel = page.locator(`[role="group"][aria-labelledby="${cssAttributeValue(created.key)}"]`);
+      if (definition.kind === 'experience') {
+        await fillWorkdayEntryText(panel, 'input[id$="--jobTitle"]', entry.title, definition.section, entryNumber, 'Job Title', unresolved);
+        await fillWorkdayEntryText(panel, 'input[id$="--companyName"]', entry.company, definition.section, entryNumber, 'Company', unresolved);
+        await fillWorkdayEntryText(panel, 'textarea[id$="--roleDescription"]', entry.description, definition.section, entryNumber, 'Role Description', unresolved);
+        if (entry.start) await fillWorkdayEntryDate(panel, 'startDate', entry.start, definition.section, entryNumber, 'Start Date', unresolved);
+        else unresolved.push(workdayEntryManualRow(definition.section, entryNumber, 'Start Date', 'The CV date line does not contain an exact supported date.'));
+        if (entry.current) {
+          const current = panel.locator('input[type="checkbox"][id$="--currentlyWorkHere"]');
+          if (await current.count().catch(() => 0) === 1) {
+            await current.check({ timeout: 5_000 }).catch(() => {});
+            if (!await current.isChecked().catch(() => false)) unresolved.push(workdayEntryManualRow(definition.section, entryNumber, 'I currently work here', 'The current-work checkbox did not remain checked.'));
+          } else unresolved.push(workdayEntryManualRow(definition.section, entryNumber, 'I currently work here', 'The new Workday entry does not have one current-work checkbox.'));
+        } else if (entry.end) await fillWorkdayEntryDate(panel, 'endDate', entry.end, definition.section, entryNumber, 'End Date', unresolved);
+        else unresolved.push(workdayEntryManualRow(definition.section, entryNumber, 'End Date', 'The CV date line does not contain an exact supported end date.'));
+      } else if (definition.kind === 'education') {
+        await fillWorkdayEntryText(panel, 'input[id$="--schoolName"]', entry.school, definition.section, entryNumber, 'School Name', unresolved);
+        if (entry.firstYear) await fillWorkdayEntryDate(panel, 'firstYearAttended', { year: entry.firstYear }, definition.section, entryNumber, 'First Year Attended', unresolved);
+        else unresolved.push(workdayEntryManualRow(definition.section, entryNumber, 'First Year Attended', 'The CV does not provide an exact start year.'));
+        if (entry.lastYear) await fillWorkdayEntryDate(panel, 'lastYearAttended', { year: entry.lastYear }, definition.section, entryNumber, 'Last Year Attended', unresolved);
+        else unresolved.push(workdayEntryManualRow(definition.section, entryNumber, 'Last Year Attended', 'The CV end year or configured expected graduation year is unavailable.'));
+      } else {
+        await chooseWorkdayEntryLanguage(page, panel, entry.language, entryNumber, unresolved);
+      }
+    }
+  }
+  return { changed, unresolved };
+}
+
 async function fillWorkdayWebsiteProfile(page, profile, pendingPanels, progressLog) {
   const targets = [
     ['LinkedIn', cleanFormText(profile?.candidate?.linkedin)],
@@ -2357,11 +2675,18 @@ async function fillWorkdayWebsiteProfile(page, profile, pendingPanels, progressL
       const section = document.querySelector('[role="group"][aria-labelledby="Websites-section"]');
       if (!section) return { present: false };
       const panels = [...section.querySelectorAll('[role="group"][aria-labelledby$="-panel"]')];
-      const inputsFor = (panel) => [...panel.querySelectorAll('input[type="url"]')];
-      if (panels.some((panel) => inputsFor(panel).some((input) => input.value === target))) return { present: true, committed: true };
+      const inputsFor = (panel) => [...panel.querySelectorAll('input')].filter((input) => {
+        const label = (input.getAttribute('aria-label') || [...(input.labels || [])].map((item) => item.innerText).join(' ')
+          || (input.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+            .map((id) => document.getElementById(id)?.textContent || '').join(' ')).replace(/\s+/g, ' ').trim();
+        return label.replace(/\s*(?:\*|\(required\)|required).*$/i, '').trim().toLowerCase() === 'url';
+      });
+      if (panels.some((panel) => inputsFor(panel).some((input) => input.value === target))) {
+        return { present: true, committed: true, panelCount: panels.length };
+      }
       const headingFor = (panel) => (panel.getAttribute('aria-labelledby') || '').split(/\s+/)
         .filter(Boolean).map((id) => document.getElementById(id)?.textContent || '').join(' ').replace(/\s+/g, ' ').trim();
-      return { present: true, committed: false, panels: panels.map((panel) => ({
+      return { present: true, committed: false, panelCount: panels.length, panels: panels.map((panel) => ({
         key: panel.getAttribute('aria-labelledby') || '',
         heading: headingFor(panel),
         urlInputCount: inputsFor(panel).length,
@@ -2369,10 +2694,23 @@ async function fillWorkdayWebsiteProfile(page, profile, pendingPanels, progressL
     }, url).catch(() => ({ present: false }));
     if (!status.present || status.committed) continue;
 
+    if (!pendingPanels.has('__workdayCanAddFromEmpty')) {
+      pendingPanels.set('__workdayCanAddFromEmpty', status.panelCount === 0);
+    }
+    if (!pendingPanels.get('__workdayCanAddFromEmpty')) {
+      unresolved.push({
+        fieldId: `workday-website-${label.toLowerCase()}`, stableFieldId: `website:${label.toLowerCase()}`,
+        label: `${label} website URL`, category: 'identity_contact', semantic: label.toLowerCase(),
+        reason: 'The Websites section already has an entry panel; RoleForge did not add a duplicate.',
+        manualActionRequired: true,
+      });
+      continue;
+    }
+
     let panelKey = pendingPanels.get(url) || '';
     if (!panelKey || !status.panels.some((panel) => panel.key === panelKey)) {
       const section = page.locator('[role="group"][aria-labelledby="Websites-section"]');
-      const add = section.getByRole('button', { name: 'Add', exact: true });
+      const add = section.locator('[data-automation-id="add-button"]');
       if (await add.count() !== 1) {
         unresolved.push({
           fieldId: `workday-website-${label.toLowerCase()}`, stableFieldId: `website:${label.toLowerCase()}`,
@@ -2382,8 +2720,7 @@ async function fillWorkdayWebsiteProfile(page, profile, pendingPanels, progressL
         });
         continue;
       }
-      const safe = await add.evaluate((element) => element.tagName !== 'BUTTON'
-        || (element.type || '').toLowerCase() !== 'submit').catch(() => false);
+      const safe = await add.evaluate((element) => (element.type || '').toLowerCase() !== 'submit' || !element.form).catch(() => false);
       if (!safe) {
         unresolved.push({
           fieldId: `workday-website-${label.toLowerCase()}`, stableFieldId: `website:${label.toLowerCase()}`,
@@ -2429,7 +2766,7 @@ async function fillWorkdayWebsiteProfile(page, profile, pendingPanels, progressL
     }
 
     const panel = page.locator(`[role="group"][aria-labelledby="${cssAttributeValue(panelKey)}"]`);
-    const urlInput = panel.locator('input[type="url"]');
+    const urlInput = panel.getByLabel(/^URL\b/i);
     const inputDeadline = Date.now() + 10_000;
     let filled = false;
     do {
@@ -2445,7 +2782,12 @@ async function fillWorkdayWebsiteProfile(page, profile, pendingPanels, progressL
         const committed = await page.evaluate(({ key, target }) => {
           const panels = [...document.querySelectorAll('[role="group"][aria-labelledby$="-panel"]')]
             .filter((item) => item.getAttribute('aria-labelledby') === key);
-          const inputs = panels.flatMap((item) => [...item.querySelectorAll('input[type="url"]')]);
+          const inputs = panels.flatMap((item) => [...item.querySelectorAll('input')].filter((input) => {
+            const label = (input.getAttribute('aria-label') || [...(input.labels || [])].map((node) => node.innerText).join(' ')
+              || (input.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+                .map((id) => document.getElementById(id)?.textContent || '').join(' ')).replace(/\s+/g, ' ').trim();
+            return label.replace(/\s*(?:\*|\(required\)|required).*$/i, '').trim().toLowerCase() === 'url';
+          }));
           return panels.length === 1 && inputs.length === 1 && inputs[0].value === target;
         }, { key: panelKey, target: url }).catch(() => false);
         if (committed) {
@@ -3379,6 +3721,7 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
   let progressionDeadlineMs = Math.min(sessionDeadlineMs, clock() + Math.min(progressionSessionMs, effectiveLimits.sessionMs));
   const uploadedThisPass = new Set();
   const pendingWebsitePanels = new Map();
+  const loggedCvEntrySkips = new Set();
   const aggregate = {
     completed: [], uploadedArtifacts: [...(effectivePreviousEvidence?.uploadedArtifacts || [])], committedSelections: [], unresolvedFields: [],
     answerRecords: [],
@@ -3413,6 +3756,12 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
 
       const reparse = await reparseBoundWorkdayResume(page, artifacts?.cv, uploadedThisPass, progressLog);
       if (reparse.changed) {
+        visited.delete(stateFingerprint);
+        continue;
+      }
+      const cvEntryFill = await fillWorkdayCvEntries(page, profile, progressLog, loggedCvEntrySkips);
+      aggregate.unresolvedFields.push(...cvEntryFill.unresolved);
+      if (cvEntryFill.changed) {
         visited.delete(stateFingerprint);
         continue;
       }
