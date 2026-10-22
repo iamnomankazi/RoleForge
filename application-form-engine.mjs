@@ -215,8 +215,9 @@ function listboxOptionMatches(label, action) {
   }
   if (optionMatch?.mode === 'proficiency') {
     // The whole option must be an approved level label: "Advanced Beginner" or "Less than proficient" never pass.
-    // CEFR codes ("C1", "C2 - ") and bracketed notes are decoration.
+    // CEFR codes ("C1", "C2 - "), a leading scale number (Workday "4 - Fluent") and bracketed notes are decoration.
     const core = normalizeFormQuestion(cleanFormText(label).replace(/\([^)]*\)/g, ' ')
+      .replace(/^\s*\d+\s*[-–.:)]\s*/, ' ')
       .replace(/\b[abc][12]\b/gi, ' ').replace(/[-–:/]+/g, ' '));
     return (optionMatch.values || []).some((value) => core === normalizeFormQuestion(value));
   }
@@ -309,7 +310,10 @@ function cvEducationData(profile) {
       continue;
     }
     const degree = cleanFormText(line[1]);
-    const subject = degree.match(/^[^,]+,\s*(.+)$/)?.[1]?.trim() || '';
+    // "Degree, Subject", else the subject after " in " / " of ": Master of Computer Science -> Computer Science.
+    const subject = degree.match(/^[^,]+,\s*(.+)$/)?.[1]?.trim()
+      || degree.match(/\bin\s+(.+)$/i)?.[1]?.trim()
+      || degree.match(/^(?:master|bachelor)'?s?\s+of\s+(.+)$/i)?.[1]?.trim() || '';
     const years = cleanFormText(line[2]).match(/\b(\d{4})\s*[-\u2010-\u2015]\s*(\d{4}|Present|Current)\b/i);
     const expectedYear = cleanFormText(profile?.education?.expected_graduation_date).match(/\b(\d{4})\b/)?.[1] || '';
     entries.push({
@@ -1032,7 +1036,7 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       const school = cleanSchoolName(field.workdaySchool);
       const matchingEntries = cvEducationEntries(profile).filter((entry) => educationSchoolMatches(entry.school, school));
       if (matchingEntries.length !== 1 || !matchingEntries[0].subject) {
-        unresolvedFields.push(manualField(field, semantics,
+        if (field.required) unresolvedFields.push(manualField(field, semantics,
           'The CV does not provide one exact subject for this education entry.'));
         continue;
       }
@@ -3739,6 +3743,7 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
   const visited = new Set();
   const historicalVisited = new Set(progression.visitedFingerprints);
   let manualWaits = 0;
+  const acknowledgedConflicts = new Set();
   const stepCommitted = new Set();
   // Live runs wait for Workday to finish loading a step; tests that pass transitionStabilityMs: 0 skip it.
   const settleQuietMs = transitionStabilityMs >= DEFAULT_PROGRESSION_STABILITY_MS ? 1_500 : 0;
@@ -3891,8 +3896,15 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
       }
       // A document with no upload control on this step ("upload:*", e.g. a cover letter) is settled at the end of the
       // flow and never blocks moving to the next step.
+      // A differing selection the user has already been shown at a pause is the user's choice (kept, never replaced).
       const blockingUnresolved = reviewed.evidence.unresolvedFields
-        .filter((row) => !String(row.stableFieldId || '').startsWith('upload:'));
+        .filter((row) => !String(row.stableFieldId || '').startsWith('upload:'))
+        .filter((row) => !(row.existingValue && acknowledgedConflicts.has(row.stableFieldId)))
+        // An optional field RoleForge could not fill exactly (e.g. Field of Study without an exact option) never blocks.
+        .filter((row) => {
+          const field = (currentSnapshot.fields || []).find((item) => item.fieldId === row.fieldId);
+          return !field || field.required;
+        });
       // A form that momentarily fails verification is a page still rendering (Workday after an upload or sign-in):
       // re-inspect the settled page before treating anything as unresolved.
       if (blockingUnresolved.some((row) => row.fieldId === 'application-form-unverified')
@@ -3938,7 +3950,10 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
           const shownFiles = new Set(await page.evaluate(() => [...document.querySelectorAll('[data-automation-id="file-upload-item-name"]')]
             .filter((element) => element.getClientRects().length > 0).map((element) => (element.textContent || '').trim()))
             .catch(() => []));
+          for (const row of reviewed.evidence.unresolvedFields) if (row.existingValue) acknowledgedConflicts.add(row.stableFieldId);
           aggregate.unresolvedFields = aggregate.unresolvedFields.filter((row) => {
+            // Rows about entries RoleForge added are re-derived from the live page by the next review.
+            if (row.category === 'workday_entry_field') return false;
             if (row.transientWorkday) return false;
             if (row.category === 'file_upload' && row.manualUploadPath && shownFiles.has(basename(row.manualUploadPath))) return false;
             const matches = freshSnapshot.fields.filter((field) => field.formId === freshSnapshot.applicationFormId
