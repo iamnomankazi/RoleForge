@@ -1547,6 +1547,16 @@ export async function awaitManualFieldsInTerminal(contract, labels, {
   page, input = process.stdin, log = console.log,
 } = {}) {
   if (!input.isTTY) return false;
+  // Keep the page RoleForge paused on (gitignored evidence) so an unsupported step can be fixed from what it saw.
+  if (page && contract?.manifestPath) {
+    const pauseDir = join(dirname(contract.manifestPath), 'evidence', contract.candidate.candidate_id, 'pauses');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    await page.content().then((html) => {
+      mkdirSync(pauseDir, { recursive: true });
+      writeFileSync(join(pauseDir, `${stamp}.html`), html);
+      log(`Saved this page for diagnosis: ${join(pauseDir, `${stamp}.html`)}`);
+    }).catch(() => {});
+  }
   log(`\n${contract.candidate.company} - ${contract.candidate.title}: Fill these in the browser, then press Enter here. RoleForge clicks Save and Continue itself; your own clicks on Save and Continue/Submit are blocked while RoleForge controls the page. The final Submit stays yours.`);
   for (const label of [...new Set(labels)]) log(`  - ${label}`);
   const entered = await waitForEnterOnPage(page, input);
