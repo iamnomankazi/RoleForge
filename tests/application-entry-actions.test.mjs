@@ -10,6 +10,7 @@ import {
   followSafeApplicationEntryFlow,
   requisitionBoundIdentity,
   selectSafeApplyContinuation,
+  verifyVisibleIdentity,
 } from '../application-browser-executor.mjs';
 
 const CANDIDATE = {
@@ -466,6 +467,12 @@ test('a stray field on the listing (job-alert email) does not stop the Apply ent
     );
     assert.equal(await page.evaluate(() => window.applyClicks || 0), 1);
   });
+});
+
+test('a parenthesised company alias identifies the listing; a generic alias does not', () => {
+  const snapshot = { documentTitle: 'Data Engineer Intern - ACG X', headings: ['Data Engineer Intern'], bodyText: 'Join ACG X in Helsinki.' };
+  assert.equal(verifyVisibleIdentity(snapshot, { company: 'Acme Consulting Group (ACG X)', title: 'Data Engineer Intern' }).verified, true);
+  assert.equal(verifyVisibleIdentity(snapshot, { company: 'Acme Consulting Group (AI)', title: 'Data Engineer Intern' }).verified, false);
 });
 
 test('an Apply link to the company\'s own careers subdomain is an entry; another domain is not', () => {

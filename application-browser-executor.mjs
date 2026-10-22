@@ -310,7 +310,9 @@ export function verifyVisibleIdentity(snapshot, candidate) {
   const genericCompanyTokens = new Set([
     'ai', 'company', 'corporation', 'corp', 'group', 'gmbh', 'inc', 'limited', 'llc', 'ltd', 'oy', 'plc', 'sa', 'software', 'tech',
   ]);
-  const companyAliases = inline(candidate?.company).split(/\s*\/\s*/)
+  // "Name / Other" and "Name (Alias)" both name the company: "Boston Consulting Group (BCG X)" shows as "BCG X".
+  const parenthetical = inline(candidate?.company).match(/^(.+?)\s*\(([^()]+)\)\s*$/);
+  const companyAliases = [...inline(candidate?.company).split(/\s*\/\s*/), ...(parenthetical ? [parenthetical[1], parenthetical[2]] : [])]
     .map((value) => normalized(value))
     .filter((value) => {
       if (!value || value.length < 4) return false;
