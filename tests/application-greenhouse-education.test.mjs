@@ -145,6 +145,21 @@ describe('Greenhouse education DOM regressions', () => {
     assert.equal(await page.evaluate(() => window.finalClicks || 0), 0);
     await page.close();
   });
+  test('an empty School filled in the same pass still lets degree, discipline and dates be planned', async () => {
+    const page = await browser.newPage();
+    const emptySchool = `<div class="select__container"><label for="school">School</label><div class="select__single-value"></div><input id="school" role="combobox" style="opacity:0" value=""></div>`;
+    await page.setContent(`<form><label>Email<input type="email" required></label><div class="education--container"><div class="education--form">${emptySchool}${fields().map((f) => `<label for="${f.id}">${f.label}</label>${f.tag === 'select'
+      ? `<select id="${f.id}"><option value=""></option>${f.options.map((o) => `<option value="${o.value}">${o.label}</option>`).join('')}</select>`
+      : `<input id="${f.id}" type="number" aria-label="${f.label}">`}`).join('')}</div></div><button type="submit">Submit application</button></form>`);
+    const snapshot = await inspectOperationalApplicationForm(page);
+    const plan = buildOperationalFormPlan(snapshot, profile());
+    const byId = Object.fromEntries(plan.actions.map((a) => [snapshot.fields.find((f) => f.fieldId === a.fieldId).id, a.value]));
+    assert.equal(byId.degree, "Master's Degree");
+    assert.equal(byId.subject, 'Computer Science');
+    assert.equal(byId['start-year'], '2024');
+    assert.equal(byId['end-year'], '2031');
+    await page.close();
+  });
   test('school binding stays within each repeated Greenhouse education block', async () => {
     const page = await browser.newPage();
     const block = (id, schoolName) => `<div class="education--form"><label for="${id}-school">School</label><input id="${id}-school" value="${schoolName}"><label for="${id}-degree">Degree</label><select id="${id}-degree" required><option></option><option>Master's Degree</option><option>Bachelor's Degree</option></select></div>`;

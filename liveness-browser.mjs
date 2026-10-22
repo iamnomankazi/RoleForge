@@ -7,7 +7,8 @@
 
 import { classifyLiveness } from './liveness-core.mjs';
 
-const NAVIGATE_TIMEOUT_MS = 15_000;
+// Some company career sites (heavy client-side apps) take well over 15 s to reach DOMContentLoaded.
+const NAVIGATE_TIMEOUT_MS = 45_000;
 const HYDRATION_WAIT_MS = 2_000;
 
 // The default Playwright headless UA contains "HeadlessChrome", which Cloudflare

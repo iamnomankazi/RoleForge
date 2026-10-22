@@ -769,6 +769,7 @@ async function inspectOperationalApplicationFormOnce(page) {
         workdayBlockLabelledBy: repeatedPanel?.getAttribute('aria-labelledby') || '',
         workdaySchool,
         educationSchool,
+        educationSchoolFieldId: clean(greenhouseSchool?.getAttribute('data-career-ops-field-id')),
         workdayLanguage: workdayBlockKind === 'language' ? clean(languageName) : '',
         workdayUploadSectionHeading: (element.type || '').toLowerCase() === 'file'
           ? clean(referencedLabel(element.closest('[role="group"][aria-labelledby]'))
@@ -949,8 +950,22 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
   const effectiveProfile = { ...profile, priorApprovedAnswers: priorAnswers };
   const hasVerifiedFormKey = Object.prototype.hasOwnProperty.call(snapshot || {}, 'applicationFormId');
   const applicationFormId = cleanFormText(snapshot?.applicationFormId);
-  const applicationFields = (snapshot.fields || []).filter((field) => !hasVerifiedFormKey
+  const ownedFields = (snapshot.fields || []).filter((field) => !hasVerifiedFormKey
     || (applicationFormId && field.formId === applicationFormId && field.applicationFormOwned !== false));
+  // A Greenhouse education block whose School is still empty is filled in this same pass: bind its other fields
+  // (degree, discipline, dates) to the school RoleForge will enter, so they are planned now instead of skipped.
+  const plannedSchool = (schoolFieldId) => {
+    const school = ownedFields.find((item) => item.fieldId === schoolFieldId);
+    if (!school || cleanFormText(school.value)) return '';
+    try {
+      return cleanFormText(canonicalFieldValue(profile, { category: 'education', semantic: 'university' }, { field: school, snapshot, context }));
+    } catch {
+      return '';
+    }
+  };
+  const applicationFields = ownedFields.map((field) => (field.educationContext && !cleanFormText(field.educationSchool)
+    && field.educationSchoolFieldId && plannedSchool(field.educationSchoolFieldId)
+    ? { ...field, educationSchool: plannedSchool(field.educationSchoolFieldId) } : field));
   const cvSectionHasText = {
     'Work Experience': Boolean(cleanFormText(markdownSection(profile?.cvText, 'Experience'))),
     Education: Boolean(cleanFormText(markdownSection(profile?.cvText, 'Education'))),
@@ -2145,7 +2160,10 @@ async function chooseAutocomplete(page, action, visibleOptions, { deadlineMs, cl
           const sameStart = valueParts.every((part, index) => normalizeFormQuestion(parts[index]) === normalizeFormQuestion(part));
           return sameStart && (parts.length === valueParts.length || (valueParts.length === 1 && parts.length === 2));
         });
-        if (exact.length === 1) liveMatches.splice(0, liveMatches.length, exact[0]);
+        // Location services sometimes list the identical place twice; identical labels are one choice.
+        const identical = exact.length > 1
+          && exact.every((match) => normalizeFormQuestion(match.label) === normalizeFormQuestion(exact[0].label));
+        if (exact.length === 1 || identical) liveMatches.splice(0, liveMatches.length, exact[0]);
       }
       if (liveMatches.length !== 1) {
         throw new Error(`Autocomplete owned option is ambiguous for ${action.semantic}: ${matchingLabel}`);

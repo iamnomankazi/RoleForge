@@ -385,6 +385,8 @@ export function classifyFieldSemantics(field = {}) {
   if (!selectorShape && !['radio', 'checkbox'].includes(type)
       && /\b(?:programming languages?|languages?\b.*\bcod(?:e|ing)\b)/.test(text)
       && !/\byears?\b|\b(?:how many|rate|rating|level)\b/.test(text)
+      // "... Could you share a project where you used them?" needs a project narrative, not a bare list.
+      && !/\b(?:describe|tell us|share|outline|example)\b.*\b(?:project|problem|challenge)\b/.test(text)
       && /comfortable|proficien|which|what|list/.test(text)) {
     return { category: 'skill_experience', semantic: 'programming_languages' };
   }

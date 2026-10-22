@@ -64,12 +64,35 @@ async function saveStepSnapshot(contract, page, stepLabel) {
 }
 
 
+// Country names and major hiring cities seen in listing locations ("Berlin / Paris", "Amsterdam · Netherlands").
+const LOCATION_COUNTRIES = [
+  ['Finland', /\b(?:finland|helsinki|espoo|tampere|turku|oulu|joensuu|vantaa)\b/i],
+  ['Germany', /\b(?:germany|deutschland|berlin|munich|münchen|hamburg|frankfurt|cologne|köln|stuttgart|düsseldorf)\b/i],
+  ['Netherlands', /\b(?:netherlands|amsterdam|rotterdam|the hague|den haag|utrecht|eindhoven|veldhoven)\b/i],
+  ['Denmark', /\b(?:denmark|copenhagen|københavn|aarhus)\b/i],
+  ['Sweden', /\b(?:sweden|stockholm|gothenburg|göteborg|malmö)\b/i],
+  ['France', /\b(?:france|paris|lyon)\b/i],
+  ['Spain', /\b(?:spain|madrid|barcelona)\b/i],
+  ['Italy', /\b(?:italy|milan|milano|rome)\b/i],
+  ['United Kingdom', /\b(?:united kingdom|england|london)\b/i],
+  ['Ireland', /\b(?:ireland|dublin)\b/i],
+];
+
+// One country when the location names only that country; several non-Finland countries resolve to the first
+// (work outside Finland has the same authorization answer); Finland mixed with others stays unknown.
+export function jobCountryFromLocationText(text) {
+  const found = LOCATION_COUNTRIES.filter(([, pattern]) => pattern.test(String(text || ''))).map(([country]) => country);
+  if (!found.length) return '';
+  if (found.length === 1) return found[0];
+  return found.includes('Finland') ? '' : found[0];
+}
+
 export function buildCandidateFormContext(contract) {
   const row = contract?.sourceCandidate?.sourceRow || {};
   const location = row.location && typeof row.location === 'object' ? row.location : {};
   let jobCountry = inline(row.jobCountry ?? row.job_country ?? row.country ?? location.country);
   const locationText = inline(typeof row.location === 'string' ? row.location : row.locationText);
-  if (!jobCountry && /(?:^|,|\s)finland(?:$|,|\s)/i.test(locationText)) jobCountry = 'Finland';
+  if (!jobCountry) jobCountry = jobCountryFromLocationText(locationText);
   const jdText = inline(row.description ?? row.jobDescription ?? row.job_description ?? row.content);
   return {
     batchId: contract?.manifest?.batchId || null,
