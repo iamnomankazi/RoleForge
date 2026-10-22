@@ -321,6 +321,9 @@ export async function fetchAtsPosting(url, { fetchImpl = fetch } = {}) {
     } catch {
       return null;
     }
+    // Unlisted Lever postings are live on jobs.lever.co but absent from the public postings API: a Lever 404
+    // is inconclusive and the browser decides.
+    if (ats === 'lever' && response.status === 404) return null;
     if (response.status === 404 || response.status === 410) {
       return { result: 'expired', code: `${ats}_api_gone`, reason: `ATS API ${response.status} — posting removed`, description: '', finalUrl: url };
     }
@@ -417,6 +420,8 @@ export async function checkLivenessViaApi(url) {
       return null; // network / timeout / redirect → inconclusive, let Playwright decide
     }
 
+    // Unlisted Lever postings are absent from the public API (see fetchAtsPosting): inconclusive, not removed.
+    if (ats === 'lever' && res.status === 404) return null;
     if (res.status === 404 || res.status === 410) {
       return { result: 'expired', code: `${ats}_api_gone`, reason: `ATS API ${res.status} — posting removed` };
     }
