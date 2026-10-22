@@ -407,7 +407,18 @@ function safePredictedEntryDestination(destination, { listingUrl } = {}) {
   }
   if (DANGEROUS_ACTION_PATH.test(`${parsed.pathname} ${parsed.search}`)) return false;
   if (parsed.hostname === listing.hostname) return true;
+  // A company's own careers subdomains (careers.example.com -> talent.example.com) are the same site.
+  if (parsed.protocol === 'https:' && registrableDomain(parsed.hostname)
+      && registrableDomain(parsed.hostname) === registrableDomain(listing.hostname)) return true;
   return isKnownApplicationHost(destination);
+}
+
+function registrableDomain(hostname) {
+  const labels = String(hostname || '').toLowerCase().split('.').filter(Boolean);
+  if (labels.length < 2 || labels.every((label) => /^\d+$/.test(label))) return '';
+  // Two-label public suffixes (co.uk, com.au, ...) keep three labels.
+  const twoLabelSuffix = labels.length >= 3 && /^(?:co|com|ac|gov|org|net|edu)$/.test(labels.at(-2)) && labels.at(-1).length === 2;
+  return labels.slice(twoLabelSuffix ? -3 : -2).join('.');
 }
 
 export function classifyApplicationEntryAction(control, {
@@ -1342,7 +1353,20 @@ export async function followSafeApplicationEntryFlow(context, initialPage, initi
       actualFormReached: false,
       candidateFieldSignals: form.candidateFieldSignals,
     };
-    const rankedContinuations = await rankSafeApplyContinuations(page, snapshot.controls, scope);
+    let rankedContinuations = await rankSafeApplyContinuations(page, snapshot.controls, scope);
+    // Job boards render their Apply buttons late (client-side); look again before concluding there is none.
+    for (let retry = 0; !rankedContinuations.length && retry < 4
+        && !snapshot.controls.some((control) => control.visible && (ENTRY_ACTION_LABEL.test(inline(control.text))
+          || ONE_CLICK_ENTRY_LABEL.test(inline(control.text)) || FINAL_ACTION_LABEL.test(inline(control.text)))); retry += 1) {
+      await page.waitForLoadState('networkidle', { timeout: 3_000 }).catch(() => {});
+      await page.waitForTimeout(1_500);
+      snapshot = await collectPageSnapshot(page);
+      form = classifyFormSnapshot(snapshot);
+      if (form.actualForm || form.loginRequired || form.humanGate) break;
+      scope.candidateFieldSignals = form.candidateFieldSignals;
+      rankedContinuations = await rankSafeApplyContinuations(page, snapshot.controls, scope);
+    }
+    if (form.actualForm || form.loginRequired || form.humanGate) break;
     if (!rankedContinuations.length) {
       const rejectedEntry = snapshot.controls.find((control) => control.visible && (
         ENTRY_ACTION_LABEL.test(inline(control.text)) || ONE_CLICK_ENTRY_LABEL.test(inline(control.text)) || FINAL_ACTION_LABEL.test(inline(control.text))

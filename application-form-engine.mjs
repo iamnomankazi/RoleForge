@@ -244,6 +244,12 @@ function listboxOptionMatches(label, action) {
       .replace(/\b[abc][12]\b/gi, ' ').replace(/[-–:/]+/g, ' '));
     return (optionMatch.values || []).some((value) => core === normalizeFormQuestion(value));
   }
+  if (optionMatch?.mode === 'education_month') {
+    const index = Number(optionMatch.month) - 1;
+    const month = new Date(Date.UTC(2000, index, 1)).toLocaleString('en', { month: 'long', timeZone: 'UTC' });
+    return [month, month.slice(0, 3), String(index + 1), String(index + 1).padStart(2, '0')]
+      .some((value) => normalizeFormQuestion(value) === normalized);
+  }
   return normalized === normalizeFormQuestion(action.value);
 }
 
@@ -356,17 +362,47 @@ function cvEducationData(profile) {
     const subject = degree.match(/^[^,]+,\s*(.+)$/)?.[1]?.trim()
       || degree.match(/\bin\s+(.+)$/i)?.[1]?.trim()
       || degree.match(/^(?:master|bachelor)'?s?\s+of\s+(.+)$/i)?.[1]?.trim() || '';
-    const years = cleanFormText(line[2]).match(/\b(\d{4})\s*[-\u2010-\u2015]\s*(\d{4}|Present|Current)\b/i);
-    const expectedYear = cleanFormText(profile?.education?.expected_graduation_date).match(/\b(\d{4})\b/)?.[1] || '';
+    const range = parseEducationDateRange(line[2]);
+    const expected = expectedGraduationSegments(profile);
     entries.push({
       school,
       degree,
       subject,
-      firstYear: years?.[1] || '',
-      lastYear: years ? (/^(?:present|current)$/i.test(years[2]) ? expectedYear : years[2]) : '',
+      firstYear: range?.start?.year || '',
+      firstMonth: range?.start?.month || '',
+      lastYear: (range?.current ? expected?.year : range?.end?.year) || '',
+      lastMonth: (range?.current ? expected?.month : range?.end?.month) || '',
+      current: Boolean(range?.current),
     });
   }
   return { entries, skipped };
+}
+
+function expectedGraduationSegments(profile) {
+  const match = cleanFormText(profile?.education?.expected_graduation_date).match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!match) return null;
+  const [, day, month, year] = match;
+  const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+  return date.getUTCFullYear() === Number(year) && date.getUTCMonth() + 1 === Number(month) && date.getUTCDate() === Number(day)
+    ? { day, month, year } : null;
+}
+
+function parseEducationDateRange(value) {
+  const endpoints = cleanFormText(value).replace(/\s*\([^)]*\)\s*$/, '').split(/\s*[-\u2010-\u2015]\s*/);
+  if (endpoints.length !== 2) return null;
+  const parse = (text) => {
+    const match = text.match(/^(?:([A-Za-z]+)\s+)?(\d{4})$/);
+    if (!match) return null;
+    const names = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+    const index = match[1] ? names.findIndex((name) => [name, name.slice(0, 3), ...(name === 'september' ? ['sept'] : [])].includes(match[1].toLowerCase())) : -1;
+    if (match[1] && index < 0) return null;
+    return { year: match[2], month: index < 0 ? '' : String(index + 1).padStart(2, '0') };
+  };
+  const start = parse(endpoints[0]);
+  const current = /^(?:present|current)$/i.test(endpoints[1]);
+  const end = current ? null : parse(endpoints[1]);
+  if (!start || (!current && !end)) return null;
+  return { start, end, current };
 }
 
 function cvEducationEntries(profile) {
@@ -383,6 +419,51 @@ function educationSchoolMatches(left, right) {
   const b = normalizeSchool(right);
   // Whole names only: "Indiana University of Pennsylvania" is not "University of Pennsylvania".
   return Boolean(a && b && a === b);
+}
+
+function educationFieldAnswer(field, semantics, profile) {
+  const school = cleanSchoolName(field.educationSchool);
+  const schoolEntries = markdownEntries('Education', profile).filter((entry) => educationSchoolMatches(entry.heading, school));
+  const entries = cvEducationEntries(profile).filter((entry) => educationSchoolMatches(entry.school, school));
+  if (schoolEntries.length !== 1 || entries.length !== 1) {
+    if (field.required) throw new Error('The education block does not match exactly one supported CV school entry.');
+    return { value: null, answerRecord: null };
+  }
+  const entry = entries[0];
+  let value = null;
+  let optionMatch = null;
+  let sourceRef = 'cv.md';
+  if (semantics.semantic === 'degree') {
+    value = /\bmaster\b/i.test(entry.degree) ? 'Master' : 'Bachelor';
+    optionMatch = { mode: 'degree', level: value, qualification: entry.degree };
+  } else if (semantics.semantic === 'field_of_study') {
+    value = entry.subject || null;
+  } else {
+    const segment = normalizeFormQuestion([field.questionText, field.label, field.id, field.name].filter(Boolean).join(' '))
+      .match(/\b(start|end)(?: date)? (month|year)\b/);
+    if (segment) {
+      const [, endpoint, part] = segment;
+      const raw = entry[`${endpoint === 'start' ? 'first' : 'last'}${part === 'month' ? 'Month' : 'Year'}`];
+      if (endpoint === 'end' && entry.current) sourceRef = 'cv.md + config/profile.yml';
+      if (raw && part === 'month') {
+        optionMatch = { mode: 'education_month', month: raw };
+        value = field.type === 'number' ? String(Number(raw))
+          : new Date(Date.UTC(2000, Number(raw) - 1, 1)).toLocaleString('en', { month: 'long', timeZone: 'UTC' });
+      } else value = raw || null;
+    }
+  }
+  if (value && field.tag === 'select') {
+    let options = (field.options || []).filter((option) => optionMatch
+      ? listboxOptionMatches(option.label, { value, optionMatch }) || listboxOptionMatches(option.value, { value, optionMatch })
+      : normalizeFormQuestion(option.label) === normalizeFormQuestion(value));
+    if (semantics.semantic === 'degree') {
+      const exact = options.filter((option) => normalizeFormQuestion(option.label) === normalizeFormQuestion(entry.degree));
+      if (exact.length) options = exact;
+    }
+    if (options.length !== 1) throw new Error('Education field has no unique visible option matching the CV entry.');
+    value = options[0].label;
+  }
+  return { value, optionMatch, sourceRef, answerRecord: null };
 }
 
 function groundedDateSegments(value) {
@@ -469,8 +550,13 @@ function groundedLocationComponents(action) {
 function groundedLocationMatches(value, action) {
   const normalized = normalizeFormQuestion(value);
   const intended = cleanFormText(action.value);
-  if (['city', 'country'].includes(action.semantic)) {
-    return Boolean(normalized) && normalized.includes(normalizeFormQuestion(intended));
+  if (action.semantic === 'city') {
+    const grounding = groundedLocationComponents(action);
+    const tokens = [grounding.city || intended, grounding.country].map(normalizeFormQuestion).filter(Boolean);
+    return tokens.length === 2 && tokens.every((token) => (` ${normalized} `).includes(` ${token} `));
+  }
+  if (action.semantic === 'country') {
+    return Boolean(normalized) && (` ${normalized} `).includes(` ${normalizeFormQuestion(intended)} `);
   }
   const grounding = groundedLocationComponents(action);
   const parts = grounding.combined.split(',').map((part) => part.trim()).filter(Boolean);
@@ -480,6 +566,16 @@ function groundedLocationMatches(value, action) {
     .map(normalizeFormQuestion)
     .filter(Boolean)
     .some((grounded) => normalized === grounded);
+}
+
+function groundedAutocompleteMatches(label, action) {
+  if (action.optionMatch) return listboxOptionMatches(label, action);
+  if (action.category === 'current_location') return groundedLocationMatches(label, action);
+  if (action.semantic === 'phone_country') {
+    const country = cleanFormText(action.value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`^${country}(?:\\s*\\(?\\+\\d{1,4}\\)?)?$`, 'i').test(cleanFormText(label));
+  }
+  return normalizeFormQuestion(label) === normalizeFormQuestion(action.value);
 }
 
 function autocompleteQueries(action) {
@@ -511,8 +607,8 @@ function isCommitted(field, action) {
     ? normalizeNarrativeText
     : cleanFormText;
   const current = normalizeValue(field.value);
-  if (action.action === 'autocomplete' && action.category === 'current_location') {
-    return groundedLocationMatches(current, action);
+  if (action.action === 'autocomplete' && (action.category === 'current_location' || action.category === 'education' || action.semantic === 'phone_country')) {
+    return groundedAutocompleteMatches(current, action);
   }
   return current === normalizeValue(action.value);
 }
@@ -586,6 +682,15 @@ async function inspectOperationalApplicationFormOnce(page) {
       const repeatedPanelHeading = referencedLabel(repeatedPanel);
       const educationPanel = (/^education\b/i.test(repeatedPanelHeading) ? repeatedPanel : null)
         || element.closest('[data-automation-id^="education-"]');
+      const greenhouseEducationPanel = element.closest('.education--form');
+      const greenhouseSchoolControls = greenhouseEducationPanel
+        ? [...greenhouseEducationPanel.querySelectorAll('input, select, [role="combobox"]')]
+          .filter((control) => /\b(?:school|university|institution)\b/i.test(controlLabel(control))) : [];
+      const greenhouseSchool = greenhouseSchoolControls.length === 1 ? greenhouseSchoolControls[0] : null;
+      const educationSchool = greenhouseSchool ? clean(
+        greenhouseSchool.closest('.select__container')?.querySelector('.select__single-value')?.innerText
+        || greenhouseSchool.selectedOptions?.[0]?.textContent || greenhouseSchool.value,
+      ) : '';
       const repeatedLanguagePanel = repeatedPanel
         && (/^languages?\b/i.test(repeatedPanelHeading) || repeatedPanel.querySelector('[name="language"]'))
         ? repeatedPanel : null;
@@ -663,6 +768,7 @@ async function inspectOperationalApplicationFormOnce(page) {
         workdayBlockId: repeatedPanel?.id || '',
         workdayBlockLabelledBy: repeatedPanel?.getAttribute('aria-labelledby') || '',
         workdaySchool,
+        educationSchool,
         workdayLanguage: workdayBlockKind === 'language' ? clean(languageName) : '',
         workdayUploadSectionHeading: (element.type || '').toLowerCase() === 'file'
           ? clean(referencedLabel(element.closest('[role="group"][aria-labelledby]'))
@@ -765,6 +871,9 @@ function selectionConflict(field, semantics, existingValue, groundedValue) {
 }
 
 function answerForField(field, semantics, profile, snapshot, artifacts, context, narrativeRouting = null) {
+  if (field.educationContext && !field.workdayBlockKind && ['degree', 'field_of_study', 'education_date'].includes(semantics.semantic)) {
+    return educationFieldAnswer(field, semantics, profile);
+  }
   if (semantics.category === 'custom_motivation_experience_narrative') {
     if (semantics.semantic === 'cover_letter_text' && artifacts.coverLetterTextContent) {
       if (containsUnresolvedPlaceholder(artifacts.coverLetterTextContent)) {
@@ -1301,12 +1410,18 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
           sponsorship_employer_support: 'Verified job country or hiring arrangement is missing or ambiguous.',
           source_how_heard: 'Where this job was found is not recorded in its discovery provenance.',
           skill_experience: 'Not every skill named in the question is listed in the CV skills section.',
+          adult_confirmation: 'application_form.adult_confirmed is not set to Yes in config/profile.yml.',
           employment: 'application_form.current_employment is not set in config/profile.yml.',
         }[semantics.category] || (traineeSalary
           ? 'Trainee/internship role: the general salary target is not used; enter a role-appropriate expectation.'
           : 'Canonical profile evidence is missing.');
         unresolvedFields.push(manualField(field, semantics, 'No grounded canonical answer is available.', missing));
       }
+      continue;
+    }
+    if (resolved.answerRecord && answerRecords.some((record) => record.answerHash === resolved.answerRecord.answerHash
+        && record.normalizedQuestion !== resolved.answerRecord.normalizedQuestion)) {
+      unresolvedFields.push(manualField(field, semantics, 'Generated narrative duplicates a different question; a question-specific answer needs manual review.'));
       continue;
     }
     try {
@@ -1389,9 +1504,11 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       valueHash: hashFormValue(value),
       retryBudget: 1,
       sourceRef: resolved.answerRecord ? 'candidate-specific-grounded-narrative'
+        : resolved.sourceRef ? resolved.sourceRef
         : semantics.category === 'skill_experience' ? 'cv.md'
           : semantics.category === 'source_how_heard' ? 'job-discovery-provenance' : 'config/profile.yml',
     };
+    if (resolved.optionMatch) planned.optionMatch = resolved.optionMatch;
     if (action === 'autocomplete' && semantics.category === 'current_location') {
       planned.locationGrounding = {
         city: cleanFormText(canonicalFieldValue(
@@ -1927,6 +2044,8 @@ async function assertNotFinal(locator) {
 async function validationState(locator) {
   return locator.evaluate((element) => ({
     value: element.value || '',
+    educationSelectedValue: element.closest('.education--form') && element.getAttribute('role') === 'combobox'
+      ? element.closest('.select__container')?.querySelector('.select__single-value')?.innerText || '' : '',
     checked: Boolean(element.checked),
     invalid: element.getAttribute('aria-invalid') === 'true' || (typeof element.checkValidity === 'function' && !element.checkValidity()),
     files: element.files ? [...element.files].map((file) => file.name) : [],
@@ -1994,12 +2113,9 @@ async function chooseAutocomplete(page, action, visibleOptions, { deadlineMs, cl
       if (!directlyOwned || !await option.isVisible()) continue;
       const label = cleanFormText(await option.innerText().catch(() => ''));
       if (label) visibleOptions.push(label);
-      const matches = action.category === 'current_location'
-        ? groundedLocationMatches(label, action)
-        : normalizeFormQuestion(label) === normalizeFormQuestion(action.value);
+      const matches = groundedAutocompleteMatches(label, action);
       if (!matches) continue;
-      matchingLabel = label;
-      break;
+      matchingLabel ||= label;
     }
     if (matchingLabel) {
       const liveOwnedOptions = await ownedAutocompleteOptions(page, action);
@@ -2013,15 +2129,15 @@ async function chooseAutocomplete(page, action, visibleOptions, { deadlineMs, cl
         ).catch(() => false);
         if (!directlyOwned || !await option.isVisible()) continue;
         const label = cleanFormText(await option.innerText().catch(() => ''));
-        if (normalizeFormQuestion(label) === normalizeFormQuestion(matchingLabel)) {
-          liveMatches.push(option);
+        if (groundedAutocompleteMatches(label, action)) {
+          liveMatches.push({ option, label });
         }
       }
       if (liveMatches.length !== 1) {
         throw new Error(`Autocomplete owned option is ambiguous for ${action.semantic}: ${matchingLabel}`);
       }
-      await liveMatches[0].click({ timeout: remainingTimeout(deadlineMs, clock) });
-      selectedLabel = matchingLabel;
+      await liveMatches[0].option.click({ timeout: remainingTimeout(deadlineMs, clock) });
+      selectedLabel = liveMatches[0].label;
     }
     if (selectedLabel) break;
   }
@@ -2029,7 +2145,7 @@ async function chooseAutocomplete(page, action, visibleOptions, { deadlineMs, cl
   locator = await exactLocator(page, action);
   await locator.blur({ timeout: remainingTimeout(deadlineMs, clock) });
   const state = await validationState(locator);
-  const committed = cleanFormText(state.value);
+  const committed = cleanFormText(state.educationSelectedValue || state.value);
   if (state.invalid || normalizeFormQuestion(committed) !== normalizeFormQuestion(selectedLabel)) {
     throw new Error(`Autocomplete selection was not committed: ${selectedLabel}`);
   }

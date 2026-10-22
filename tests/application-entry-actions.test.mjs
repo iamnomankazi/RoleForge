@@ -468,6 +468,29 @@ test('a stray field on the listing (job-alert email) does not stop the Apply ent
   });
 });
 
+test('an Apply link to the company\'s own careers subdomain is an entry; another domain is not', () => {
+  const listingUrl = 'https://careers.acme.test/global/en/job/123/data-engineer';
+  const classify = (href) => classifyApplicationEntryAction({
+    tag: 'a', text: 'APPLY', visible: true, enabled: true, attached: true, href,
+  }, { listingUrl, currentState: 'listing_verified' });
+  assert.equal(classify('https://talent.acme.test/careerhub/jobs/123?show_apply=1').safe, true);
+  assert.equal(classify('https://talent.acme-jobs.test/careerhub/jobs/123').safe, false);
+  assert.equal(classify('http://talent.acme.test/careerhub/jobs/123').safe, false);
+});
+
+test('an Apply button rendered after the first snapshot is still found and clicked', async () => {
+  const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
+  await withFixture({
+    [listingUrl]: '<h1>Acme Data Engineer</h1><div id="slot"></div><script>setTimeout(() => { document.getElementById("slot").innerHTML = \'<button type="button" onclick="window.applyClicks=1">Apply Now</button>\'; }, 1200);</script>',
+  }, async ({ context, page }) => {
+    await page.goto(listingUrl);
+    const early = await collectPageSnapshot(page);
+    assert.ok(!early.controls.some((control) => /apply/i.test(control.text || '')));
+    await followSafeApplicationEntryFlow(context, page, early, CANDIDATE, { listingUrl });
+    assert.equal(await page.evaluate(() => window.applyClicks || 0), 1);
+  });
+});
+
 test('an Apply button inside a form with candidate fields is still never clicked', async () => {
   const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
   await withFixture({

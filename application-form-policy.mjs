@@ -5,6 +5,7 @@ import { validateClaims as validateCvClaims } from './cv-claims.mjs';
 import {
   createNarrativeProvenanceRecord,
   revalidateFactualEvidence,
+  resolveFactualEvidence,
   resolveConfiguredNarrativeEvidence,
   validateNarrativeProvenanceRecord,
 } from './application-evidence.mjs';
@@ -198,6 +199,16 @@ export function skillExperienceAnswer(profile, question) {
   return (asked.any ? found.some(Boolean) : found.every(Boolean)) ? 'Yes' : null;
 }
 
+function programmingLanguagesAnswer(profile) {
+  const section = String(profile?.cvText || '').match(/^##\s+(?:technical\s+)?skills\b[^\n]*\n([\s\S]*?)(?=^##\s|$(?![\s\S]))/im)?.[1];
+  if (!section) return null;
+  const languages = section.split('\n').flatMap((line) => {
+    const match = line.replace(/\*\*/g, '').match(/^\s*(?:[-*+]\s*)?(?:programming(?: languages?)?|languages?)\s*:\s*(.+)$/i);
+    return match ? match[1].split(';').filter((part) => !/familiar|concepts/i.test(part)) : [];
+  }).flatMap((part) => part.split(',')).map(cleanFormText).filter(Boolean);
+  return [...new Set(languages)].join(', ') || null;
+}
+
 const TRAINEE_ROLE = /(?<![\p{L}\p{N}])(?:trainee|intern|internship|harjoittelija|harjoittelu|kesätyö|summer (?:job|trainee|intern)|working student|werkstudent|praktikum|praktikant|thesis|apprentice(?:ship)?|graduate (?:program|programme|trainee))(?![\p{L}\p{N}])/iu;
 
 export function isTraineeRole(context = {}) {
@@ -276,6 +287,9 @@ export function classifyFieldSemantics(field = {}) {
   if (/work authori[sz]|authori[sz]ed to work|eligible to work|right to work|legally authori[sz]/.test(text)) {
     return { category: 'work_authorization', semantic: 'work_authorization' };
   }
+  if (/\b(?:over|at least) 18\b|\b18 years (?:of age|old)\b/.test(text)) {
+    return { category: 'adult_confirmation', semantic: 'adult_confirmed' };
+  }
   if (/\bbirth\b|\bborn\b/.test(text)) {
     return { category: 'identity_contact', semantic: 'birth_place' };
   }
@@ -322,7 +336,7 @@ export function classifyFieldSemantics(field = {}) {
       && /\b(?:overall|reading|writing|speaking|listening)\b/.test(text)) {
     return { category: 'education', semantic: 'language_proficiency' };
   }
-  if (field.workdayBlockKind === 'education' && /field of study|major|subject/.test(text)) {
+  if ((field.educationContext || field.workdayBlockKind === 'education') && /field of study|major|subject|discipline/.test(text)) {
     return { category: 'education', semantic: 'field_of_study' };
   }
   if (field.widget === 'selectinput'
@@ -333,6 +347,11 @@ export function classifyFieldSemantics(field = {}) {
   if (/degree|qualification/.test(text)) return { category: 'education', semantic: 'degree' };
   if (/university|school|institution/.test(text)) return { category: 'education', semantic: 'university' };
   if (/graduat/.test(text)) return { category: 'education', semantic: 'graduation' };
+  // A segmented historical date is never a prose answer about joining a new employer.
+  if (/\b(?:start|end) date (?:month|year|day)\b/.test(text)
+      || ((field.educationContext || field.workdayBlockKind === 'education') && /\b(?:start|end|from|to|date|month|year)\b/.test(text))) {
+    return { category: 'education', semantic: 'education_date' };
+  }
   if (/\b(?:salary|compensation|remuneration)\b|\b(?:pay expectations?|expected pay|desired pay)\b/.test(text)) {
     const target = /\b(?:expect|expected|expectations?|desired|target|requested|requirements?)\b/.test(text);
     const history = /\b(?:current|present|previous|prior|last|history|historical)\b/.test(text);
@@ -346,13 +365,19 @@ export function classifyFieldSemantics(field = {}) {
   if (/level of study|study level|year of (?:study|studies)|stage of (?:your )?stud/.test(text)) {
     return { category: 'education', semantic: 'study_level' };
   }
-  if (/available|availability|start date|joining date|notice period|earliest (?:start|join)|(?:when|how soon).*(?:start|join)/.test(text)) {
+  if (/available|availability|start date|joining date|notice period|earliest (?:start|join)|(?:when|how soon|how quickly).*(?:start|join)/.test(text)) {
     // A start-date question that also asks about relocation needs both parts answered.
     if (/relocat|based in/.test(text)) return { category: 'availability', semantic: 'availability_relocation' };
-    const start = /start date|joining date|notice period|earliest (?:start|join)|date available|available from|(?:when|how soon|available|availability).*(?:start|join)/.test(text);
+    const start = /start date|joining date|notice period|earliest (?:start|join)|date available|available from|(?:when|how soon|how quickly|available|availability).*(?:start|join)/.test(text);
     return { category: 'availability', semantic: start ? 'availability' : 'schedule_availability' };
   }
   if (/relocat/.test(text)) return { category: 'relocation', semantic: 'relocation' };
+  if (!selectorShape && !['radio', 'checkbox'].includes(type)
+      && /\b(?:programming languages?|languages?\b.*\bcod(?:e|ing)\b)/.test(text)
+      && !/\byears?\b|\b(?:how many|rate|rating|level)\b/.test(text)
+      && /comfortable|proficien|which|what|list/.test(text)) {
+    return { category: 'skill_experience', semantic: 'programming_languages' };
+  }
   if (isYesNoControl(field) && skillsAskedIn(field.questionText || field.groupLabel || field.label)) {
     return { category: 'skill_experience', semantic: 'skill_experience' };
   }
@@ -383,7 +408,7 @@ export function stableFieldIdentity(field, semantics = classifyFieldSemantics(fi
   return `field:${createHash('sha256').update(basis).digest('hex')}`;
 }
 
-function exactSavedAnswer(profile, question, candidateId, candidate) {
+function exactSavedAnswer(profile, question, candidateId, candidate, jdText) {
   const normalized = normalizeFormQuestion(question);
   const prior = Array.isArray(profile?.priorApprovedAnswers) ? profile.priorApprovedAnswers : [];
   const priorMatch = prior.find((row) => row.candidateId === candidateId
@@ -396,7 +421,7 @@ function exactSavedAnswer(profile, question, candidateId, candidate) {
     normalizedQuestion: normalized,
     answer: priorMatch.answer,
   });
-  const expected = composeRoleFitNarrative(candidate, factualEvidence.map((item) => item.text), priorMatch.templateId);
+  const expected = composeRoleFitNarrative(candidate, factualEvidence.map((item) => item.text), priorMatch.templateId, jdText);
   if (cleanFormText(priorMatch.answer) !== expected) throw new Error('Prior narrative answer no longer passes deterministic claim validation');
   return { answer: priorMatch.answer, factualEvidence, templateId: priorMatch.templateId, reused: true };
 }
@@ -451,12 +476,78 @@ function roleFitOpening(candidate = {}) {
   return `For the ${role || 'role'}${company ? ` at ${company}` : ''}, my strongest fit is practical work that connects reliable implementation with clear validation.`;
 }
 
-function composeRoleFitNarrative(candidate, factualSentences, templateId = 'role-fit-v1') {
+function motivationOpening(candidate, jdText) {
+  const focus = [
+    ['AI', /\b(?:ai|artificial intelligence|machine learning)\b/i],
+    ['security', /\b(?:security|cybersecurity|vulnerabilit\w*|penetration)\b/i],
+    ['backend engineering', /\b(?:backend|apis?|server.side)\b/i],
+    ['data engineering', /\b(?:data engineer\w*|etl|warehouse|pipelines?)\b/i],
+    ['user-facing software', /\b(?:frontend|front.end|react|user.facing)\b/i],
+  ].filter(([, pattern]) => pattern.test(jdText)).map(([label]) => label);
+  if (!focus.length) throw new Error('Company-interest narrative needs a grounded JD focus');
+  return `I am interested in the ${candidate.title ? `${cleanFormText(candidate.title)} role` : 'role'}${candidate.company ? ` at ${cleanFormText(candidate.company)}` : ''} for its focus on ${focus.join(' and ')}. That connects with my work:`;
+}
+
+function listPhrase(items) {
+  return items.length <= 2 ? items.join(' and ') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
+}
+
+// v2: a readable opening sentence; the evidence follows as complete sentences.
+function motivationOpeningV2(candidate, jdText) {
+  const legacy = motivationOpening(candidate, jdText);
+  const focus = legacy.match(/for its focus on (.+)\. That connects/)[1].split(' and ');
+  const role = candidate.title ? `the ${cleanFormText(candidate.title)} role` : 'this role';
+  return `I am interested in ${role}${candidate.company ? ` at ${cleanFormText(candidate.company)}` : ''} because of its focus on ${listPhrase(focus)}. The most relevant part of my own work:`;
+}
+
+const EVIDENCE_STOP = /^(?:the|and|for|with|that|this|from|into|using|across|including|their|its|our|your|was|were|are|has|have|built|added|worked|work|used)$/;
+function evidenceTokens(text) {
+  return new Set(normalizeFormQuestion(text).split(' ').filter((word) => word.length > 2 && !EVIDENCE_STOP.test(word)));
+}
+
+// From the evidence text, keep at most `limit` complete, distinct first-person sentences, most relevant to the posting
+// first. Deterministic, so validation recomposes exactly the same answer from the same evidence.
+function interestSentences(evidenceTexts, jdText, limit = 3) {
+  const jd = evidenceTokens(jdText);
+  const all = evidenceTexts.flatMap((text) => cleanFormText(text).split(/(?<=[.!?])\s+(?=[A-Z])/))
+    .map(cleanFormText).filter((sentence) => sentence.split(/\s+/).length >= 6 && /[.!?]$/.test(sentence));
+  const firstPerson = all.filter((sentence) => /^I\b/.test(sentence));
+  const pool = firstPerson.length >= 2 ? firstPerson : all;
+  const ranked = pool.map((sentence, index) => ({
+    sentence, index, score: [...evidenceTokens(sentence)].filter((token) => jd.has(token)).length,
+  })).sort((left, right) => right.score - left.score || left.index - right.index);
+  const chosen = [];
+  for (const { sentence } of ranked) {
+    const tokens = evidenceTokens(sentence);
+    const duplicate = chosen.some((other) => {
+      const otherTokens = evidenceTokens(other);
+      const shared = [...tokens].filter((token) => otherTokens.has(token)).length;
+      return shared / Math.max(1, Math.min(tokens.size, otherTokens.size)) >= 0.5;
+    });
+    if (!duplicate) chosen.push(sentence);
+    if (chosen.length >= limit) break;
+  }
+  return chosen;
+}
+
+function composeRoleFitNarrative(candidate, factualSentences, templateId = 'role-fit-v1', jdText = '') {
+  if (templateId === 'project-example-v1') {
+    const [title, ...claims] = factualSentences;
+    return [`One project I can describe is ${cleanFormText(title)}.`, ...claims.map(narrativeReadyEvidenceText)].join(' ');
+  }
+  if (templateId === 'company-interest-v1') {
+    return [motivationOpening(candidate, jdText), ...factualSentences.map(narrativeReadyEvidenceText)].join(' ');
+  }
+  if (templateId === 'company-interest-v2') {
+    const chosen = interestSentences(factualSentences.map(narrativeReadyEvidenceText), jdText);
+    if (!chosen.length) throw new Error('No complete, distinct factual evidence sentence for a company-interest answer');
+    return [motivationOpeningV2(candidate, jdText), ...chosen].join(' ');
+  }
   const opening = templateId === 'role-fit-evidence-only-v1' ? null : roleFitOpening(candidate);
   return [opening, ...factualSentences.map(narrativeReadyEvidenceText)].filter(Boolean).join(' ');
 }
 
-export function validateGroundedNarrative(answer, profile, factualEvidence = [], { candidate = {}, templateId = 'role-fit-v1' } = {}) {
+export function validateGroundedNarrative(answer, profile, factualEvidence = [], { candidate = {}, templateId = 'role-fit-v1', jdText = '' } = {}) {
   const text = cleanFormText(answer);
   if (!text) throw new Error('Generated narrative answer is empty');
   if (containsUnresolvedPlaceholder(text)) throw new Error('Generated narrative answer contains an unresolved placeholder');
@@ -464,10 +555,40 @@ export function validateGroundedNarrative(answer, profile, factualEvidence = [],
   if (/\b(?:certified|certification|production owner|owned production|\d+\+? years? of professional experience)\b/i.test(text)) {
     throw new Error('Generated narrative contains an unsupported professional claim');
   }
-  if (!['role-fit-v1', 'role-fit-evidence-only-v1'].includes(templateId)) throw new Error(`Unsupported narrative generation template: ${templateId}`);
-  const expected = composeRoleFitNarrative(candidate, current.map((item) => item.text), templateId);
+  if (!['role-fit-v1', 'role-fit-evidence-only-v1', 'company-interest-v1', 'company-interest-v2', 'project-example-v1'].includes(templateId)) throw new Error(`Unsupported narrative generation template: ${templateId}`);
+  const expected = composeRoleFitNarrative(candidate, current.map((item) => item.text), templateId, jdText);
   if (text !== expected) throw new Error('Generated narrative contains wording not established by factual evidence or the approved neutral template');
   return text;
+}
+
+function projectNarrativeEvidence(profile, question, jdText) {
+  const lines = String(profile?.cvText || '').split(/\r?\n/);
+  const section = lines.findIndex((line) => /^##\s+(?:selected\s+|personal\s+|technical\s+)?projects\b/i.test(line));
+  if (section < 0) throw new Error('Missing evidence: CV projects section is unavailable');
+  const tokens = (text) => new Set(normalizeFormQuestion(text).split(' ').filter((word) => word.length > 2
+    && !/^(?:the|and|for|you|your|are|with|that|this|from|have|our|role|work|working|project|projects|describe|recent|briefly|experience|engineer|engineering)$/.test(word)));
+  const asked = tokens(question), context = tokens(jdText);
+  const score = (text) => [...tokens(text)].reduce((sum, token) => sum + (asked.has(token) ? 3 : 0) + (context.has(token) ? 1 : 0), 0);
+  const projects = [];
+  let project = null;
+  for (let index = section + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^##\s/.test(line)) break;
+    if (/^###\s+/.test(line)) {
+      project = { titleLine: index + 1, title: line.replace(/^###\s+/, ''), claims: [] };
+      projects.push(project);
+    } else if (project && /^\s*[-*+]\s+(?:built|building|cleaned|validated|designed|added|created|implemented|developed|used|analy[sz]ed|deployed|tested|integrated|automated|extended|benchmarked|connected|combined|reconciled)\b/i.test(line)) {
+      try { project.claims.push({ line: index + 1, text: line, narrativeText: narrativeReadyEvidenceText(line) }); } catch { /* Structured prose stays manual. */ }
+    }
+  }
+  const ranked = projects.filter((item) => item.claims.length).map((item) => ({
+    ...item, score: score([item.title, ...item.claims.map((claim) => claim.text)].join(' ')),
+  })).sort((left, right) => right.score - left.score || left.titleLine - right.titleLine);
+  const best = ranked[0];
+  if (!best || best.score <= 0) throw new Error('Missing evidence: no relevant CV project');
+  const claims = best.claims.sort((left, right) => score(right.text) - score(left.text) || left.line - right.line)
+    .slice(0, 3).sort((left, right) => left.line - right.line);
+  return [best.titleLine, ...claims.map((claim) => claim.line)].map((line) => resolveFactualEvidence(profile, { sourceType: 'cv', locator: `lines:${line}` }));
 }
 
 export function generateCustomNarrativeAnswer(profile, {
@@ -483,18 +604,40 @@ export function generateCustomNarrativeAnswer(profile, {
   const normalizedQuestion = normalizeFormQuestion(question);
   if (!candidateId) throw new Error('Automatic narrative generation requires an exact candidate ID');
   if (!normalizedQuestion) throw new Error('Automatic narrative generation requires an exact normalized question');
-  const saved = exactSavedAnswer(profile, question, candidateId, candidate);
-  if (saved) {
+  const projectQuestion = /\b(?:describe|tell us|share|outline)\b.*\b(?:project|problem|challenge)\b/.test(normalizedQuestion);
+  const companyInterest = /\bwhy\b.*\b(?:interested|join|work (?:at|for|with))\b/.test(normalizedQuestion);
+  const saved = exactSavedAnswer(profile, question, candidateId, candidate, jdText);
+  // Revalidate legacy provenance first, then replace generic fit prose for these specific intents.
+  const refreshGenericAnswer = saved && ((['role-fit-v1', 'role-fit-evidence-only-v1'].includes(saved.templateId)
+    && (companyInterest || (projectQuestion && !routing))) || saved.templateId === 'company-interest-v1');
+  if (saved && !refreshGenericAnswer) {
     const answer = cleanFormText(saved.answer);
     if (Number(maxLength) > 0 && answer.length > Number(maxLength)) throw new Error(`Prior narrative answer exceeds field limit ${maxLength}`);
     const templateId = saved.templateId;
-    const validated = validateGroundedNarrative(answer, profile, saved.factualEvidence, { candidate, templateId });
+    const validated = validateGroundedNarrative(answer, profile, saved.factualEvidence, { candidate, templateId, jdText });
     const record = createNarrativeProvenanceRecord({
       candidateId, normalizedQuestion, answer: validated, wording: 'reused', templateId, factualEvidence: saved.factualEvidence,
     });
     return {
       ...record, answer: validated, reused: true,
       claimValidation: validateCandidateClaims ? validateNarrativeCandidateFacts(profile, saved.factualEvidence, claimManifestPath) : null,
+    };
+  }
+  if (projectQuestion && !routing) {
+    const factualEvidence = projectNarrativeEvidence(profile, question, jdText);
+    const templateId = 'project-example-v1';
+    let included = [...factualEvidence];
+    let answer = composeRoleFitNarrative(candidate, included.map((entry) => entry.text), templateId);
+    while (Number(maxLength) > 0 && answer.length > Number(maxLength) && included.length > 2) {
+      included.pop();
+      answer = composeRoleFitNarrative(candidate, included.map((entry) => entry.text), templateId);
+    }
+    if (Number(maxLength) > 0 && answer.length > Number(maxLength)) throw new Error('No complete project example fits the field limit');
+    const validated = validateGroundedNarrative(answer, profile, included, { candidate, templateId });
+    return {
+      ...createNarrativeProvenanceRecord({ candidateId, normalizedQuestion, answer: validated, wording: 'generated', templateId, factualEvidence: included }),
+      answer: validated, reused: false,
+      claimValidation: validateCandidateClaims ? validateNarrativeCandidateFacts(profile, included, claimManifestPath) : null,
     };
   }
   const allowedTemplates = new Set(['role-fit-v1', 'role-fit-evidence-only-v1']);
@@ -554,18 +697,34 @@ export function generateCustomNarrativeAnswer(profile, {
     }
   });
   if (!selected.length) throw new Error('Configured factual evidence is not narrative-ready');
-  let templateId = routing?.templateId || 'role-fit-v1';
-  const sentences = [templateId === 'role-fit-evidence-only-v1' ? null : roleFitOpening(candidate), ...selected.map((entry) => entry.narrativeText)].filter(Boolean);
-  let answer = fitSentences(sentences, Number(maxLength) || null);
-  let included = selected.filter((entry) => answer.includes(entry.narrativeText));
-  if (!included.length && Number(maxLength) > 0) {
+  let templateId = companyInterest ? 'company-interest-v2' : routing?.templateId || 'role-fit-v1';
+  let answer;
+  let included;
+  if (companyInterest) {
+    // Evidence whose sentences were chosen; drop the least relevant evidence until the answer fits the field.
+    included = [...selected];
+    answer = composeRoleFitNarrative(candidate, included.map((entry) => entry.text), templateId, jdText);
+    const used = (entry) => interestSentences([entry.narrativeText], '', 99).some((sentence) => answer.includes(sentence));
+    included = included.filter(used);
+    answer = composeRoleFitNarrative(candidate, included.map((entry) => entry.text), templateId, jdText);
+    while (Number(maxLength) > 0 && answer.length > Number(maxLength) && included.length > 1) {
+      included.pop();
+      answer = composeRoleFitNarrative(candidate, included.map((entry) => entry.text), templateId, jdText);
+    }
+  } else {
+    const sentences = [templateId === 'role-fit-evidence-only-v1' ? null : roleFitOpening(candidate),
+      ...selected.map((entry) => entry.narrativeText)].filter(Boolean);
+    answer = fitSentences(sentences, Number(maxLength) || null);
+    included = selected.filter((entry) => answer.includes(entry.narrativeText));
+  }
+  if (!included.length && Number(maxLength) > 0 && !companyInterest) {
     templateId = 'role-fit-evidence-only-v1';
     answer = fitSentences(selected.map((entry) => entry.narrativeText), Number(maxLength));
     included = selected.filter((entry) => answer.includes(entry.narrativeText));
   }
   if (!included.length) throw new Error('Generated narrative could not include a complete factual evidence sentence');
   const includedEvidence = included.map(({ narrativeText: _narrativeText, ...entry }) => entry);
-  const validated = validateGroundedNarrative(answer, profile, includedEvidence, { candidate, templateId });
+  const validated = validateGroundedNarrative(answer, profile, includedEvidence, { candidate, templateId, jdText });
   if (Number(maxLength) > 0 && validated.length > Number(maxLength)) {
     throw new Error(`Generated narrative exceeds field limit ${maxLength}`);
   }
@@ -618,6 +777,9 @@ export function validatePlannedValueForControl(field, semantics, value) {
   const normalized = semantics.category === 'custom_motivation_experience_narrative'
     ? normalizeNarrativeText(value)
     : cleanFormText(value);
+  if (field.type === 'number' && !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(normalized)) {
+    throw new Error('Number inputs require a grounded numeric value');
+  }
   if (semantics.semantic === 'phone' && cleanFormText(field.type).toLowerCase() === 'tel'
       && /[A-Za-z]/.test(normalized)) {
     throw new Error('Telephone-number inputs cannot receive alphabetic country names');
@@ -690,9 +852,11 @@ export function resolveAuthorizationAnswer(profile, semantic, context = {}) {
   const arrangement = normalizeFormQuestion(context.hiringArrangement);
   const question = normalizeFormQuestion(context.question);
   const countries = namedCountries(context.question);
+  const currentCountry = /\bcountry (?:where|in which) you (?:are )?(?:currently )?(?:living|residing|live|reside)\b/.test(question);
   // Broad or lasting rights cannot be inferred from local, time-limited authorization.
   if (countries.size > 1
-      || /\b(?:eu|eea|europe|european|schengen|any countr(?:y|ies)|worldwide|anywhere)\b/.test(question)
+      || /\b(?:eu|eea|europe|schengen|any (?:european )?countr(?:y|ies)|worldwide|anywhere)\b/.test(question)
+      || (/\beuropean\b/.test(question) && !currentCountry)
       || /\b(?:future|ever|at any time|now or later|permanent(?:ly)?|indefinite(?:ly)?|unrestricted|any employers?)\b|\bwithout (?:any )?restrictions?\b/.test(question)) return null;
   const normalizedHomeCountry = normalizeFormQuestion(rules.homeCountry);
   const remoteFromHomeCountry = Boolean(normalizedHomeCountry) && (
@@ -701,7 +865,9 @@ export function resolveAuthorizationAnswer(profile, semantic, context = {}) {
     || context.canEmployFromHomeCountry === true
     || hasConfiguredCountryCapability(context, rules.homeCountry)
   );
-  const jurisdiction = countries.size === 1 ? [...countries][0]
+  const residence = countryCode(profile?.location?.country);
+  if (currentCountry && (!residence || (countries.size === 1 && !countries.has(residence)))) return null;
+  const jurisdiction = currentCountry ? residence : countries.size === 1 ? [...countries][0]
     : countryCode(remoteFromHomeCountry ? rules.homeCountry : context.jobCountry);
   // ambiguous_policy is a review directive, not a factual Yes/No answer.
   if (!jurisdiction) return null;
@@ -769,7 +935,12 @@ export function canonicalFieldValue(profile, semantics, {
     });
   }
   if (category === 'source_how_heard') return applicationSourceFromDiscovery(context);
-  if (category === 'skill_experience') return skillExperienceAnswer(profile, field.questionText || field.groupLabel || field.label);
+  if (category === 'skill_experience') return semantic === 'programming_languages'
+    ? programmingLanguagesAnswer(profile) : skillExperienceAnswer(profile, field.questionText || field.groupLabel || field.label);
+  if (category === 'adult_confirmation') {
+    const value = profile?.formRules?.adult_confirmed;
+    return value === true || normalizeFormQuestion(value) === 'yes' ? 'Yes' : null;
+  }
   if (category === 'employment') {
     const employment = profile?.formRules?.current_employment || {};
     return cleanFormText(semantic === 'current_employer' ? employment.employer : employment.role) || null;
@@ -790,7 +961,15 @@ export function canonicalFieldValue(profile, semantics, {
     if (semantic !== 'salary') return null;
     // The general target is for professional roles; trainee/internship roles need their own approved answer.
     if (isTraineeRole(context)) return cleanFormText(profile?.compensation?.trainee_answer) || null;
-    return profile?.compensation?.target_range || null;
+    const target = cleanFormText(profile?.compensation?.target_range);
+    // A question asking in dollars must not get a EUR figure (and vice versa); that conversion is the candidate's call.
+    const asked = [field.questionText, field.groupLabel, field.label].filter(Boolean).join(' ');
+    const askedUsd = /\$|\busd\b|\bdollars?\b/i.test(asked);
+    const askedEur = /€|\beur\b|\beuros?\b/i.test(asked);
+    const targetUsd = /\$|\busd\b/i.test(target);
+    const targetEur = /€|\beur\b/i.test(target);
+    if ((askedUsd && targetEur) || (askedEur && targetUsd)) return null;
+    return target || null;
   }
   if (category === 'availability') {
     const start = cleanFormText(profile?.currentStatus?.availability?.start);

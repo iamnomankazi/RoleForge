@@ -734,6 +734,10 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
         const workdayGroupLabelledBy = workdayGroup?.getAttribute('aria-labelledby') || '';
         const workdayGroupLabel = workdayGroupLabelledBy.split(/\s+/).filter(Boolean)
           .map((id) => document.getElementById(id)?.innerText || '').join(' ').replace(/\s+/g, ' ').trim();
+        const educationSelection = element.closest('.education--form') && element.getAttribute('role') === 'combobox'
+          ? element.closest('.select__container')?.querySelector('.select__single-value') : null;
+        const educationSelectedValue = educationSelection && visible(educationSelection)
+          ? (educationSelection.innerText || '').replace(/\s+/g, ' ').trim() : '';
         return {
           fieldId,
           formId: owningForm?.getAttribute('data-career-ops-form-id') || '',
@@ -743,6 +747,7 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
           role: element.getAttribute('role') || '',
           name: element.getAttribute('name') || '',
           label: fieldText,
+          educationContext: Boolean(element.closest('.education--container, .education--form, [data-automation-id^="education-"]')),
           workdayGroupLabelledBy,
           workdayGroupLabel,
           placeholder: element.getAttribute('placeholder') || '',
@@ -750,7 +755,7 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
             || element.getAttribute('aria-required') === 'true'
             || /(?:\*\s*(?:\(required\))?|\(required\)|\bmandatory\b)/i.test(fieldText),
           disabled: element.disabled || element.getAttribute('aria-disabled') === 'true',
-          visible: visible(element),
+          visible: visible(element) || Boolean(educationSelectedValue),
           autocomplete: element.getAttribute('aria-autocomplete') || element.getAttribute('autocomplete') || '',
           // Workday search-and-pick widgets (country phone code, how did you hear) are inputs inside a multiselect.
           widget: isWorkdayListbox(element) ? 'workday-listbox' : element.getAttribute('data-uxi-widget-type') || '',
@@ -761,7 +766,7 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
             : element.getAttribute('data-uxi-widget-type') === 'selectinput'
               ? [...(element.closest('[data-automation-id="multiSelectContainer"]')?.querySelectorAll('[data-automation-id="selectedItem"]') || [])]
                 .filter(visible).map((item) => (item.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean).join(', ')
-              : element.value || '',
+              : educationSelectedValue || element.value || '',
           selectedItems: element.getAttribute('data-uxi-widget-type') === 'selectinput'
             ? [...(element.closest('[data-automation-id="multiSelectContainer"]')?.querySelectorAll('[data-automation-id="selectedItem"]') || [])]
               .filter(visible).map((item) => (item.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean)
