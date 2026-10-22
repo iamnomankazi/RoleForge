@@ -191,8 +191,31 @@ function choiceMatches(field, intended) {
     .some((value) => value === target || value.endsWith(` ${target}`));
 }
 
+// Several checkboxes sharing one name are the options of one question (Lever "multiple-select"). Pick the single
+// option that carries the answer: an exact label match, else the one option starting with the answer word
+// ("Yes - I need a visa ..."), dropping options that claim the candidate already lives in the employer's locations
+// (the job is in another country) and "do not want to relocate" when a relocating option remains.
+function chooseCheckboxGroupOption(group, intended, { candidateCountry = '', jobCountry = '' } = {}) {
+  const answer = normalizeFormQuestion(intended);
+  if (!answer) return null;
+  const label = (option) => normalizeFormQuestion(option.optionLabel || option.value || option.label);
+  const exact = group.filter((option) => label(option) === answer);
+  if (exact.length === 1) return exact[0];
+  let candidates = group.filter((option) => label(option).startsWith(`${answer} `));
+  const livesInJobCountry = candidateCountry && jobCountry
+    && normalizeFormQuestion(candidateCountry) === normalizeFormQuestion(jobCountry);
+  if (candidates.length > 1 && !livesInJobCountry) {
+    candidates = candidates.filter((option) => !/\balready (?:relocated|live|living|based|reside|residing)\b/.test(label(option)));
+  }
+  if (candidates.length > 1 && candidates.some((option) => /\b(?:would like to|can|willing to|able to) relocate\b/.test(label(option)))) {
+    candidates = candidates.filter((option) => !/\b(?:do not|don t|not) (?:want|willing) to relocate\b/.test(label(option)));
+  }
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
 function controlAction(field, intended) {
-  if (field.type === 'checkbox') return 'check';
+  // A lone checkbox is ticked only for an affirmative answer; any other value (e.g. a nationality) is not a tick.
+  if (field.type === 'checkbox') return /^(?:yes|true|i agree|agree|accept|i accept|i consent|consent)$/i.test(cleanFormText(intended)) ? 'check' : null;
   if (field.type === 'radio') return choiceMatches(field, intended) ? 'radio' : null;
   if (field.tag === 'select') return 'select';
   if (field.widget === 'workday-listbox') return 'listbox';
@@ -525,9 +548,23 @@ async function inspectOperationalApplicationFormOnce(page) {
       const fieldId = clean(element.getAttribute('data-career-ops-field-id'));
       if (!fieldId || seen.has(fieldId)) throw new Error(`Duplicate Career-Ops field identity detected: ${fieldId || '(empty)'}`);
       seen.add(fieldId);
+      // Lever-style questions keep their text in a sibling block (<div class="application-label"><div class="text">)
+      // instead of a <label>; checkbox/radio options there carry only the option text. Read the question from the
+      // enclosing question block, but only when that block holds a single question (one field name).
+      const questionHost = element.closest('.application-question, [class*="question" i]');
+      const hostNames = questionHost
+        ? new Set([...questionHost.querySelectorAll('input:not([type="hidden"]), textarea, select')]
+          .map((control) => control.getAttribute('name') || control.id || control.getAttribute('data-career-ops-field-id')))
+        : new Set();
+      const hostQuestionNode = hostNames.size === 1
+        ? [...questionHost.querySelectorAll('.application-label .text, .application-label, [class*="question-text" i], [class*="question-label" i], [class*="question-title" i]')]
+          .find((node) => !node.contains(element) && !node.querySelector('input, textarea, select'))
+        : null;
+      const hostQuestion = clean(hostQuestionNode?.innerText).replace(/\s*[✱*]+\s*$/u, '');
       const fieldset = element.closest('fieldset');
       const groupLabel = clean(fieldset?.querySelector(':scope > legend')?.innerText)
-        || clean(element.closest('[role="group"], [role="radiogroup"]')?.getAttribute('aria-label'));
+        || clean(element.closest('[role="group"], [role="radiogroup"]')?.getAttribute('aria-label'))
+        || (['radio', 'checkbox'].includes((element.type || '').toLowerCase()) ? hostQuestion : '');
       const ownLabel = element.labels ? clean([...element.labels].map((label) => label.innerText).join(' ')) : '';
       const formGroupLabel = clean(element.closest('.form-group')?.querySelector(':scope > label.control-label')?.innerText);
       let labelledGroup = null;
@@ -603,7 +640,7 @@ async function inspectOperationalApplicationFormOnce(page) {
           && (languageGroup || /language|proficiency|\bi am fluent\b/i.test(fieldLabel)))) ? 'language' : '';
       const workdaySchool = clean(controlValue(schoolControl));
       const directQuestion = clean(ownLabel || formGroupLabel || element.getAttribute('aria-label')
-        || element.placeholder || element.name || element.id);
+        || hostQuestion || element.placeholder || element.name || element.id);
       const normalizedText = (value) => clean(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
       const contextualQuestion = workdayBlockKind === 'language' && languageName
         ? (normalizedText(directQuestion).includes(normalizedText(languageName))
@@ -1325,7 +1362,25 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       }
       continue;
     }
-    const action = controlAction(field, value);
+    const checkboxGroup = field.type === 'checkbox' && field.name
+      ? applicationFields.filter((item) => item.type === 'checkbox' && item.name === field.name)
+      : [];
+    let action;
+    if (checkboxGroup.length > 1) {
+      const chosen = chooseCheckboxGroupOption(checkboxGroup, value, {
+        candidateCountry: profile?.location?.country, jobCountry: context?.jobCountry,
+      });
+      if (!chosen) {
+        if (field.required && checkboxGroup[0] === field) {
+          unresolvedFields.push(manualField(field, semantics, `No single option matches the answer "${cleanFormText(value)}".`));
+        }
+        continue;
+      }
+      if (chosen !== field) continue;
+      action = 'check';
+    } else {
+      action = controlAction(field, value);
+    }
     if (!action) continue;
     const planned = {
       ...base,

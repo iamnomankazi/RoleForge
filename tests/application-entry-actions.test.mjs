@@ -455,18 +455,29 @@ test('entry allowlist remains exact while semantic final actions stay forbidden'
   assert.equal(classify('Apply', 'submit'), false);
 });
 
-test('listing entry clicks are unavailable as soon as any candidate fields are present', async () => {
+test('a stray field on the listing (job-alert email) does not stop the Apply entry click', async () => {
   const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
   await withFixture({
     [listingUrl]: '<h1>Acme Data Engineer</h1><label>Email <input name="email"></label><button type="button" onclick="window.applyClicks=1">Apply now</button>',
   }, async ({ context, page }) => {
     await page.goto(listingUrl);
+    await followSafeApplicationEntryFlow(
+      context, page, await collectPageSnapshot(page), CANDIDATE, { listingUrl },
+    );
+    assert.equal(await page.evaluate(() => window.applyClicks || 0), 1);
+  });
+});
+
+test('an Apply button inside a form with candidate fields is still never clicked', async () => {
+  const listingUrl = 'https://careers.acme.test/jobs/data-engineer';
+  await withFixture({
+    [listingUrl]: '<h1>Acme Data Engineer</h1><form><label>Email <input name="email"></label><button type="button" onclick="window.applyClicks=1">Apply now</button></form>',
+  }, async ({ context, page }) => {
+    await page.goto(listingUrl);
     const result = await followSafeApplicationEntryFlow(
       context, page, await collectPageSnapshot(page), CANDIDATE, { listingUrl },
     );
-    assert.equal(result.form.actualForm, false);
     assert.equal(result.manualReviewRequired, true);
-    assert.match(result.reason, /candidate application fields are already present/);
     assert.equal(await page.evaluate(() => window.applyClicks || 0), 0);
   });
 });

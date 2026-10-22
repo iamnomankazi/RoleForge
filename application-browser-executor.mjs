@@ -419,7 +419,9 @@ export function classifyApplicationEntryAction(control, {
 } = {}) {
   const reject = (reason) => ({ safe: false, reason, destination: null });
   if (currentState !== 'listing_verified') return reject('entry actions require listing_verified state');
-  if (actualFormReached || Number(candidateFieldSignals) > 0) {
+  // Listing pages often carry stray fields (job-alert email, search); only a real application form ends entry.
+  // Controls inside or tied to a form with candidate data are still refused below.
+  if (actualFormReached) {
     return reject('candidate application fields are already present');
   }
   if (!control?.visible) return reject('control is not visible');

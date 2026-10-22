@@ -141,10 +141,14 @@ export function containsUnresolvedPlaceholder(value) {
 }
 
 function fieldText(field) {
+  // An option of a grouped question ("Do you need a visa ...?") is classified by the question, not by its own option
+  // text: "No - I already have ... a European nationality" is an answer, not a nationality field.
+  const optionOfQuestion = ['checkbox', 'radio'].includes(cleanFormText(field?.type).toLowerCase())
+    && cleanFormText(field?.optionLabel) && /\?\s*$/.test(cleanFormText(field?.groupLabel));
   return normalizeFormQuestion([
     field?.questionText,
     field?.groupLabel,
-    field?.label,
+    optionOfQuestion ? '' : field?.label,
     field?.workdayUploadSectionHeading,
     field?.name,
     field?.placeholder,
@@ -338,7 +342,13 @@ export function classifyFieldSemantics(field = {}) {
       && /\b(?:available|availability|willing|able)\b|(?:can|could|would|will) you|start date|notice period/.test(text)) {
     return { category: 'availability', semantic: 'schedule_availability' };
   }
+  // "What level of study will you be in when you start the internship?" asks for study level, not a start date.
+  if (/level of study|study level|year of (?:study|studies)|stage of (?:your )?stud/.test(text)) {
+    return { category: 'education', semantic: 'study_level' };
+  }
   if (/available|availability|start date|joining date|notice period|earliest (?:start|join)|(?:when|how soon).*(?:start|join)/.test(text)) {
+    // A start-date question that also asks about relocation needs both parts answered.
+    if (/relocat|based in/.test(text)) return { category: 'availability', semantic: 'availability_relocation' };
     const start = /start date|joining date|notice period|earliest (?:start|join)|date available|available from|(?:when|how soon|available|availability).*(?:start|join)/.test(text);
     return { category: 'availability', semantic: start ? 'availability' : 'schedule_availability' };
   }
@@ -752,8 +762,10 @@ export function canonicalFieldValue(profile, semantics, {
     return rules.currentLocation.combined;
   }
   if (category === 'work_authorization' || category === 'sponsorship_employer_support') {
+    const optionOfQuestion = ['checkbox', 'radio'].includes(cleanFormText(field?.type).toLowerCase())
+      && cleanFormText(field?.optionLabel) && /\?\s*$/.test(cleanFormText(field?.groupLabel));
     return resolveAuthorizationAnswer(profile, semantic, {
-      ...context, question: [field.questionText, field.groupLabel, field.label].filter(Boolean).join(' '),
+      ...context, question: [field.questionText, field.groupLabel, optionOfQuestion ? '' : field.label].filter(Boolean).join(' '),
     });
   }
   if (category === 'source_how_heard') return applicationSourceFromDiscovery(context);
@@ -765,6 +777,13 @@ export function canonicalFieldValue(profile, semantics, {
   if (category === 'education') {
     if (semantic === 'university') return configuredUniversity(profile);
     if (semantic === 'graduation') return profile?.education?.expected_graduation_date || null;
+    if (semantic === 'study_level') {
+      const status = cleanFormText(profile?.currentStatus?.summary);
+      if (!/\b(?:master|bachelor|phd|doctoral)/i.test(status)) return null;
+      const [, month, year] = cleanFormText(profile?.education?.expected_graduation_date).match(/^\d{1,2}\/(\d{1,2})\/(\d{4})$/) || [];
+      const monthName = month ? new Date(Date.UTC(2000, Number(month) - 1, 1)).toLocaleString('en', { month: 'long', timeZone: 'UTC' }) : '';
+      return monthName ? `${status} (graduation expected ${monthName} ${year})` : status;
+    }
     return null;
   }
   if (category === 'salary') {
@@ -773,7 +792,15 @@ export function canonicalFieldValue(profile, semantics, {
     if (isTraineeRole(context)) return cleanFormText(profile?.compensation?.trainee_answer) || null;
     return profile?.compensation?.target_range || null;
   }
-  if (category === 'availability') return semantic === 'availability' ? profile?.currentStatus?.availability?.start || null : null;
+  if (category === 'availability') {
+    const start = cleanFormText(profile?.currentStatus?.availability?.start);
+    if (semantic === 'availability') return start || null;
+    if (semantic === 'availability_relocation') {
+      const relocation = cleanFormText(profile?.formRules?.relocation?.value);
+      return start && relocation ? `${start}. ${relocation}` : null;
+    }
+    return null;
+  }
   if (category === 'relocation') {
     return cleanFormText(profile?.formRules?.relocation?.value) || null;
   }
