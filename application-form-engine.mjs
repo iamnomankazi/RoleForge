@@ -3367,6 +3367,8 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
     transitionTimeoutMs,
     deadlineReached: false,
   };
+  // History of earlier passes is kept; the limit of 8 applies to the step changes of this pass.
+  const stepsAtPassStart = progression.stepsAdvanced;
   const visited = new Set();
   const historicalVisited = new Set(progression.visitedFingerprints);
   let manualWaits = 0;
@@ -3707,7 +3709,7 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         outcome = { ...reviewed, gate: { state: 'review_required', reason } };
         break;
       }
-      if (progression.stepsAdvanced >= MAX_PROGRESSION_TRANSITIONS) {
+      if (progression.stepsAdvanced - stepsAtPassStart >= MAX_PROGRESSION_TRANSITIONS) {
         outcome = { ...reviewed, gate: { state: 'review_required', reason: 'Maximum of 8 verified progression transitions reached; continue manually.' } };
         break;
       }

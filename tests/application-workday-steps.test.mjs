@@ -1044,3 +1044,23 @@ test('a Workday step whose saved values arrive late is read after it settles: no
     rmSync(docs.dir, { recursive: true, force: true });
   }
 });
+
+// Live run 2026-10-22: earlier passes' 7 step changes plus this pass's Continue hit the limit of 8 on My Information.
+test('the step-change limit counts only the current pass, not earlier passes of the same application', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const docs = documents();
+  try {
+    const page = await servedPage(browser, flowPage, BASE.replace('autofillWithResume', 'limit'));
+    const earlier = { progression: { stepsAdvanced: 8, transitions: [], visitedFingerprints: [] } };
+    const result = await prepareOperationalApplicationForm(page, profile, docs.value, {
+      context, previousEvidence: earlier, resumeMode: 'same_page_resume', transitionTimeoutMs: 2_000, transitionStabilityMs: 0,
+    });
+    assert.doesNotMatch(result.gate?.reason || '', /Maximum of 8/);
+    assert.equal(await page.evaluate(() => window.advances), 2, 'Autofill -> My Information -> Review');
+    assert.equal(await page.evaluate(() => window.submits), 0);
+    await page.close();
+  } finally {
+    await browser.close();
+    rmSync(docs.dir, { recursive: true, force: true });
+  }
+});
