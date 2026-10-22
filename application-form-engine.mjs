@@ -2166,7 +2166,8 @@ async function chooseAutocomplete(page, action, visibleOptions, { deadlineMs, cl
         if (exact.length === 1 || identical) liveMatches.splice(0, liveMatches.length, exact[0]);
       }
       if (liveMatches.length !== 1) {
-        throw new Error(`Autocomplete owned option is ambiguous for ${action.semantic}: ${matchingLabel}`);
+        throw new Error(`Autocomplete owned option is ambiguous for ${action.semantic}: ${matchingLabel}`
+          + ` (options: ${liveMatches.map((match) => match.label).join(' | ')})`);
       }
       await liveMatches[0].option.click({ timeout: remainingTimeout(deadlineMs, clock) });
       selectedLabel = liveMatches[0].label;
