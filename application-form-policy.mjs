@@ -281,6 +281,16 @@ export function classifyFieldSemantics(field = {}) {
       && /\b(?:would (?:you )?like|want|wish|prefer|preferred|desired|preferences?|willing to work)\b/.test(text)) {
     return { category: 'preferred_location', semantic: 'preferred_location' };
   }
+  // Standing screening declarations answered from user-confirmed profile facts (formRules.standing_answers).
+  if (/restrictive covenant|non.?compete|non.?solicit/.test(text)) {
+    return { category: 'standing_declaration', semantic: 'restrictive_agreements' };
+  }
+  if (/\b(?:dealers?|partners?|suppliers?|vendors?)\b/.test(text) && /\bwork (?:for|with)\b|\brelationship\b|\baffiliat/.test(text)) {
+    return { category: 'standing_declaration', semantic: 'partner_relationship' };
+  }
+  if (/nonimmigrant visa|non immigrant visa|\bf ?1\b|\bh ?1b\b|\bcpt\b|\bopt\b/.test(text)) {
+    return { category: 'standing_declaration', semantic: 'us_nonimmigrant_visa' };
+  }
   if (/sponsor|employer support|support from (?:the )?employer|immigration support|visa support|require.*(?:visa|permit)/.test(text)) {
     return { category: 'sponsorship_employer_support', semantic: 'sponsorship' };
   }
@@ -937,6 +947,10 @@ export function canonicalFieldValue(profile, semantics, {
   if (category === 'source_how_heard') return applicationSourceFromDiscovery(context);
   if (category === 'skill_experience') return semantic === 'programming_languages'
     ? programmingLanguagesAnswer(profile) : skillExperienceAnswer(profile, field.questionText || field.groupLabel || field.label);
+  if (category === 'standing_declaration') {
+    const value = cleanFormText(profile?.formRules?.standing_answers?.[semantic]);
+    return /^(?:yes|no)$/i.test(value) ? value[0].toUpperCase() + value.slice(1).toLowerCase() : null;
+  }
   if (category === 'adult_confirmation') {
     const value = profile?.formRules?.adult_confirmed;
     return value === true || normalizeFormQuestion(value) === 'yes' ? 'Yes' : null;

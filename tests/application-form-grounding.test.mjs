@@ -154,6 +154,17 @@ test('a company-interest answer has a readable opening and at most three distinc
   validateNarrativeProvenanceRecord(repetitive, result, { candidateId: context.candidate.candidate_id, normalizedQuestion: result.normalizedQuestion, answer: result.answer });
 });
 
+test('standing screening declarations come only from explicit profile answers', () => {
+  const questions = {
+    restrictive: 'Are you currently subject to any restrictive covenant, non-compete, non-solicit, confidentiality or any other agreement that may limit your ability to work for Example Corp?',
+    partner: 'Do you currently, or in the past year, work for or with a dealer, partner or supplier of Example Corp? If yes, what company?',
+    visa: 'Are you currently on a nonimmigrant visa (ex. F-1)? If you are, will you require Example Corp to provide a written submission to your school (ex. CPT/OPT)?',
+  };
+  for (const question of Object.values(questions)) assert.equal(answer(question), null, question);
+  const withAnswers = { ...profile, formRules: { ...profile.formRules, standing_answers: { restrictive_agreements: 'No', partner_relationship: 'no', us_nonimmigrant_visa: 'No' } } };
+  for (const question of Object.values(questions)) assert.equal(answer(question, withAnswers), 'No', question);
+});
+
 test('a salary question asked in dollars never receives a EUR target', () => {
   const salaryProfile = { ...profile, compensation: { target_range: 'EUR 55,000-60,000/year' } };
   assert.equal(answer('What are your salary expectations? (in $)', salaryProfile), null);

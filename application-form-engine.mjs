@@ -2044,8 +2044,10 @@ async function assertNotFinal(locator) {
 async function validationState(locator) {
   return locator.evaluate((element) => ({
     value: element.value || '',
-    educationSelectedValue: element.closest('.education--form') && element.getAttribute('role') === 'combobox'
-      ? element.closest('.select__container')?.querySelector('.select__single-value')?.innerText || '' : '',
+    // react-select (Greenhouse) keeps its search input empty and shows the selection in .select__single-value.
+    educationSelectedValue: element.getAttribute('role') === 'combobox'
+      ? (element.closest('.select__container, .select-shell, .select__control')
+        ?.querySelector('.select__single-value')?.innerText || '') : '',
     checked: Boolean(element.checked),
     invalid: element.getAttribute('aria-invalid') === 'true' || (typeof element.checkValidity === 'function' && !element.checkValidity()),
     files: element.files ? [...element.files].map((file) => file.name) : [],
@@ -2133,6 +2135,18 @@ async function chooseAutocomplete(page, action, visibleOptions, { deadlineMs, cl
           liveMatches.push({ option, label });
         }
       }
+      // Several grounded city options: one exactly equal to the configured location ("Joensuu, Finland") wins over
+      // regional variants; options for same-named places in different regions without an exact one stay manual.
+      if (liveMatches.length > 1 && ['current_location', 'city'].includes(action.semantic)) {
+        // "Exact" = the planned value itself, or the planned value plus only a country (no region part).
+        const valueParts = cleanFormText(action.value).split(',').map((part) => part.trim()).filter(Boolean);
+        const exact = liveMatches.filter((match) => {
+          const parts = cleanFormText(match.label).split(',').map((part) => part.trim()).filter(Boolean);
+          const sameStart = valueParts.every((part, index) => normalizeFormQuestion(parts[index]) === normalizeFormQuestion(part));
+          return sameStart && (parts.length === valueParts.length || (valueParts.length === 1 && parts.length === 2));
+        });
+        if (exact.length === 1) liveMatches.splice(0, liveMatches.length, exact[0]);
+      }
       if (liveMatches.length !== 1) {
         throw new Error(`Autocomplete owned option is ambiguous for ${action.semantic}: ${matchingLabel}`);
       }
@@ -2146,7 +2160,11 @@ async function chooseAutocomplete(page, action, visibleOptions, { deadlineMs, cl
   await locator.blur({ timeout: remainingTimeout(deadlineMs, clock) });
   const state = await validationState(locator);
   const committed = cleanFormText(state.educationSelectedValue || state.value);
-  if (state.invalid || normalizeFormQuestion(committed) !== normalizeFormQuestion(selectedLabel)) {
+  const committedText = normalizeFormQuestion(committed);
+  const selectedText = normalizeFormQuestion(selectedLabel);
+  // Phone-country selects display only the flag and dial code ("+358") for "Finland +358".
+  const dialCodeDisplay = /^\+\d{1,4}$/.test(committed) && selectedText.endsWith(` ${committedText}`);
+  if (state.invalid || !committedText || (committedText !== selectedText && !dialCodeDisplay)) {
     throw new Error(`Autocomplete selection was not committed: ${selectedLabel}`);
   }
   if (action.category === 'current_location' && !groundedLocationMatches(committed, action)) {
