@@ -519,7 +519,15 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
       const uploadedTiles = [...document.querySelectorAll('[data-automation-id="file-upload-item-name"]')]
         .filter((element) => visible(element) && !element.closest('form'));
       if (!loose.length && uploadedTiles.length) loose.push(...uploadedTiles);
-      if (loose.length >= 3 || loose.some((element) => (element.type || '').toLowerCase() === 'file' || uploadedTiles.includes(element))) {
+      const singleControlWorkdayStep = loose.some((element) => {
+        const flow = element.closest('[data-automation-id="applyFlowPage"]');
+        return Boolean(flow
+          && [...flow.querySelectorAll('[data-automation-id="progressBar"]')].some(visible)
+          && [...flow.querySelectorAll('button, [role="button"], input[type="submit"]')].some((control) => visible(control)
+            && /\b(?:save and continue|continue|next)\b/i.test(control.innerText || control.value || control.getAttribute('aria-label') || '')));
+      });
+      if (loose.length >= 3 || loose.some((element) => (element.type || '').toLowerCase() === 'file' || uploadedTiles.includes(element))
+          || singleControlWorkdayStep) {
         let container = loose[0].parentElement;
         while (container && !loose.every((element) => container.contains(element))) container = container.parentElement;
         const submitLike = (root) => [...root.querySelectorAll('button, [role="button"], input[type="submit"]')]
@@ -535,7 +543,9 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
           for (let depth = 0; ancestor && depth < 3 && !hasStep(ancestor); depth += 1) ancestor = ancestor.parentElement;
           if (ancestor && hasStep(ancestor) && !['BODY', 'HTML'].includes(ancestor.tagName)) container = ancestor;
         }
-        if (container && !['BODY', 'HTML'].includes(container.tagName) && submitLike(container)) {
+        if (container && !['BODY', 'HTML'].includes(container.tagName) && submitLike(container)
+            && (loose.length >= 3 || loose.some((element) => (element.type || '').toLowerCase() === 'file')
+              || uploadedTiles.length || singleControlWorkdayStep)) {
           container.setAttribute('data-career-ops-virtual-form', '1');
         }
       }
@@ -720,6 +730,10 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
           }
         }
         const owningForm = element.form || element.closest('form, [data-career-ops-virtual-form]');
+        const workdayGroup = element.closest('[role="group"][aria-labelledby]');
+        const workdayGroupLabelledBy = workdayGroup?.getAttribute('aria-labelledby') || '';
+        const workdayGroupLabel = workdayGroupLabelledBy.split(/\s+/).filter(Boolean)
+          .map((id) => document.getElementById(id)?.innerText || '').join(' ').replace(/\s+/g, ' ').trim();
         return {
           fieldId,
           formId: owningForm?.getAttribute('data-career-ops-form-id') || '',
@@ -729,6 +743,8 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
           role: element.getAttribute('role') || '',
           name: element.getAttribute('name') || '',
           label: fieldText,
+          workdayGroupLabelledBy,
+          workdayGroupLabel,
           placeholder: element.getAttribute('placeholder') || '',
           required: element.required
             || element.getAttribute('aria-required') === 'true'
@@ -834,12 +850,16 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
       // Workday Autofill after an upload: the input is replaced by a tile naming the uploaded file.
       const workdayUploadedStep = isVirtualForm(form) && hasFormStepEvidence
         && [...form.querySelectorAll('[data-automation-id="file-upload-item-name"]')].some(visible);
+      const carriedVerifiedReviewStep = isVirtualForm(form)
+        && Boolean(form.getAttribute('data-career-ops-workflow-id'))
+        && hasFormStepEvidence && hasTerminalAction;
       const associationBonus = structurallyAssociated || hasFormStepEvidence || hasApplicationAction ? 100 : 0;
       return {
         form,
         score: score + applicationSpecificSignals * 4 + associationBonus,
         applicationQualified: visible(form)
-          && ((candidates.length > 0 && (visibleCandidates.length > 0 || hasApplicationAction)) || workdayUploadedStep)
+          && ((candidates.length > 0 && (visibleCandidates.length > 0 || hasApplicationAction))
+            || workdayUploadedStep || carriedVerifiedReviewStep)
           && independentApplicationIdentity,
       };
     }).filter((row) => row.applicationQualified).sort((a, b) => b.score - a.score);
@@ -847,8 +867,9 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
       ? scoredForms[0].form : null;
     const applicationFormId = uniqueTopForm?.getAttribute('data-career-ops-form-id') || '';
     const applicationWizard = uniqueTopForm ? workflowAssociations.get(uniqueTopForm)?.root || null : null;
-    if (applicationWizard && !applicationWizard.getAttribute('data-career-ops-workflow-id')) {
-      applicationWizard.setAttribute('data-career-ops-workflow-id', `workflow-${applicationFormId}`);
+    const verifiedWorkflowRoot = applicationWizard || (isVirtualForm(uniqueTopForm) ? uniqueTopForm : null);
+    if (verifiedWorkflowRoot && !verifiedWorkflowRoot.getAttribute('data-career-ops-workflow-id')) {
+      verifiedWorkflowRoot.setAttribute('data-career-ops-workflow-id', `workflow-${applicationFormId}`);
     }
     const applicationWorkflowId = applicationWizard?.getAttribute('data-career-ops-workflow-id') || applicationFormId;
     for (const field of fields) field.applicationFormOwned = Boolean(applicationFormId && field.formId === applicationFormId);

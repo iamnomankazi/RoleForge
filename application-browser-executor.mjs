@@ -45,6 +45,24 @@ function inline(value) {
   return String(value ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
 }
 
+async function saveStepSnapshot(contract, page, stepLabel) {
+  try {
+    const candidateId = contract?.candidate?.candidate_id;
+    if (!contract?.manifestPath || !candidateId || !page) return null;
+    const directory = join(dirname(contract.manifestPath), 'evidence', candidateId, 'steps');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const slug = inline(stepLabel).normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'application-step';
+    const path = join(directory, `${stamp}-${slug}.html`);
+    const html = await page.content();
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(path, html);
+    return path;
+  } catch {
+    return null;
+  }
+}
+
 
 export function buildCandidateFormContext(contract) {
   const row = contract?.sourceCandidate?.sourceRow || {};
@@ -114,6 +132,7 @@ export async function prepareFormPassWithEvidence(page, browserContext, contract
     reasoningProvider,
     awaitManualFields: process.stdin.isTTY ? (labels) => awaitManualFieldsInTerminal(contract, labels, { page }) : null,
     progressLog: process.stdout.isTTY ? (line) => console.log(line) : null,
+    onBeforeProgression: (activePage, stepLabel) => saveStepSnapshot(contract, activePage, stepLabel),
   });
   const screenshotAfter = await safeScreenshot(page, afterPath);
   // Local page copy (gitignored evidence) so unsupported ATS steps can be fixed from a saved fixture.

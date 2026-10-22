@@ -321,6 +321,11 @@ export function classifyFieldSemantics(field = {}) {
   if (field.workdayBlockKind === 'education' && /field of study|major|subject/.test(text)) {
     return { category: 'education', semantic: 'field_of_study' };
   }
+  if (field.widget === 'selectinput'
+      && /(?:^|\s)skills-section(?:\s|$)/i.test(cleanFormText(field.workdayGroupLabelledBy))
+      && /(?:^|\s)type to add skills\b/.test(text)) {
+    return { category: 'skills', semantic: 'workday_skills' };
+  }
   if (/degree|qualification/.test(text)) return { category: 'education', semantic: 'degree' };
   if (/university|school|institution/.test(text)) return { category: 'education', semantic: 'university' };
   if (/graduat/.test(text)) return { category: 'education', semantic: 'graduation' };

@@ -233,6 +233,9 @@ function pickOptionMatches(label, action) {
     const match = cleanFormText(label).match(/^(.+?)\s*\(\s*\+\d{1,4}\s*\)$/);
     return Boolean(match && normalizeFormQuestion(match[1]) === normalizeFormQuestion(country));
   }
+  if (action.pickKind === 'skill') {
+    return normalizeFormQuestion(label) === normalizeFormQuestion(action.value);
+  }
   return (action.optionValues || [action.value])
     .some((value) => normalizeFormQuestion(label) === normalizeFormQuestion(value));
 }
@@ -241,12 +244,28 @@ function pickFieldCommitted(field, action) {
   const values = Array.isArray(field.selectedItems)
     ? field.selectedItems.map(cleanFormText).filter(Boolean)
     : cleanFormText(field.value).split(/\s*,\s*/).filter(Boolean);
+  if (action.pickKind === 'skill') return values.some((value) => pickOptionMatches(value, action));
   return values.length === 1 && pickOptionMatches(values[0], action);
 }
 
 function markdownSection(markdown, name) {
   const match = String(markdown || '').match(new RegExp(`^##\\s+${name}\\s*\\r?\\n([\\s\\S]*?)(?=^##\\s+|$(?![\\s\\S]))`, 'im'));
   return match?.[1] || '';
+}
+
+function cvTechnicalSkills(profile) {
+  const section = markdownSection(profile?.cvText, 'Technical Skills');
+  const seen = new Set();
+  const skills = [];
+  for (const raw of section.split(/[,;\r\n]+/)) {
+    const skill = cleanFormText(raw.replace(/^\s*(?:[-*•]\s*)+/, '').replace(/\*\*/g, '').replace(/[.;]+$/, ''));
+    const key = normalizeFormQuestion(skill);
+    if (!skill || !key || /\b(?:familiar|basic)\b/i.test(skill) || seen.has(key)) continue;
+    seen.add(key);
+    skills.push(skill);
+    if (skills.length >= 15) break;
+  }
+  return skills;
 }
 
 function markdownEntries(sectionName, profile) {
@@ -906,7 +925,9 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
       continue;
     }
     if (semantics.category === 'legal_declaration') {
-      if (field.required) unresolvedFields.push(manualField(field, semantics, 'Legally meaningful declaration requires user review.'));
+      if ((field.type === 'checkbox' && !field.checked) || (field.required && !fieldAnswered(field))) {
+        unresolvedFields.push(manualField(field, semantics, 'Legally meaningful declaration requires user review.'));
+      }
       continue;
     }
     if (semantics.category === 'demographic_eeo') {
@@ -1015,6 +1036,23 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
             profile,
           }));
         }
+      }
+      continue;
+    }
+
+    if (semantics.semantic === 'workday_skills') {
+      const selectedItems = Array.isArray(field.selectedItems) ? field.selectedItems.map(cleanFormText).filter(Boolean) : [];
+      for (const skill of cvTechnicalSkills(profile)) {
+        if (selectedItems.some((existing) => normalizeFormQuestion(existing) === normalizeFormQuestion(skill))) continue;
+        actions.push({
+          ...base,
+          action: 'pick',
+          pickKind: 'skill',
+          optionValues: [skill],
+          value: skill,
+          valueHash: hashFormValue(skill),
+          retryBudget: 1,
+        });
       }
       continue;
     }
@@ -2010,10 +2048,21 @@ async function clearPickSearch(page, action, { deadlineMs, clock }) {
   await input.fill('', { timeout: remainingTimeout(deadlineMs, clock) }).catch(() => null);
 }
 
+function optionalSkillSkipError(skill) {
+  const error = new Error(`No exact option for skill ${skill}.`);
+  error.code = 'OPTIONAL_SKILL_NO_EXACT_OPTION';
+  return error;
+}
+
 async function chooseWorkdayPick(page, action, visibleOptions, { deadlineMs, clock }) {
   let input = await exactLocator(page, action);
   let chipState = await visiblePickChipTexts(input);
-  if (chipState.values.length) {
+  const originalChips = [...chipState.values];
+  if (action.pickKind === 'skill'
+      && chipState.values.some((value) => pickOptionMatches(value, action))) {
+    return chipState.values.find((value) => pickOptionMatches(value, action));
+  }
+  if (chipState.values.length && action.pickKind !== 'skill') {
     if (chipState.values.length === 1 && pickOptionMatches(chipState.values[0], action)) return chipState.values[0];
     throw new Error('A different Workday selection is already present; RoleForge did not replace it.');
   }
@@ -2028,7 +2077,10 @@ async function chooseWorkdayPick(page, action, visibleOptions, { deadlineMs, clo
     await input.focus({ timeout: remainingTimeout(deadlineMs, clock) });
     await page.keyboard.press('Enter', { timeout: remainingTimeout(deadlineMs, clock) });
     const options = pickOptionLocators(page);
-    await options.first().waitFor({ state: 'visible', timeout: Math.min(5_000, remainingTimeout(deadlineMs, clock)) });
+    if (action.pickKind === 'skill') {
+      await options.first().waitFor({ state: 'visible', timeout: Math.min(1_200, remainingTimeout(deadlineMs, clock)) }).catch(() => null);
+    }
+    else await options.first().waitFor({ state: 'visible', timeout: Math.min(5_000, remainingTimeout(deadlineMs, clock)) });
     for (let depth = 0; depth < 3; depth += 1) {
       const liveOptions = pickOptionLocators(page);
       const count = await liveOptions.count();
@@ -2048,7 +2100,7 @@ async function chooseWorkdayPick(page, action, visibleOptions, { deadlineMs, clo
       if (matching.length === 1) {
         selectedLabel = matching[0].label;
         await matching[0].option.click({ timeout: remainingTimeout(deadlineMs, clock) });
-      } else if (categories.length === 1) {
+      } else if (categories.length === 1 && action.pickKind !== 'skill') {
         await categories[0].option.click({ timeout: remainingTimeout(deadlineMs, clock) });
         await page.waitForTimeout(100);
         input = await exactLocator(page, action);
@@ -2061,11 +2113,19 @@ async function chooseWorkdayPick(page, action, visibleOptions, { deadlineMs, clo
         if (await children.count()) continue;
         throw new Error(`Workday category did not open child options for ${action.value}.`);
       } else {
+        if (action.pickKind === 'skill') throw optionalSkillSkipError(action.value);
         throw new Error(`No unique Workday pick option matches ${action.value}.`);
       }
       await page.waitForTimeout(100);
       input = await exactLocator(page, action);
       chipState = await visiblePickChipTexts(input);
+      if (action.pickKind === 'skill') {
+        const preserved = originalChips.every((value) => chipState.values.includes(value));
+        const added = chipState.values.some((value) => pickOptionMatches(value, action)
+          && !originalChips.includes(value));
+        if (preserved && added) return chipState.values.find((value) => pickOptionMatches(value, action));
+        throw new Error(`Workday did not add the skill chip without changing existing chips: ${action.value}.`);
+      }
       if (chipState.values.length === 1 && pickOptionMatches(chipState.values[0], action)) return chipState.values[0];
       if (chipState.values.length) throw new Error('Workday selected a different chip; RoleForge did not replace it.');
       const childOptions = pickOptionLocators(page);
@@ -3173,6 +3233,8 @@ async function executeOperationalFormPlanGuarded(page, plan, {
   const completed = [...(plan.preservedFields || [])];
   const uploadedArtifacts = [...(plan.preservedUploads || [])];
   const committedSelections = [];
+  const fieldOutcomes = [];
+  const optionalSkips = [];
   const unresolvedFields = [];
   const priorLedger = Array.isArray(previousEvidence?.attemptLedger) ? previousEvidence.attemptLedger : [];
   const attemptLedger = [...priorLedger];
@@ -3207,6 +3269,7 @@ async function executeOperationalFormPlanGuarded(page, plan, {
     }
     const visibleOptions = [];
     let success = false;
+    let skipped = false;
     let lastReason = null;
     for (let attempt = 1; attempt <= effectiveLimits.maxAttempts; attempt += 1) {
       gate = await inspectLiveHumanGate(page, 'field_filling');
@@ -3260,6 +3323,10 @@ async function executeOperationalFormPlanGuarded(page, plan, {
           valueHash: action.valueHash || action.artifact?.sha256,
           preserved: false,
         });
+        fieldOutcomes.push({
+          fieldId: action.fieldId,
+          value: action.action === 'upload' ? 'file attached' : cleanFormText(action.value),
+        });
         if (action.action === 'upload') {
           uploadedArtifacts.push({
             semantic: action.semantic,
@@ -3286,6 +3353,11 @@ async function executeOperationalFormPlanGuarded(page, plan, {
           : timeoutCode === 'FIELD_ATTEMPT_TIMEOUT'
             ? 'Field attempt time limit reached.'
             : cleanFormText(error.message);
+        if (error.code === 'OPTIONAL_SKILL_NO_EXACT_OPTION') {
+          optionalSkips.push({ fieldId: action.fieldId, value: action.value, reason: 'no exact option' });
+          skipped = true;
+          break;
+        }
         attemptLedger.push({
           batchId: cleanFormText(action.batchId) || null,
           candidateId: cleanFormText(action.candidateId) || null,
@@ -3310,7 +3382,9 @@ async function executeOperationalFormPlanGuarded(page, plan, {
       }
     }
     if (gate) break;
-    if (!success) {
+    if (!success && !skipped && action.pickKind === 'skill') {
+      optionalSkips.push({ fieldId: action.fieldId, value: action.value, reason: 'could not add skill' });
+    } else if (!success && !skipped) {
       unresolvedFields.push({
         fieldId: action.fieldId,
         stableFieldId: action.stableFieldId,
@@ -3346,6 +3420,8 @@ async function executeOperationalFormPlanGuarded(page, plan, {
     uploadedArtifacts,
     committedSelections,
     unresolvedFields,
+    fieldOutcomes,
+    optionalSkips,
     attemptLedger,
     timeLimits: effectiveLimits,
     sessionLimitReached,
@@ -3371,9 +3447,84 @@ function fieldAnswered(field) {
 }
 
 function requiredEmpty(field) {
+  if (classifyFieldSemantics(field).semantic === 'workday_skills') return false;
   return field.visible !== false && field.required && !field.disabled
     && !(field.widget === 'selectinput' ? fieldAnswered(field) : cleanFormText(field.value) || field.checked)
     && !(field.files || []).length;
+}
+
+async function currentApplicationStepLabel(page, snapshot) {
+  const heading = await page.evaluate(() => {
+    const flow = document.querySelector('[data-automation-id="applyFlowPage"]')
+      || document.querySelector('[data-career-ops-virtual-form]');
+    const text = (element) => (element?.innerText || '').replace(/\s+/g, ' ').trim();
+    const headings = [...(flow?.querySelectorAll('h1, h2, h3') || [])]
+      .filter((element) => element.getClientRects().length && !element.closest('[data-automation-id="progressBar"]'))
+      .map(text).filter(Boolean);
+    if (headings.length) return headings[0];
+    const active = text(flow?.querySelector('[data-automation-id="progressBarActiveStep"]'));
+    return active.replace(/current step\s+\d+\s+of\s+\d+/i, '').trim();
+  }).catch(() => '');
+  const label = cleanFormText(heading || '');
+  if (label) return label.replace(/[|\r\n]+/g, ' ').trim();
+  return cleanFormText(snapshot?.stepIndicator?.text || 'Application Step').replace(/[|\r\n]+/g, ' ').trim();
+}
+
+function fieldLogValue(value) {
+  const text = cleanFormText(value).replace(/[|\r\n]+/g, ' ').trim();
+  return text.length > 80 ? `${text.slice(0, 77)}...` : text || '(empty)';
+}
+
+function existingFieldLogValue(field) {
+  if (String(field.type || '').toLowerCase() === 'file') {
+    return (field.files || []).length || (field.attachedNames || []).length ? 'file attached' : '';
+  }
+  if (field.widget === 'selectinput') return (field.selectedItems || []).map(cleanFormText).filter(Boolean).join(', ');
+  if (['checkbox', 'radio'].includes(String(field.type || '').toLowerCase())) {
+    return field.checked ? cleanFormText(field.value) || 'checked' : '';
+  }
+  return cleanFormText(field.value);
+}
+
+function logApplicationFieldOutcomes(snapshot, plan, execution, reviewedEvidence, stepLabel, progressLog) {
+  if (!progressLog || !snapshot.applicationFormId) return;
+  const fields = (snapshot.fields || []).filter((field) => field.formId === snapshot.applicationFormId
+    && field.applicationFormOwned !== false);
+  for (const field of fields) {
+    const label = workdayEntryFieldLabel(field).replace(/[|\r\n]+/g, ' ').trim()
+      || field.fieldId;
+    const fieldOutcomes = (execution.fieldOutcomes || []).filter((row) => row.fieldId === field.fieldId);
+    const optionalSkips = (execution.optionalSkips || []).filter((row) => row.fieldId === field.fieldId);
+    const unresolved = [
+      ...(reviewedEvidence.unresolvedFields || []),
+      ...(execution.unresolvedFields || []),
+      ...(plan.unresolvedFields || []),
+    ].find((row) => row.fieldId === field.fieldId);
+    let status;
+    if (fieldOutcomes.length) {
+      const filled = [...new Set(fieldOutcomes.map((row) => cleanFormText(row.value)).filter(Boolean))];
+      status = `filled: ${fieldLogValue(filled.join(', '))}`;
+      if (optionalSkips.length) {
+        status += `; skipped: no exact option (${fieldLogValue(optionalSkips.map((row) => row.value).join(', '))})`;
+      }
+    } else if (optionalSkips.length) {
+      const reason = optionalSkips.every((row) => row.reason === 'no exact option')
+        ? `no exact option (${optionalSkips.map((row) => row.value).join(', ')})`
+        : `could not add skill (${optionalSkips.map((row) => row.value).join(', ')})`;
+      status = `skipped: ${fieldLogValue(reason)}`;
+    } else if (unresolved) {
+      status = field.required || field.type === 'checkbox' && classifyFieldSemantics(field).category === 'legal_declaration'
+        ? `manual: ${fieldLogValue(unresolved.reason || 'requires user review')}`
+        : `skipped: ${fieldLogValue(unresolved.reason || 'optional field')}`;
+    } else {
+      const existing = existingFieldLogValue(field);
+      if (existing) status = `kept: ${fieldLogValue(existing)}`;
+      else if (field.disabled) status = 'skipped: disabled field';
+      else if (field.required) status = 'manual: required field remains empty';
+      else status = 'skipped: optional field';
+    }
+    progressLog(`[field] ${stepLabel} | ${label} | ${status}`);
+  }
 }
 
 export async function reviewOperationalApplicationForm(page, profile, artifacts, execution, {
@@ -3683,6 +3834,8 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
   awaitManualFields = null,
   // Interactive runs: (line) => void. Live log of the detected step, the progression control and each transition.
   progressLog = null,
+  // Save the live page before RoleForge activates an intermediate progression control. Failures are ignored.
+  onBeforeProgression = null,
 } = {}) {
   const effectiveLimits = resolveOperationalFormLimits(profile, limits || {});
   let sessionDeadlineMs = clock() + effectiveLimits.sessionMs;
@@ -3907,6 +4060,13 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
       reviewed.evidence.evidenceHash = digest({ ...reviewed.evidence, evidenceHash: undefined });
       const currentSnapshot = reviewed.snapshot;
       const currentPlan = reviewed.plan;
+      const stepLabel = await currentApplicationStepLabel(page, currentSnapshot);
+      logApplicationFieldOutcomes(currentSnapshot, plan, execution, reviewed.evidence, stepLabel, progressLog);
+      const currentApplicationFields = currentSnapshot.fields.filter((field) => currentSnapshot.applicationFormId
+        && field.formId === currentSnapshot.applicationFormId && field.applicationFormOwned !== false);
+      const legalConsentCheckbox = (field) => field.type === 'checkbox'
+        && classifyFieldSemantics(field).category === 'legal_declaration';
+      const consentOnlyStep = currentApplicationFields.length > 0 && currentApplicationFields.every(legalConsentCheckbox);
       const reviewGate = humanGateOutcome(currentSnapshot, 'form_review');
       if (reviewGate) {
         outcome = { ...reviewed, gate: reviewGate };
@@ -3933,7 +4093,8 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         // An optional field RoleForge could not fill exactly (e.g. Field of Study without an exact option) never blocks.
         .filter((row) => {
           const field = (currentSnapshot.fields || []).find((item) => item.fieldId === row.fieldId);
-          return !field || field.required;
+          if (field && classifyFieldSemantics(field).semantic === 'workday_skills') return false;
+          return !field || field.required || consentOnlyStep && legalConsentCheckbox(field);
         });
       // A form that momentarily fails verification is a page still rendering (Workday after an upload or sign-in):
       // re-inspect the settled page before treating anything as unresolved.
@@ -3949,9 +4110,17 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
         const waitStarted = clock();
         const labels = [];
         const seenManualLabels = new Set();
+        const consentCheckboxes = consentOnlyStep
+          ? currentApplicationFields.filter((field) => legalConsentCheckbox(field) && !field.checked)
+          : [];
+        const manualLabels = consentCheckboxes.length
+          ? [`Consent: ${consentCheckboxes.map((field) => fieldQuestion(field) || 'legal checkbox').join('; ')} - this is yours to tick; then press Enter (RoleForge clicks Save and Continue) or finish yourself`,
+            ...blockingUnresolved.filter((row) => !consentCheckboxes.some((field) => field.fieldId === row.fieldId))
+              .map((row) => cleanFormText(row.label || row.semantic || row.fieldId))]
+          : blockingUnresolved.map((row) => cleanFormText(row.label || row.semantic || row.fieldId)
+            + (row.category === 'workday_entry_field' && row.reason ? ` (${cleanFormText(row.reason)})` : ''));
         for (const label of [
-          ...blockingUnresolved.map((row) => cleanFormText(row.label || row.semantic || row.fieldId)
-            + (row.category === 'workday_entry_field' && row.reason ? ` (${cleanFormText(row.reason)})` : '')),
+          ...manualLabels,
           ...reviewed.evidence.validationErrors.map((text) => `error: ${cleanFormText(text)}`),
         ]) {
           const key = normalizeFormQuestion(label);
@@ -4145,6 +4314,11 @@ export async function prepareOperationalApplicationForm(page, profile, artifacts
       const startedAt = clock();
       const liveStep = control.stepIndicator ? `${control.stepIndicator.current}/${control.stepIndicator.total}` : 'none';
       progressLog?.(`[form] step ${liveStep}: "${cleanFormText(control.label)}" classified ${classifyApplicationControl(control)}; clicking it`);
+      try {
+        await onBeforeProgression?.(page, stepLabel);
+      } catch {
+        // Evidence capture is best effort and never interrupts the application run.
+      }
       try {
         await activateProgressionControl(page, control, {
           applicationIdentity,
