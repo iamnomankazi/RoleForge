@@ -36,6 +36,7 @@ export function createWorkTreeFixture(description = {}) {
     if (run.candidates !== undefined) putJson(join(runDir, 'candidates.json'), run.candidates);
   }
   for (const [name, ledger] of Object.entries(description.corrections ?? {})) putJson(join(root, 'output', 'identity-corrections', name), ledger);
+  for (const [name, results] of Object.entries(description.livenessFiles ?? {})) putJson(join(root, 'output', name), results);
   for (const [batchId, batch] of Object.entries(description.batches ?? {})) {
     const manifest = batch.manifest ?? { batchId, sourceRunId: 'fixture-run', candidates: [] };
     putJson(join(root, 'output', 'application-batches', batchId, 'manifest.json'), manifest);
@@ -59,4 +60,3 @@ export function reportMarkdown({ candidateId, supersedes, summary, extra = '' } 
     supersedes ? `**Supersedes:** [${supersedes}](reports/${String(supersedes).padStart(3, '0')}-old.md)` : ''].filter(Boolean);
   return `${headers.join('\n')}\n\n## Machine Summary\n\n\`\`\`yaml\n${summary ?? ''}\n\`\`\`\n\n${extra}`;
 }
-

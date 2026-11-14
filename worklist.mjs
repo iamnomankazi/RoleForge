@@ -3,7 +3,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadCanonicalStates, resolveCanonicalState, resolveTrackerPath } from './tracker-utils.mjs';
 import {
-  companyDuplicateKey, findCandidateRecord, groupTrackerRows, loadIdentityMappings,
+  companyDuplicateKey, findCandidateRecord, groupTrackerRows, loadIdentityMappings, roleDuplicateKey,
   loadReportIndex, loadRunCandidates, loadTrackerRows,
 } from './tracker-identity.mjs';
 
@@ -64,7 +64,7 @@ function loadBatches(root, warnings) {
         batch_id: manifest.batchId ?? dir.name,
         candidate_id: candidate.candidate_id ?? null,
         company: candidate.company ?? '',
-        title: candidate.title ?? '',
+        title: candidate.title ?? candidate.role ?? '',
         state: batchCandidateState(state, candidate, index),
         source_run_id: manifest.sourceRunId ?? candidate.run_id ?? null,
         listing_url: candidate.listingUrl ?? candidate.listing_url ?? null,
@@ -72,6 +72,51 @@ function loadBatches(root, warnings) {
     }
   }
   return batches;
+}
+
+function loadLiveness(root, warnings) {
+  const outputRoot = join(root, 'output');
+  let runDirs = [];
+  try { runDirs = readdirSync(outputRoot, { withFileTypes: true }); }
+  catch (error) {
+    if (error?.code !== 'ENOENT') warning({ warnings }, `Could not read liveness output ${outputRoot}: ${error.message}`);
+    return new Map();
+  }
+
+  const files = [];
+  for (const runDir of runDirs) {
+    if (!runDir.isDirectory() || runDir.name.startsWith('.')) continue;
+    const runPath = join(outputRoot, runDir.name);
+    let children = [];
+    try { children = readdirSync(runPath, { withFileTypes: true }); }
+    catch (error) {
+      if (error?.code !== 'ENOENT') warning({ warnings }, `Could not read liveness directory ${runPath}: ${error.message}`);
+      continue;
+    }
+    for (const child of children) {
+      if (!child.isDirectory() || !child.name.startsWith('liveness')) continue;
+      const file = join(runPath, child.name, 'liveness.json');
+      if (existsSync(file)) files.push(file);
+    }
+  }
+
+  const latestById = new Map();
+  for (const file of files.sort()) {
+    const warningCount = warnings.length;
+    const parsed = safeJson(file, warnings, 'liveness results');
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      if (warnings.length === warningCount) warning({ warnings }, `Ignoring malformed liveness results ${file}: expected an object keyed by candidate ID`);
+      continue;
+    }
+    for (const [candidateId, entry] of Object.entries(parsed)) {
+      const checkedAt = entry && typeof entry === 'object' ? entry.checked_at : null;
+      const checkedAtMs = typeof checkedAt === 'string' ? Date.parse(checkedAt) : NaN;
+      if (!Number.isFinite(checkedAtMs)) continue;
+      const current = latestById.get(candidateId);
+      if (!current || checkedAtMs > current.checkedAtMs) latestById.set(candidateId, { ...entry, checkedAtMs });
+    }
+  }
+  return latestById;
 }
 
 function bestCurrentReport(group, reportIndex, superseded) {
@@ -150,13 +195,39 @@ function displayedCompany(group, runCandidates, mappings) {
 
 function reportFields(report) {
   const summary = report?.summary ?? {};
-  const livenessDate = dateValue(summary.liveness_date ?? summary.liveness_checked_at ?? summary.liveness_checked_on
-    ?? summary.liveness_at ?? summary.listing_checked_at ?? summary.date);
   return {
     country: summary.location_country ?? '',
     fit: summary.fit_score ?? null,
-    liveness_date: livenessDate,
   };
+}
+
+function candidateIdsForGroup(group, mappings) {
+  const ids = new Set(group.ids ?? []);
+  for (const id of [...ids]) for (const equivalent of mappings.equivalent.get(id) ?? []) ids.add(equivalent);
+  return ids;
+}
+
+function livenessForGroup(group, livenessById, mappings, report, runCandidates) {
+  let latest = null;
+  for (const id of candidateIdsForGroup(group, mappings)) {
+    const entry = livenessById.get(id);
+    if (entry && (!latest || entry.checkedAtMs > latest.checkedAtMs)) latest = entry;
+  }
+  if (latest) return { liveness_status: latest.status ?? null, liveness_date: dateValue(latest.checked_at) };
+
+  const records = allGroupRecords(group, runCandidates, mappings)
+    .filter((record) => typeof record.liveness_status === 'string')
+    .sort((a, b) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')));
+  return {
+    liveness_status: typeof report?.summary?.liveness === 'string' ? report.summary.liveness : records[0]?.liveness_status ?? null,
+    liveness_date: null,
+  };
+}
+
+function groupTextMatches(group, companyKey, roleKey) {
+  if (!companyKey || !roleKey) return false;
+  return group.rows.some((row) => companyDuplicateKey(row.company) === companyKey
+    && roleDuplicateKey(row.role) === roleKey);
 }
 
 function groupRowsText(group) {
@@ -200,6 +271,7 @@ export function buildWorklist({ root = process.cwd(), now = new Date() } = {}) {
   warnings.push(...runCandidates.warnings);
   const groups = groupTrackerRows(tracker.rows, reportIndex, mappings, { states, runCandidates });
   const batches = loadBatches(absoluteRoot, warnings);
+  const livenessById = loadLiveness(absoluteRoot, warnings);
   const superseded = new Set([...reportIndex.values()].map((report) => report.supersedes).filter((number) => number != null));
 
   const openApply = [];
@@ -211,6 +283,7 @@ export function buildWorklist({ root = process.cwd(), now = new Date() } = {}) {
     for (const report of reportNumbersForGroup(group, reportIndex)) groupReports.add(report);
     const currentReport = bestCurrentReport(group, reportIndex, superseded);
     const fields = reportFields(currentReport);
+    const liveness = livenessForGroup(group, livenessById, mappings, currentReport, runCandidates);
     const associatedBatches = linkedBatches(group, batches, mappings);
     const base = {
       tracker_rows: groupRowsText(group), report: currentReport ? basename(currentReport.file) : '',
@@ -220,8 +293,8 @@ export function buildWorklist({ root = process.cwd(), now = new Date() } = {}) {
         ...group.flags,
         ...(Array.isArray(currentReport?.summary?.flags) ? currentReport.summary.flags.map((flag) => typeof flag === 'string' ? flag : flag?.code).filter(Boolean) : []),
         ...(Array.isArray(currentReport?.summary?.prescreen?.flags) ? currentReport.summary.prescreen.flags.map((flag) => typeof flag === 'string' ? flag : flag?.code).filter(Boolean) : []),
-      ])], liveness_date: fields.liveness_date,
-      age_days: daysSince(fields.liveness_date, timestamp),
+      ])], liveness_status: liveness.liveness_status, liveness_date: liveness.liveness_date,
+      age_days: daysSince(liveness.liveness_date, timestamp),
       batch: associatedBatches[0] ? { id: associatedBatches[0].batch_id, state: associatedBatches[0].state } : null,
       possibleDuplicates: group.possibleDuplicates,
     };
@@ -254,10 +327,26 @@ export function buildWorklist({ root = process.cwd(), now = new Date() } = {}) {
     if (!IN_PROGRESS_STATES.has(batch.state)) continue;
     const matchedGroups = groups.filter((group) => [...group.ids].some((id) => id === batch.candidate_id
       || (mappings.equivalent.get(batch.candidate_id) ?? new Set()).has(id)));
-    if (matchedGroups.length && !matchedGroups.some((group) => group.open)) continue;
-    const group = matchedGroups.find((entry) => entry.open) ?? null;
-    if (group && groupHasClosedRow(group, states)) continue;
+    let match = 'id';
+    let group = null;
+    if (matchedGroups.length) {
+      if (!matchedGroups.some((entry) => entry.open)) continue;
+      group = matchedGroups.find((entry) => entry.open) ?? null;
+      if (group && groupHasClosedRow(group, states)) continue;
+    } else {
+      const companyKey = companyDuplicateKey(batch.company);
+      const roleKey = roleDuplicateKey(batch.title);
+      const textGroups = groups.filter((candidate) => groupTextMatches(candidate, companyKey, roleKey));
+      if (textGroups.length === 1) {
+        match = 'text';
+        group = textGroups[0];
+        if (!group.open || groupHasClosedRow(group, states)) continue;
+      } else {
+        match = textGroups.length > 1 ? 'ambiguous' : 'none';
+      }
+    }
     inProgress.push({ batch_id: batch.batch_id, candidate_id: batch.candidate_id, state: batch.state,
+      match, group_status: group?.status ?? null,
       company: batch.company || (group ? displayedCompany(group, runCandidates, mappings) : ''),
       role: batch.title || group?.rows[0]?.role || '', tracker_rows: group ? groupRowsText(group) : '',
       open_tracker_group: Boolean(group) });
@@ -292,19 +381,19 @@ export function renderWorklist(worklist) {
   const sections = worklist?.sections ?? {};
   const lines = ['# Open worklist', '', `Generated ${cell(worklist?.generated_at ?? '')} from \`${cell(worklist?.tracker ?? '')}\`.`, ''];
   lines.push(`## Open Apply (${(sections.openApply ?? []).length})`, '');
-  table(lines, ['Tracker rows', 'Report', 'Company', 'Role', 'Country', 'Fit', 'Flags', 'Liveness date', 'Age days', 'Batch', 'Possible duplicates'],
+  table(lines, ['Tracker rows', 'Report', 'Company', 'Role', 'Country', 'Fit', 'Flags', 'Liveness status', 'Liveness date', 'Age days', 'Batch', 'Possible duplicates'],
     (sections.openApply ?? []).map((row) => [row.tracker_rows, row.report, row.company, row.role, row.country, row.fit,
-      row.flags.join(', '), row.liveness_date, row.age_days, row.batch ? `${row.batch.id}: ${row.batch.state}` : '', JSON.stringify(row.possibleDuplicates)]));
+      row.flags.join(', '), row.liveness_status, row.liveness_date, row.age_days, row.batch ? `${row.batch.id}: ${row.batch.state}` : '', JSON.stringify(row.possibleDuplicates)]));
   lines.push(`## Awaiting outcome (${(sections.awaitingOutcome ?? []).length})`, '');
   table(lines, ['Tracker rows', 'Company', 'Role', 'Applied date', 'Age days', 'Last Notes segment', 'Flags'],
     (sections.awaitingOutcome ?? []).map((row) => [row.tracker_rows, row.company, row.role, row.applied_date, row.age_days, row.last_notes, row.flags.join(', ')]));
   lines.push(`## In progress (${(sections.inProgress ?? []).length})`, '');
-  table(lines, ['Batch', 'Candidate ID', 'State', 'Company', 'Role', 'Tracker rows'],
-    (sections.inProgress ?? []).map((row) => [row.batch_id, row.candidate_id, row.state, row.company, row.role, row.tracker_rows]));
+  table(lines, ['Batch', 'Candidate ID', 'State', 'Match', 'Company', 'Role', 'Tracker rows', 'Group status'],
+    (sections.inProgress ?? []).map((row) => [row.batch_id, row.candidate_id, row.state, row.match, row.company, row.role, row.tracker_rows, row.group_status]));
   lines.push(`## Review (${(sections.review ?? []).length})`, '');
-  table(lines, ['Tracker rows', 'Report', 'Company', 'Role', 'Country', 'Fit', 'Flags', 'Liveness date', 'Age days', 'Batch', 'Possible duplicates'],
+  table(lines, ['Tracker rows', 'Report', 'Company', 'Role', 'Country', 'Fit', 'Flags', 'Liveness status', 'Liveness date', 'Age days', 'Batch', 'Possible duplicates'],
     (sections.review ?? []).map((row) => [row.tracker_rows, row.report, row.company, row.role, row.country, row.fit,
-      row.flags.join(', '), row.liveness_date, row.age_days, row.batch ? `${row.batch.id}: ${row.batch.state}` : '', JSON.stringify(row.possibleDuplicates)]));
+      row.flags.join(', '), row.liveness_status, row.liveness_date, row.age_days, row.batch ? `${row.batch.id}: ${row.batch.state}` : '', JSON.stringify(row.possibleDuplicates)]));
   lines.push(`## Data problems (${(sections.dataProblems ?? []).length})`, '');
   table(lines, ['Type', 'Tracker rows', 'Report', 'Company', 'Role', 'Status', 'Flags', 'Details'],
     (sections.dataProblems ?? []).map((row) => [row.type, row.tracker_rows, row.report ?? '', row.company ?? '', row.role ?? '', row.status ?? '',

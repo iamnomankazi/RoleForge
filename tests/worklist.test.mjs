@@ -40,6 +40,11 @@ function makeWorklistFixture() {
     scanRuns: { latest: { manifest: { created_at: '2026-11-12T00:00:00Z' }, candidates: [
       { candidate_id: applyId, company: 'Example Talent Group', ats_tenant: 'example' },
     ] } },
+    livenessFiles: {
+      'run-2026-11-10/liveness-standard/liveness.json': {
+        [applyId]: { status: 'confirmed', checked_at: '2026-11-10T08:00:00Z' },
+      },
+    },
     batches: {
       'batch-open': { manifest: { batchId: 'batch-open', sourceRunId: 'run', candidates: [
         { candidate_id: applyId, company: 'Example Oy', title: 'Engineer' },
@@ -62,6 +67,8 @@ test('buildWorklist populates sections, honors closed states and reports data pr
   assert.equal(openApply[0].batch.id, 'batch-open');
   assert.equal(openApply[0].batch.state, 'not_opened');
   assert.equal(openApply[0].age_days, 4);
+  assert.equal(openApply[0].liveness_status, 'confirmed');
+  assert.equal(openApply[0].liveness_date, '2026-11-10');
   assert.ok(openApply.some((entry) => entry.tracker_rows === '#7' && entry.report === '017-current-apply.md'));
   assert.equal(review.length, 1);
   assert.equal(review[0].tracker_rows, '#2');
@@ -70,7 +77,8 @@ test('buildWorklist populates sections, honors closed states and reports data pr
   assert.equal(awaitingOutcome[0].applied_date, '2026-10-20');
   assert.equal(awaitingOutcome[0].last_notes, 'applied through portal');
   assert.equal(inProgress.length, 2);
-  assert.ok(inProgress.some((entry) => entry.candidate_id === ids.orphanId && !entry.open_tracker_group));
+  assert.ok(inProgress.some((entry) => entry.candidate_id === ids.orphanId && !entry.open_tracker_group && entry.match === 'none'));
+  assert.ok(inProgress.some((entry) => entry.candidate_id === ids.applyId && entry.match === 'id' && entry.group_status === 'Evaluated'));
   assert.ok(!openApply.some((entry) => entry.tracker_rows === '#4' || entry.tracker_rows === '#5'));
   assert.ok(!review.some((entry) => entry.tracker_rows === '#4' || entry.tracker_rows === '#5'));
   assert.ok(dataProblems.some((entry) => entry.type === 'report_without_tracker' && entry.report_number === 15));
@@ -85,6 +93,73 @@ test('renderer includes all requested section headings and markdown output', (t)
   const rendered = renderWorklist(buildWorklist({ root: fixture.root, now: '2026-11-14T12:00:00Z' }));
   for (const title of ['Open Apply', 'Awaiting outcome', 'In progress', 'Review', 'Data problems']) assert.ok(rendered.includes(`## ${title}`));
   assert.ok(rendered.includes('| Tracker rows | Report | Company | Role |'));
+  assert.ok(rendered.includes('| Liveness status | Liveness date |'));
+  assert.ok(rendered.includes('| Batch | Candidate ID | State | Match |'));
+  assert.ok(rendered.includes('| Group status |'));
+});
+
+test('liveness files choose the latest entry across IDs and fall back to report status', (t) => {
+  const primaryId = cid('a'); const equivalentId = cid('b'); const reportFallbackId = cid('c');
+  const fixture = createWorkTreeFixture({
+    tracker: trackerTable([
+      row(1, '2026-11-01', 'Example Oy', 'Latest Liveness', 'Evaluated', reportLink(21), `Canonical candidate ID: ${primaryId}`),
+      row(2, '2026-11-02', 'Example Oy', 'Report Fallback', 'Evaluated', reportLink(22), `Canonical candidate ID: ${reportFallbackId}`),
+    ]),
+    reports: {
+      '021-latest.md': reportMarkdown({ candidateId: primaryId, summary: summary('Example Oy', 'Latest Liveness') }),
+      '022-report-fallback.md': reportMarkdown({ candidateId: reportFallbackId, summary: summary('Example Oy', 'Report Fallback', 3.8, 'unconfirmed') }),
+    },
+    scanRuns: { mapping: { enrichment: [{ source_candidate_id: primaryId, candidate_id: equivalentId }] } },
+    livenessFiles: {
+      'run-a/liveness-old/liveness.json': { [primaryId]: { status: 'old', checked_at: '2026-11-10T08:00:00Z' } },
+      'run-b/liveness-repeat/liveness.json': { [primaryId]: { status: 'newer', checked_at: '2026-11-11T08:00:00Z' } },
+      'run-c/liveness-equivalent/liveness.json': { [equivalentId]: { status: 'latest-equivalent', checked_at: '2026-11-12T08:00:00Z' } },
+      'run-c/liveness-malformed/liveness.json': '{ malformed json',
+    },
+  });
+  t.after(() => fixture.cleanup());
+
+  const result = buildWorklist({ root: fixture.root, now: '2026-11-14T12:00:00Z' });
+  const actionRows = [...result.sections.openApply, ...result.sections.review];
+  const latest = actionRows.find((entry) => entry.tracker_rows === '#1');
+  const reportFallback = actionRows.find((entry) => entry.tracker_rows === '#2');
+  assert.equal(latest.liveness_status, 'latest-equivalent');
+  assert.equal(latest.liveness_date, '2026-11-12');
+  assert.equal(latest.age_days, 2);
+  assert.equal(reportFallback.liveness_status, 'unconfirmed');
+  assert.equal(reportFallback.liveness_date, null);
+  assert.equal(reportFallback.age_days, null);
+  assert.ok(result.warnings.some((message) => message.includes('liveness results') && message.includes('liveness-malformed')));
+});
+
+test('unmatched batch IDs use unique company and role fallback, while ambiguous and absent matches remain visible', (t) => {
+  const appliedId = cid('e'); const evaluatedId = cid('f'); const duplicateOneId = cid('0'); const duplicateTwoId = cid('1');
+  const tracker = trackerTable([
+    row(1, '2026-10-01', 'Example Oy', 'Designer', 'Applied', '', `Canonical candidate ID: ${appliedId}`),
+    row(2, '2026-10-02', 'Example Oy', 'Engineer', 'Evaluated', '', `Canonical candidate ID: ${evaluatedId}`),
+    row(3, '2026-10-03', 'Example Oy', 'Platform Engineer', 'Evaluated', '', `Canonical candidate ID: ${duplicateOneId}`),
+    row(4, '2026-10-04', 'Example Oy', 'Platform-Engineer', 'Evaluated', '', `Canonical candidate ID: ${duplicateTwoId}`),
+  ]);
+  const batch = (id, company, role) => ({ manifest: { candidates: [{ candidate_id: id, company, role }] },
+    state: { candidates: [{ candidate_id: id, state: 'not_opened' }] } });
+  const fixture = createWorkTreeFixture({ tracker, batches: {
+    applied: batch(cid('2'), 'Example Ltd', 'Designer'),
+    evaluated: batch(cid('3'), 'Example Oy', 'Engineer'),
+    ambiguous: batch(cid('4'), 'Example Oy', 'Platform Engineer'),
+    none: batch(cid('5'), 'Unmatched Inc', 'Unmatched Role'),
+  } });
+  t.after(() => fixture.cleanup());
+
+  const { inProgress } = buildWorklist({ root: fixture.root }).sections;
+  assert.equal(inProgress.length, 3);
+  const byBatch = Object.fromEntries(inProgress.map((entry) => [entry.batch_id, entry]));
+  assert.equal(byBatch.evaluated.match, 'text');
+  assert.equal(byBatch.evaluated.tracker_rows, '#2');
+  assert.equal(byBatch.evaluated.group_status, 'Evaluated');
+  assert.equal(byBatch.ambiguous.match, 'ambiguous');
+  assert.equal(byBatch.ambiguous.tracker_rows, '');
+  assert.equal(byBatch.none.match, 'none');
+  assert.ok(!byBatch.applied);
 });
 
 test('CLI JSON prints structure, --out writes markdown, and default output writes no files', (t) => {
