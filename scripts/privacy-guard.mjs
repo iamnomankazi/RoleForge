@@ -376,11 +376,11 @@ function collectProfileValues(profile, hard, soft) {
           : 'id_number';
       addEntry(hard, category, value);
     }
-    if (/^(?:name|full[_\s-]?name|display[_\s-]?name)$/i.test(key.trim()) && value.trim().length >= 3) {
-      addEntry(soft, 'name', value);
-    }
   };
   walk(profile);
+  // Only the candidate's own name: other `name` keys (role archetypes, proof points) are not personal names.
+  const fullName = profile?.candidate?.full_name;
+  if (typeof fullName === 'string' && fullName.trim().length >= 3) addEntry(soft, 'name', fullName);
 }
 
 function repoRelative(root, filePath) {

@@ -281,9 +281,13 @@ test('--build-denylist collects synthetic profile, tracker, and interview values
   const root = tempDir(t);
   mkdirSync(join(root, 'config'), { recursive: true });
   writeFileSync(join(root, 'config', 'profile.yml'), [
-    'name: Jane Example',
-    'email: jane.doe@example.com',
-    'phone: "+358 40 123 4567"',
+    'candidate:',
+    '  full_name: Jane Example',
+    '  email: jane.doe@example.com',
+    '  phone: "+358 40 123 4567"',
+    'target_roles:',
+    '  archetypes:',
+    '    - name: Generic Data Engineer',
     'address:',
     '  street: "123 Fictional Street"',
     '  postal_code: "00100 Fiction City"',
@@ -307,6 +311,7 @@ test('--build-denylist collects synthetic profile, tracker, and interview values
     'Jane Example', 'jane.doe@example.com', '+358 40 123 4567', '123 Fictional Street',
     '00100 Fiction City', '1990-01-02', 'ABCD123456', 'Example Oy', 'Riley Sample', 'Taylor Person',
   ]) assert.ok(values.has(value), `missing synthetic value ${value}`);
+  assert.ok(!values.has('Generic Data Engineer'), 'only the candidate full name is a personal name');
   assert.ok(json.sources.some((source) => source.path === 'config/profile.yml' && /^[a-f0-9]{64}$/.test(source.sha256)));
   assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /jane\.do@example\.com|Jane Example|Example Oy|Riley Sample/);
   assert.match(result.stdout, /\d+ hard, \d+ soft entries/);
