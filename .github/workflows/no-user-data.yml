@@ -36,7 +36,8 @@ jobs:
           AFTER: ${{ github.sha }}
         run: |
           if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-            BEFORE="$(git rev-list --max-parents=0 "$AFTER" | tail -n 1)"
+            # New branch or first push: scan every reachable commit, root included.
+            BEFORE=""
           fi
           node scripts/privacy-guard.mjs --paths-only --range "$BEFORE..$AFTER"
 
