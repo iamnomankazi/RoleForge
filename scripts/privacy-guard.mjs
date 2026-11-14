@@ -394,7 +394,9 @@ export function loadDenylist(filePath) {
     }
   }
 
-  const sourceRoot = dirname(dirname(resolve(filePath)));
+  // The build records its source root; older lists (and lists without it) use the default local/ layout.
+  const recordedRoot = typeof parsed.source_root === 'string' && isAbsolute(parsed.source_root) ? parsed.source_root : null;
+  const sourceRoot = recordedRoot ?? dirname(dirname(resolve(filePath)));
   for (const source of parsed.sources) {
     if (!source || typeof source.path !== 'string' || !(source.sha256 === null || /^[a-f0-9]{64}$/.test(source.sha256))) {
       throw new Error('denylist has an invalid source entry');
@@ -551,6 +553,7 @@ export async function buildDenylist({ root = mainWorktree(process.cwd()), out = 
   const denylist = {
     version: 1,
     built_at: new Date().toISOString(),
+    source_root: absoluteRoot,
     sources,
     hard: [...hard.values()],
     soft: [...soft.values()],

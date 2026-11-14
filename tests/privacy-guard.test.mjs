@@ -351,6 +351,27 @@ test('path parsing preserves spaces and checks copy destinations', (t) => {
   assert.match(result.stderr, /private path: local\/copied private file\.md/);
 });
 
+test('a denylist written outside local/ checks sources under the recorded root', (t) => {
+  const root = tempDir(t);
+  git(root, 'init');
+  git(root, 'config', 'user.email', 'test@example.invalid');
+  git(root, 'config', 'user.name', 'Privacy Guard Test');
+  mkdirSync(join(root, 'config'), { recursive: true });
+  writeFileSync(join(root, 'config', 'profile.yml'), 'candidate:\n  email: jane.doe@example.com\n');
+  mkdirSync(join(root, 'interview-prep'), { recursive: true });
+  writeFileSync(join(root, 'interview-prep', 'first.md'), 'Recruiter: Riley Sample\n');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'synthetic denylist inputs');
+  const out = join(root, 'privacy-denylist.json');
+  assert.equal(invoke(root, ['--build-denylist', '--root', root, '--out', out]).status, 0);
+  const check = () => invoke(root, ['--staged', '--repo', root, '--denylist', out]);
+  assert.equal(check().status, 0, 'a fresh list in a custom location is not stale');
+  writeFileSync(join(root, 'interview-prep', 'second.md'), 'Contact: Taylor Person\n');
+  const result = check();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /content scan not performed/);
+});
+
 test('denylist interview inventory changes are stale when files are added, removed, or changed', (t) => {
   const root = tempDir(t);
   git(root, 'init');
