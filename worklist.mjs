@@ -94,7 +94,7 @@ function loadLiveness(root, warnings) {
       continue;
     }
     for (const child of children) {
-      if (!child.isDirectory() || !child.name.startsWith('liveness')) continue;
+      if (!child.isDirectory() || (runDir.name !== 'liveness' && !child.name.startsWith('liveness'))) continue;
       const file = join(runPath, child.name, 'liveness.json');
       if (existsSync(file)) files.push(file);
     }

@@ -113,7 +113,7 @@ test('liveness files choose the latest entry across IDs and fall back to report 
     livenessFiles: {
       'run-a/liveness-old/liveness.json': { [primaryId]: { status: 'old', checked_at: '2026-11-10T08:00:00Z' } },
       'run-b/liveness-repeat/liveness.json': { [primaryId]: { status: 'newer', checked_at: '2026-11-11T08:00:00Z' } },
-      'run-c/liveness-equivalent/liveness.json': { [equivalentId]: { status: 'latest-equivalent', checked_at: '2026-11-12T08:00:00Z' } },
+      'liveness/run-c-20261112/liveness.json': { [equivalentId]: { status: 'latest-equivalent', checked_at: '2026-11-12T08:00:00Z' } },
       'run-c/liveness-malformed/liveness.json': '{ malformed json',
     },
   });
@@ -130,6 +130,72 @@ test('liveness files choose the latest entry across IDs and fall back to report 
   assert.equal(reportFallback.liveness_date, null);
   assert.equal(reportFallback.age_days, null);
   assert.ok(result.warnings.some((message) => message.includes('liveness results') && message.includes('liveness-malformed')));
+});
+
+for (const newerLayout of ['historical', 'default']) {
+  test(`latest liveness wins across layouts when ${newerLayout} is newer`, (t) => {
+    const id = cid('a');
+    const fixture = createWorkTreeFixture({
+      tracker: trackerTable([row(1, '2026-11-01', 'Example Oy', 'Engineer', 'Evaluated', reportLink(1), `Canonical candidate ID: ${id}`)]),
+      reports: { '001-fixture.md': reportMarkdown({ candidateId: id, summary: summary('Example Oy', 'Engineer') }) },
+      livenessFiles: Object.fromEntries([
+        ['historical', 'run-a/liveness-standard/liveness.json'],
+        ['default', 'liveness/run-a-20261112/liveness.json'],
+      ].map(([layout, file]) => [file, {
+        [id]: { status: layout, checked_at: layout === newerLayout ? '2026-11-12T08:00:00Z' : '2026-11-10T08:00:00Z' },
+      }])),
+    });
+    t.after(() => fixture.cleanup());
+
+    const result = buildWorklist({ root: fixture.root, now: '2026-11-14T12:00:00Z' });
+    assert.equal(result.groups.length, 1);
+    const [entry] = result.sections.openApply;
+    assert.equal(entry.liveness_status, newerLayout);
+    assert.equal(entry.liveness_date, '2026-11-12');
+    assert.equal(entry.age_days, 2);
+  });
+}
+
+test('default-layout liveness is found only at the required depth', (t) => {
+  const id = cid('a');
+  const fixture = createWorkTreeFixture({
+    tracker: trackerTable([row(1, '2026-11-01', 'Example Oy', 'Engineer', 'Evaluated', reportLink(1), `Canonical candidate ID: ${id}`)]),
+    reports: { '001-fixture.md': reportMarkdown({ candidateId: id, summary: summary('Example Oy', 'Engineer') }) },
+    livenessFiles: {
+      'liveness/run-a-20261112/liveness.json': { [id]: { status: 'confirmed', checked_at: '2026-11-12T08:00:00Z' } },
+      'liveness/liveness.json': { [id]: { status: 'too-shallow', checked_at: '2026-11-13T08:00:00Z' } },
+      'liveness/run-a/nested/liveness.json': { [id]: { status: 'too-deep', checked_at: '2026-11-13T08:00:00Z' } },
+      'run-b/other/liveness.json': { [id]: { status: 'unrelated', checked_at: '2026-11-13T08:00:00Z' } },
+      'run-b/liveness-standard/nested/liveness.json': { [id]: { status: 'historical-too-deep', checked_at: '2026-11-13T08:00:00Z' } },
+    },
+  });
+  t.after(() => fixture.cleanup());
+
+  const result = buildWorklist({ root: fixture.root, now: '2026-11-14T12:00:00Z' });
+  const [entry] = result.sections.openApply;
+  assert.equal(entry.liveness_status, 'confirmed');
+  assert.equal(entry.liveness_date, '2026-11-12');
+});
+
+test('liveness paths matching both layouts are processed once, including malformed files', (t) => {
+  const id = cid('a');
+  const fixture = createWorkTreeFixture({
+    tracker: trackerTable([row(1, '2026-11-01', 'Example Oy', 'Engineer', 'Evaluated', reportLink(1), `Canonical candidate ID: ${id}`)]),
+    reports: { '001-fixture.md': reportMarkdown({ candidateId: id, summary: summary('Example Oy', 'Engineer') }) },
+    livenessFiles: {
+      'liveness/liveness-valid/liveness.json': { [id]: { status: 'confirmed', checked_at: '2026-11-12T08:00:00Z' } },
+      'liveness/liveness-malformed/liveness.json': '{ malformed json',
+      'liveness/run-malformed/liveness.json': '[]',
+    },
+  });
+  t.after(() => fixture.cleanup());
+
+  const result = buildWorklist({ root: fixture.root, now: '2026-11-14T12:00:00Z' });
+  assert.equal(result.sections.openApply[0].liveness_status, 'confirmed');
+  for (const name of ['liveness-malformed', 'run-malformed']) {
+    const file = join(fixture.root, 'output', 'liveness', name, 'liveness.json');
+    assert.equal(result.warnings.filter((message) => message.includes(file)).length, 1);
+  }
 });
 
 test('unmatched batch IDs use unique company and role fallback, while ambiguous and absent matches remain visible', (t) => {
