@@ -5,6 +5,8 @@
   "private": true,
   "scripts": {
     "doctor": "node doctor.mjs",
+    "worklist": "node worklist.mjs",
+    "privacy-guard": "node scripts/privacy-guard.mjs",
     "backup": "node backup.mjs",
     "or": "node openrouter-runner.mjs",
     "or:scan": "node openrouter-runner.mjs scan",
