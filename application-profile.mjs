@@ -164,7 +164,7 @@ export function groundedFieldValue(profile, semantic, { country = null, jobCount
     linkedin: candidate.linkedin || null,
     github: candidate.github || null,
     website: candidate.portfolio_url || null,
-    university: /University of Eastern Finland/i.test(profile.currentStatus.summary || '') ? 'University of Eastern Finland' : null,
+    university: profile.formRules?.education?.university || profile.education.university || null,
     graduation: profile.education.expected_graduation_date || null,
     availability: profile.currentStatus.availability?.start || null,
     salary: profile.compensation.target_range || null,

@@ -54,7 +54,7 @@ test('Isar funding and current board support one review-required useful entry', 
   assert.equal(applicationSoftware.applicationEligibilityAssessment.status, 'review_required');
   assert.match(evidence.portalsEntry.notes, /^REVIEW REQUIRED/);
   assert.match(evidence.portalsEntry.notes, /mandatory question.*enrollment.*Germany/i);
-  assert.match(evidence.portalsEntry.notes, /University of Eastern Finland, Finland/);
+  assert.match(evidence.portalsEntry.notes, /University\b[^,]*, Finland/);
   assert.match(evidence.portalsEntry.notes, /German work authorization\/sponsorship/);
   assert.match(evidence.portalsEntry.notes, /No eligibility or sponsorship is inferred/i);
 });
@@ -107,11 +107,11 @@ test('mandatory Germany-enrollment question is not confused with search relevanc
     studentSoftware.applicationEligibilityAssessment.status,
     'not_supported_by_recorded_profile'
   );
-  assert.match(studentSoftware.applicationEligibilityAssessment.finding, /University of Eastern Finland in Finland/);
+  assert.match(studentSoftware.applicationEligibilityAssessment.finding, /University\b[^.]* in Finland/);
   assert.match(studentSoftware.applicationEligibilityAssessment.finding, /do not treat this posting as eligible/i);
 
   assert.equal(evidence.userEligibilityContext.locationCountry, 'Finland');
-  assert.match(evidence.userEligibilityContext.currentStatusSummary, /University of Eastern Finland/);
+  assert.match(evidence.userEligibilityContext.currentStatusSummary, /University\b/);
 
   const applicationSoftware = findRole(/Application Software Engineer/i);
   assert.equal(applicationSoftware.applicationEligibilityAssessment.status, 'review_required');

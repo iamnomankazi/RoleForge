@@ -1,4 +1,4 @@
-// Regression tests for the OP Pohjola (SuccessFactors) run: upload tiles that open a dialog or hide their file
+// Regression tests for a live SuccessFactors run: upload tiles that open a dialog or hide their file
 // input, "How did you hear" from discovery provenance, trainee salary, and yes/no skills questions.
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
@@ -123,7 +123,7 @@ after(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('OP-style form: grounded fields filled, both documents attached and verified, manual fields identified, no submit', async () => {
+test('SuccessFactors-style form: grounded fields filled, both documents attached and verified, manual fields identified, no submit', async () => {
   const page = await browser.newPage();
   await page.setContent(opStylePage());
   const result = await prepareOperationalApplicationForm(page, profile, artifacts, { context });
@@ -196,9 +196,9 @@ test('skills questions: Yes only for CV-listed skills; years, familiarity-only a
 test('"How did you hear" uses discovery provenance and salary respects trainee roles', () => {
   assert.equal(applicationSourceFromDiscovery(context), 'Duunitori');
   assert.equal(applicationSourceFromDiscovery({ discovery: { source: 'greenhouse-api', urls: ['https://boards.greenhouse.io/x/jobs/1'] } }), 'Company website');
-  assert.equal(applicationSourceFromDiscovery({ discovery: { source: 'websearch-handoff', urls: ['https://op-careers.fi/job/1'] } }), null);
+  assert.equal(applicationSourceFromDiscovery({ discovery: { source: 'websearch-handoff', urls: ['https://careers.example.fi/job/1'] } }), null);
   assert.equal(applicationSourceFromDiscovery({ discovery: { source: 'websearch-handoff',
-    urls: ['https://op-careers.fi/job/1', 'https://duunitori.fi/tyopaikat/tyo/x-1'] } }), 'Duunitori', 'lead source_url counts');
+    urls: ['https://careers.example.fi/job/1', 'https://duunitori.fi/tyopaikat/tyo/x-1'] } }), 'Duunitori', 'lead source_url counts');
   assert.equal(applicationSourceFromDiscovery({}), null, 'no universal LinkedIn default');
 
   const salary = { category: 'salary', semantic: 'salary' };
