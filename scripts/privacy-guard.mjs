@@ -49,7 +49,7 @@ function git(repo, args, input = undefined, allowOne = false) {
     input,
     encoding: 'utf8',
     windowsHide: true,
-    maxBuffer: 32 * 1024 * 1024,
+    maxBuffer: 1024 * 1024 * 1024,
   });
   if (result.error || (result.status !== 0 && !(allowOne && result.status === 1))) {
     throw new Error('git operation failed');
@@ -609,10 +609,11 @@ function commitParents(repo, commit) {
   return line.slice(1);
 }
 
-function commitDiff(repo, commit) {
+function commitDiff(repo, commit, { pathsOnly = false } = {}) {
   const parents = commitParents(repo, commit);
   const parent = parents[0] ?? emptyTree(repo);
-  const diff = git(repo, ['diff', '--no-ext-diff', '--no-color', '--binary', '--find-renames', '--unified=0', parent, commit, '--']).stdout;
+  // Paths-only checks use the NUL-delimited name-status below; the content diff can be very large.
+  const diff = pathsOnly ? '' : git(repo, ['diff', '--no-ext-diff', '--no-color', '--binary', '--find-renames', '--unified=0', parent, commit, '--']).stdout;
   const pathInfo = changedPathInfo(repo, ['diff', '-z', '--name-status', '-C', '-M', parent, commit, '--']);
   return { diff, base: parent, ...pathInfo };
 }
@@ -742,7 +743,7 @@ async function runCli(argv) {
     if (options.mode === 'range') {
       const { base, head } = parseRange(options.range);
       for (const commit of listRangeCommits(repo, base, head)) {
-        const committed = commitDiff(repo, commit);
+        const committed = commitDiff(repo, commit, { pathsOnly: options['paths-only'] });
         const checked = checkOne(committed.diff, {
           repo, base: committed.base, denylist, pathsOnly: options['paths-only'],
           pathFindings: committed.pathFindings, deletedPaths: committed.deletedPaths,
