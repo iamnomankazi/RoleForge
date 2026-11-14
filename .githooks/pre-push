@@ -1,0 +1,6 @@
+#!/bin/sh
+# RoleForge privacy guard. Refuses a push that would publish user-layer files or private
+# identifiers. Activate once per checkout: git config core.hooksPath .githooks
+# Needs local/privacy-denylist.json in the main checkout (node scripts/privacy-guard.mjs --build-denylist).
+root="$(git rev-parse --show-toplevel)" || exit 1
+exec node "$root/scripts/privacy-guard.mjs" --pre-push "$1"

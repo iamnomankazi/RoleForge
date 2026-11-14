@@ -1,6 +1,8 @@
 name: Tests
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
 
@@ -15,9 +17,10 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
-      # Skip the postinstall (npx playwright install chromium); the tests
-      # never launch a browser, so the ~170 MB download is pure CI overhead.
+      # Skip the postinstall and install Chromium explicitly: the application-form
+      # and PDF tests launch a headless browser against local fixtures.
       - run: npm install --ignore-scripts
+      - run: npx playwright install --with-deps chromium
       - run: node test-all.mjs --quick
       - name: Go dashboard tests
         run: go test ./...

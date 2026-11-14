@@ -9,6 +9,7 @@
 *.tsx text eol=lf
 *.go text eol=lf
 *.sh text eol=lf
+.githooks/* text eol=lf
 *.ps1 text eol=lf
 *.md text eol=lf
 *.mdx text eol=lf

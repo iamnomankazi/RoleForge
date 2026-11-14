@@ -5,9 +5,13 @@ name: No user data in PRs
 # enter the repo — they are personal job-search data. Sample/fixture data belongs
 # under examples/. Tracked scaffolding (.gitkeep keepers, dir READMEs) is exempt.
 # Paths mirror USER_PATHS in update-system.mjs. Uses the API (listFiles) so it
-# works for fork PRs too.
+# works for fork PRs too. On pushes to main, every pushed commit is checked with
+# scripts/privacy-guard.mjs --paths-only (CI has no denylist, so no content scan;
+# the local pre-push hook in .githooks/ is the real control).
 
 on:
+  push:
+    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened]
 
@@ -16,7 +20,28 @@ permissions:
   pull-requests: read
 
 jobs:
+  push-paths:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Check pushed commits for user-layer paths
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            BEFORE="$(git rev-list --max-parents=0 "$AFTER" | tail -n 1)"
+          fi
+          node scripts/privacy-guard.mjs --paths-only --range "$BEFORE..$AFTER"
+
   guard:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/github-script@v9
