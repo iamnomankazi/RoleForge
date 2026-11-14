@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
-import { prepareOperationalApplicationForm } from '../application-form-engine.mjs';
+import { buildOperationalFormPlan, prepareOperationalApplicationForm } from '../application-form-engine.mjs';
 
 const BASE = 'https://acme.wd3.myworkdayjobs.com/en-US/acme/job/Helsinki/Engineer_R100001/apply/my-experience';
 const context = { batchId: 'workday-add-entries-fixture', candidate: { candidate_id: `cand_v1_${'a'.repeat(64)}` } };
@@ -44,6 +44,26 @@ const profile = {
 `,
   articleDigestText: '', answerBankText: '', profileModeText: '',
 };
+
+test('expected graduation dates retain their grounded precision and invalid months stay unresolved', () => {
+  const fields = ['year', 'month'].map((part) => ({
+    fieldId: `end-${part}`, id: `end-${part}`, label: `End date ${part}`,
+    questionText: `End date ${part}`, tag: 'input', type: 'text', required: true, visible: true, value: '',
+    educationContext: true, educationSchool: 'Example University',
+  }));
+  for (const [expected, values] of [
+    ['2026-06', { 'end-year': '2026', 'end-month': 'June' }],
+    ['2026', { 'end-year': '2026' }],
+    ['2026-00', {}], ['2026-13', {}], ['expected in 2026', {}], ['', {}],
+  ]) {
+    const plan = buildOperationalFormPlan({ fields, controls: [] }, {
+      ...profile, education: { expected_graduation_date: expected },
+    });
+    assert.deepEqual(Object.fromEntries(plan.actions.map((action) => [action.fieldId, action.value])), values, expected);
+    assert.deepEqual(plan.unresolvedFields.map((field) => field.fieldId),
+      fields.filter((field) => !(field.fieldId in values)).map((field) => field.fieldId), expected);
+  }
+});
 
 const stepBar = (step, label, nextLabel = 'Next step') => `<ol data-automation-id="progressBar">
   <li data-automation-id="progressBarActiveStep"><div><label>current step ${step} of 6</label><label>${label}</label></div></li>
@@ -216,6 +236,7 @@ test('empty Workday entry sections are populated from grounded CV entries and th
 
     assert.deepEqual(await page.evaluate(() => window.adds), { work: 2, education: 2, languages: 2, websites: 2 });
     const savedValues = await page.evaluate(() => window.savedValues);
+    assert.ok(savedValues, JSON.stringify({ gate: result.gate, unresolved: result.evidence.unresolvedFields, log }));
     assert.deepEqual(savedValues.jobs, ['Current Analyst', 'Data Assistant']);
     assert.deepEqual(savedValues.companies, ['Example Labs', 'Sample Group']);
     assert.deepEqual(savedValues.descriptions, ['- Built reliable tools\n- Improved reporting', '- Prepared weekly reports']);

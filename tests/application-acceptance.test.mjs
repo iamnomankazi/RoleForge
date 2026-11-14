@@ -206,7 +206,11 @@ test('controlled local Phase 4 scan-to-form acceptance stops safely at form_prep
             const url = route.request().url();
             navigation.push(url);
             if (url === listingUrl) return route.fulfill({ status: 200, contentType: 'text/html', body: listingFixture });
-            if (url === applyUrl) return route.fulfill({ status: 200, contentType: 'text/html', body: greenhouseFixture });
+            // City autocomplete must identify the country, even when it is also selected separately.
+            const qualifiedCityFixture = greenhouseFixture
+              .replace('hidden>Example City</div>', 'hidden>Example City, Finland</div>')
+              .replace(".value = 'Example City';", ".value = 'Example City, Finland';");
+            if (url === applyUrl) return route.fulfill({ status: 200, contentType: 'text/html', body: qualifiedCityFixture });
             return route.fulfill({ status: 404, contentType: 'text/plain', body: 'fixture route not found' });
           });
           sentinelPage = await context.newPage();
@@ -219,11 +223,11 @@ test('controlled local Phase 4 scan-to-form acceptance stops safely at form_prep
       },
     });
 
-    assert.equal(result.state, 'form_prepared');
-    assert.equal(result.submissionAvailable, false);
-    assert.equal(result.trackerUpdated, false);
     const loaded = loadBatchState(batch.manifestPath, { root });
     const state = loaded.state.candidates[0];
+    assert.equal(result.state, 'form_prepared', JSON.stringify(state.formPreparation?.unresolvedFields));
+    assert.equal(result.submissionAvailable, false);
+    assert.equal(result.trackerUpdated, false);
     assert.equal(state.state, 'form_prepared');
     assert.equal(state.formPreparation.reviewComplete, true);
     assert.equal(state.formPreparation.finalAction.activated, false);

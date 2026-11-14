@@ -379,7 +379,10 @@ function cvEducationData(profile) {
 }
 
 function expectedGraduationSegments(profile) {
-  const match = cleanFormText(profile?.education?.expected_graduation_date).match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  const text = cleanFormText(profile?.education?.expected_graduation_date);
+  // A year or ISO year-month grounds those segments without supplying a day.
+  if (/^\d{4}(?:-\d{2})?$/.test(text)) return groundedDateSegments(text);
+  const match = text.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
   if (!match) return null;
   const [, day, month, year] = match;
   const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
