@@ -62,7 +62,7 @@ function addProblem(item, message) {
 }
 
 function normalizedIdentity(value) {
-  // Scanner company names can be lowercase slugs ("doctolib"); the letter may use the proper casing.
+  // Scanner company names can be lowercase slugs ("examplecorp"); the letter may use the proper casing.
   return String(value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 

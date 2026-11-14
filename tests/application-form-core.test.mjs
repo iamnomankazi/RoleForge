@@ -73,14 +73,14 @@ function coverProvenance(candidateId = 'fixture-cover') {
 function createFixtureArtifacts() {
   const dir = mkdtempSync(join(tmpdir(), 'career-ops-captcha-form-'));
   const cv = join(dir, 'Alex Example Software Backend CV.pdf');
-  const cover = join(dir, 'Aiven Software Engineer Cover Letter.pdf');
+  const cover = join(dir, 'Examplesoft Software Engineer Cover Letter.pdf');
   writeFileSync(cv, '%PDF-1.4 fixture CV');
   writeFileSync(cover, '%PDF-1.4 fixture cover');
   return {
     dir,
     artifacts: {
       cv: { resolvedPath: cv, intendedFilename: 'Alex Example Software Backend CV.pdf', sha256: 'sha256:cv' },
-      coverLetter: { resolvedPath: cover, intendedFilename: 'Aiven Software Engineer Cover Letter.pdf', sha256: 'sha256:cover' },
+      coverLetter: { resolvedPath: cover, intendedFilename: 'Examplesoft Software Engineer Cover Letter.pdf', sha256: 'sha256:cover' },
       coverLetterTextContent: syntheticProfile.cvText,
       coverLetterTextProvenance: coverProvenance(),
     },

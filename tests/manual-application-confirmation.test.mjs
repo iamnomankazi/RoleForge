@@ -37,7 +37,7 @@ test('requires an explicit user confirmation', async () => {
   try {
     await assert.rejects(
       confirmManualApplication(
-        { company: 'Aiven', role: 'Software Engineer, Aiven Apps' },
+        { company: 'Examplesoft', role: 'Software Engineer, Examplesoft Apps' },
         { trackerPath: fx.trackerPath, now: new Date(2026, 6, 28) },
       ),
       (error) => error instanceof ManualApplicationError && error.code === 'confirmation-required',
@@ -53,8 +53,8 @@ test('creates an absent role with today and the canonical source', async () => {
   try {
     const result = await confirmManualApplication(
       {
-        company: 'Aiven',
-        role: 'Software Engineer, Aiven Apps',
+        company: 'Examplesoft',
+        role: 'Software Engineer, Examplesoft Apps',
         userConfirmed: true,
       },
       { trackerPath: fx.trackerPath, now: new Date(2026, 6, 28, 23, 59) },
@@ -64,14 +64,14 @@ test('creates an absent role with today and the canonical source', async () => {
     assert.deepEqual(rowsAt(fx.trackerPath), [{
       num: 1,
       date: '2026-07-28',
-      company: 'Aiven',
-      role: 'Software Engineer, Aiven Apps',
+      company: 'Examplesoft',
+      role: 'Software Engineer, Examplesoft Apps',
       score: 'N/A',
       status: 'Applied',
       pdf: '',
       report: '',
       notes: MANUAL_SUBMISSION_SOURCE,
-      raw: `| 1 | 2026-07-28 | Aiven | Software Engineer, Aiven Apps | N/A | Applied |  |  | ${MANUAL_SUBMISSION_SOURCE} |`,
+      raw: `| 1 | 2026-07-28 | Examplesoft | Software Engineer, Examplesoft Apps | N/A | Applied |  |  | ${MANUAL_SUBMISSION_SOURCE} |`,
     }]);
   } finally {
     fx.cleanup();
@@ -82,8 +82,8 @@ test('is idempotent and never creates a duplicate', async () => {
   const fx = fixture();
   try {
     const options = {
-      company: 'Aiven',
-      role: 'Software Engineer, Aiven Context',
+      company: 'Examplesoft',
+      role: 'Software Engineer, Examplesoft Context',
       userConfirmed: true,
     };
     await confirmManualApplication(options, {
@@ -104,13 +104,13 @@ test('is idempotent and never creates a duplicate', async () => {
 
 test('updates an existing entry while preserving its artifacts and adding source once', async () => {
   const fx = fixture(
-    '| 7 | 2026-07-20 | Aiven | Software Engineer, Aiven Apps | 4.4/5 | Evaluated | cv.pdf | [7](../reports/007.md) | Existing note |\n',
+    '| 7 | 2026-07-20 | Examplesoft | Software Engineer, Examplesoft Apps | 4.4/5 | Evaluated | cv.pdf | [7](../reports/007.md) | Existing note |\n',
   );
   try {
     await confirmManualApplication(
       {
-        company: 'Aiven',
-        role: 'software engineer — aiven apps',
+        company: 'Examplesoft',
+        role: 'software engineer — examplesoft apps',
         date: '2026-07-27',
         userConfirmed: true,
       },
@@ -131,13 +131,13 @@ test('updates an existing entry while preserving its artifacts and adding source
 
 test('requires clarification when company-only context matches multiple roles', async () => {
   const fx = fixture(
-    '| 1 | 2026-07-20 | Aiven | Software Engineer, Aiven Apps | N/A | Evaluated |  |  |  |\n'
-    + '| 2 | 2026-07-20 | Aiven | Software Engineer, Aiven Context | N/A | Evaluated |  |  |  |\n',
+    '| 1 | 2026-07-20 | Examplesoft | Software Engineer, Examplesoft Apps | N/A | Evaluated |  |  |  |\n'
+    + '| 2 | 2026-07-20 | Examplesoft | Software Engineer, Examplesoft Context | N/A | Evaluated |  |  |  |\n',
   );
   try {
     await assert.rejects(
       confirmManualApplication(
-        { company: 'Aiven', userConfirmed: true },
+        { company: 'Examplesoft', userConfirmed: true },
         { trackerPath: fx.trackerPath },
       ),
       (error) => error instanceof ManualApplicationError
