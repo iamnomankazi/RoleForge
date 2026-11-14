@@ -105,6 +105,29 @@ test('parses added line numbers, binary sections, and deleted paths', () => {
   assert.equal(parsed[2].deleted, true);
 });
 
+test('hunk lines that resemble file headers remain content', (t) => {
+  const repo = makeRepo(t);
+  const list = denylist(repo, { hard: [{ category: 'email', value: SAMPLE_EMAIL }] });
+  const patch = [
+    'diff --git a/cv.md b/cv.md',
+    '--- a/cv.md',
+    '+++ b/cv.md',
+    '@@ -0,0 +1,2 @@',
+    '+++ /dev/null',
+    `+Contact ${SAMPLE_EMAIL}`,
+  ].join('\n');
+  const parsed = parseUnifiedDiff(patch);
+  assert.equal(parsed[0].newPath, 'cv.md');
+  assert.deepEqual(parsed[0].addedLines.map(({ text }) => text), [`++ /dev/null`, `Contact ${SAMPLE_EMAIL}`]);
+  const patchPath = join(repo, 'change.diff');
+  writeFileSync(patchPath, patch);
+  const result = invoke(repo, ['--patch', patchPath, '--repo', repo, '--denylist', list]);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /private path: cv\.md/);
+  assert.match(result.stderr, /cv\.md:2 email/);
+  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, new RegExp(SAMPLE_EMAIL.replace('.', '\\.')));
+});
+
 test('path denylist blocks private paths and allows README/.gitkeep scaffolds', (t) => {
   const repo = makeRepo(t);
   const list = denylist(repo);
@@ -261,9 +284,157 @@ test('--patch handles binary additions and deletion-only content', (t) => {
   const patchFile = join(repo, 'change.diff');
   writeFileSync(patchFile, patch);
   const result = invoke(repo, ['--patch', patchFile, '--repo', repo, '--denylist', list]);
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /content scan performed/);
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /binary file: docs\/image\.bin/);
+  const acknowledged = invoke(repo, ['--patch', patchFile, '--repo', repo, '--denylist', list], {
+    env: { ROLEFORGE_PRIVACY_ACK: 'reviewed binary addition' },
+  });
+  assert.equal(acknowledged.status, 0, acknowledged.stderr);
+  assert.match(acknowledged.stderr, /acknowledged binary file: docs\/image\.bin/);
+  assert.match(acknowledged.stdout, /content scan performed/);
   assert.equal(base.length > 0, true);
+});
+
+test('binary additions and modifications block unless acknowledged; binary deletion is allowed', (t) => {
+  const repo = makeRepo(t);
+  const list = denylist(repo);
+  const binaryPath = join(repo, 'docs', 'media.bin');
+  writeFileSync(binaryPath, Buffer.from([0, 1, 2, 3, 255]));
+  git(repo, 'add', 'docs/media.bin');
+  let result = invoke(repo, ['--staged', '--repo', repo, '--denylist', list]);
+  assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stderr, /binary file: docs\/media\.bin/);
+  result = invoke(repo, ['--staged', '--repo', repo, '--denylist', list], {
+    env: { ROLEFORGE_PRIVACY_ACK: 'reviewed binary file' },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /acknowledged binary file: docs\/media\.bin/);
+
+  commitAll(repo, 'add synthetic binary');
+  writeFileSync(binaryPath, Buffer.from([255, 3, 2, 1, 0]));
+  git(repo, 'add', 'docs/media.bin');
+  result = invoke(repo, ['--staged', '--repo', repo, '--denylist', list]);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /binary file: docs\/media\.bin/);
+
+  git(repo, 'reset', '--hard', 'HEAD');
+  rmSync(binaryPath);
+  git(repo, 'add', '-u', 'docs/media.bin');
+  result = invoke(repo, ['--staged', '--repo', repo, '--denylist', list]);
+  assert.equal(result.status, 0, result.stderr);
+  const deletionPatch = join(repo, 'delete-binary.diff');
+  writeFileSync(deletionPatch, git(repo, 'diff', '--cached', '--binary', 'HEAD', '--'));
+  result = invoke(repo, ['--patch', deletionPatch, '--repo', repo, '--denylist', list]);
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('path parsing preserves spaces and checks copy destinations', (t) => {
+  const repo = makeRepo(t);
+  const list = denylist(repo);
+  const parsed = parseUnifiedDiff([
+    'diff --git a/docs/source file.md b/docs/source file.md',
+    'old mode 100644',
+    'new mode 100755',
+  ].join('\n'));
+  assert.equal(parsed[0].path, 'docs/source file.md');
+
+  const patch = [
+    'diff --git a/docs/source.md b/local/copied private file.md',
+    'similarity index 100%',
+    'copy from docs/source.md',
+    'copy to local/copied private file.md',
+  ].join('\n');
+  const patchPath = join(repo, 'copy.diff');
+  writeFileSync(patchPath, patch);
+  const result = invoke(repo, ['--patch', patchPath, '--repo', repo, '--denylist', list]);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /private path: local\/copied private file\.md/);
+});
+
+test('denylist interview inventory changes are stale when files are added, removed, or changed', (t) => {
+  const root = tempDir(t);
+  git(root, 'init');
+  git(root, 'config', 'user.email', 'test@example.invalid');
+  git(root, 'config', 'user.name', 'Privacy Guard Test');
+  mkdirSync(join(root, 'config'), { recursive: true });
+  writeFileSync(join(root, 'config', 'profile.yml'), 'candidate:\n  email: jane.doe@example.com\n');
+  mkdirSync(join(root, 'interview-prep'), { recursive: true });
+  writeFileSync(join(root, 'interview-prep', 'first.md'), 'Recruiter: Riley Sample\n');
+  git(root, 'add', '.');
+  git(root, 'commit', '-m', 'synthetic denylist inputs');
+  const out = join(root, 'local', 'privacy-denylist.json');
+  const build = () => invoke(root, ['--build-denylist', '--root', root, '--out', out]);
+  const check = () => invoke(root, ['--staged', '--repo', root, '--denylist', out]);
+
+  let result = build();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(check().status, 0, 'inventory is fresh immediately after building');
+  let json = JSON.parse(readFileSync(out, 'utf8'));
+  assert.ok(json.sources.some((source) => source.path === 'interview-prep/first.md' && /^[a-f0-9]{64}$/.test(source.sha256)));
+  assert.ok(!json.sources.some((source) => source.path === 'interview-prep/*.md'));
+  json.sources.push({ path: 'interview-prep/*.md', sha256: null });
+  writeFileSync(out, JSON.stringify(json));
+  result = check();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /content scan not performed/);
+  result = build();
+  assert.equal(result.status, 0, result.stderr);
+
+  writeFileSync(join(root, 'interview-prep', 'second.md'), 'Contact Taylor Person\n');
+  result = check();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /content scan not performed/);
+
+  result = build();
+  assert.equal(result.status, 0, result.stderr);
+  rmSync(join(root, 'interview-prep', 'first.md'));
+  result = check();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /content scan not performed/);
+
+  result = build();
+  assert.equal(result.status, 0, result.stderr);
+  writeFileSync(join(root, 'interview-prep', 'second.md'), 'Contact Morgan Sample\n');
+  result = check();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /content scan not performed/);
+});
+
+test('diagnostics redact hard values from paths, soft values, and acknowledgement reasons', (t) => {
+  const repo = makeRepo(t);
+  const list = denylist(repo, {
+    hard: [
+      { category: 'email', value: SAMPLE_EMAIL },
+      { category: 'phone', value: SAMPLE_PHONE },
+    ],
+    soft: [{ category: 'company', value: SAMPLE_EMAIL }],
+  });
+  const privatePath = `local/${SAMPLE_EMAIL}-358-40-123-4567.md`;
+  stageText(repo, privatePath, `Contact ${SAMPLE_EMAIL}.\n`);
+  let result = invoke(repo, ['--staged', '--repo', repo, '--denylist', list]);
+  assert.equal(result.status, 1);
+  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /jane\.do@example\.com/i);
+  result = invoke(repo, ['--staged', '--repo', repo, '--denylist', list], {
+    env: { ROLEFORGE_PRIVACY_ACK: `reviewed ${SAMPLE_EMAIL.toUpperCase()} and +358-40-123-4567` },
+  });
+  assert.equal(result.status, 1);
+  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /jane\.do@example\.com/i);
+  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /358\D*40\D*123\D*4567/);
+  assert.match(result.stderr, /private path: local\/\[REDACTED\]/);
+});
+
+test('--range with an empty base scans the root commit', (t) => {
+  const repo = tempDir(t);
+  git(repo, 'init');
+  git(repo, 'config', 'user.email', 'test@example.invalid');
+  git(repo, 'config', 'user.name', 'Privacy Guard Test');
+  writeFileSync(join(repo, 'cv.md'), 'Synthetic private root content.\n');
+  git(repo, 'add', '.');
+  git(repo, 'commit', '-m', 'root with private path');
+  const head = git(repo, 'rev-parse', 'HEAD');
+  const result = invoke(repo, ['--paths-only', '--range', `..${head}`, '--repo', repo]);
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /private path: cv\.md/);
 });
 
 test('binary additions still receive private-path checks', (t) => {

@@ -112,9 +112,49 @@ function stripDiffPrefix(value, prefix) {
 
 function parseHeaderPath(line, marker) {
   const raw = line.slice(marker.length).replace(/^\s+/, '');
-  const token = readGitToken(raw).token;
+  const token = raw.startsWith('"')
+    ? readGitToken(raw).token
+    : raw.split('\t', 1)[0].trimEnd();
   if (!token || token === '/dev/null') return null;
   return stripDiffPrefix(token, marker === '+++ ' ? 'b/' : 'a/');
+}
+
+function parseMetadataPath(line, marker) {
+  const raw = line.slice(marker.length).trimStart();
+  const value = raw.startsWith('"') ? readGitToken(raw).token : raw.trimEnd();
+  return value ? normalizeRepoPath(value) : null;
+}
+
+function parseDiffGitPaths(line) {
+  const raw = line.slice('diff --git '.length);
+  if (raw.startsWith('"')) {
+    const first = readGitToken(raw);
+    const second = readGitToken(first.rest);
+    return {
+      oldPath: first.token ? stripDiffPrefix(first.token, 'a/') : null,
+      newPath: second.token ? stripDiffPrefix(second.token, 'b/') : null,
+    };
+  }
+
+  // Unquoted paths containing spaces are ambiguous unless both sides are equal.
+  // Look for the separator from the end so a path can itself contain " b/".
+  const separators = [...raw.matchAll(/ b\//g)];
+  for (const separator of separators.reverse()) {
+    const index = separator.index;
+    const oldRaw = raw.slice(0, index);
+    const newRaw = raw.slice(index + 1);
+    if (!oldRaw.startsWith('a/') || !newRaw.startsWith('b/')) continue;
+    const oldPath = stripDiffPrefix(oldRaw, 'a/');
+    const newPath = stripDiffPrefix(newRaw, 'b/');
+    if (oldPath === newPath) return { oldPath, newPath };
+  }
+
+  const first = readGitToken(raw);
+  const second = readGitToken(first.rest);
+  return {
+    oldPath: first.token ? stripDiffPrefix(first.token, 'a/') : null,
+    newPath: second.token ? stripDiffPrefix(second.token, 'b/') : null,
+  };
 }
 
 /** Parse a Git-style unified diff into per-file paths and added lines. */
@@ -123,6 +163,8 @@ export function parseUnifiedDiff(diffText) {
   let current = null;
   let newLine = 0;
   let inHunk = false;
+  let oldRemaining = 0;
+  let newRemaining = 0;
 
   const flush = () => {
     if (!current) return;
@@ -135,64 +177,79 @@ export function parseUnifiedDiff(diffText) {
   };
 
   for (const line of String(diffText ?? '').split(/\r?\n/)) {
-    if (line.startsWith('diff --git ')) {
+    if (line.startsWith('diff --git ') && !inHunk) {
       flush();
-      const first = readGitToken(line.slice('diff --git '.length));
-      const second = readGitToken(first.rest);
+      const paths = parseDiffGitPaths(line);
       current = {
-        oldPath: first.token ? stripDiffPrefix(first.token, 'a/') : null,
-        newPath: second.token ? stripDiffPrefix(second.token, 'b/') : null,
+        oldPath: paths.oldPath,
+        newPath: paths.newPath,
         addedLines: [],
         binary: false,
       };
       continue;
     }
+
+    // Hunk counts distinguish content that happens to look exactly like file
+    // metadata (for example an added line beginning with "+++").
+    if (inHunk) {
+      if (line.startsWith('\\')) continue;
+      if (line.startsWith('+')) {
+        current.addedLines.push({ line: newLine, text: line.slice(1) });
+        newLine += 1;
+        newRemaining -= 1;
+      } else if (line.startsWith('-')) {
+        oldRemaining -= 1;
+      } else if (line.startsWith(' ')) {
+        newLine += 1;
+        oldRemaining -= 1;
+        newRemaining -= 1;
+      } else {
+        inHunk = false;
+      }
+      if (inHunk && oldRemaining <= 0 && newRemaining <= 0) inHunk = false;
+      if (inHunk || line.startsWith('+') || line.startsWith('-') || line.startsWith(' ')) continue;
+    }
+
     if (!current && line.startsWith('--- ')) {
       current = { oldPath: null, newPath: null, addedLines: [], binary: false };
     }
     if (!current) continue;
 
-    if (line.startsWith('rename from ')) {
-      current.oldPath = normalizeRepoPath(decodeGitQuoted(line.slice('rename from '.length)));
+    if (line.startsWith('new file mode ')) {
+      current.oldPath = null;
       continue;
     }
-    if (line.startsWith('rename to ')) {
-      current.newPath = normalizeRepoPath(decodeGitQuoted(line.slice('rename to '.length)));
+    if (line.startsWith('deleted file mode ')) {
+      current.newPath = null;
+      continue;
+    }
+    if (line.startsWith('rename from ') || line.startsWith('copy from ')) {
+      current.oldPath = parseMetadataPath(line, line.startsWith('rename from ') ? 'rename from ' : 'copy from ');
+      continue;
+    }
+    if (line.startsWith('rename to ') || line.startsWith('copy to ')) {
+      current.newPath = parseMetadataPath(line, line.startsWith('rename to ') ? 'rename to ' : 'copy to ');
       continue;
     }
     if (line.startsWith('--- ')) {
       current.oldPath = parseHeaderPath(line, '--- ');
-      inHunk = false;
       continue;
     }
     if (line.startsWith('+++ ')) {
       current.newPath = parseHeaderPath(line, '+++ ');
-      inHunk = false;
       continue;
     }
     if (/^(?:Binary files .* differ|GIT binary patch)$/.test(line)) {
       current.binary = true;
-      inHunk = false;
       continue;
     }
-    const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    const hunk = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
     if (hunk) {
-      newLine = Number(hunk[2]);
-      inHunk = true;
+      oldRemaining = hunk[2] === undefined ? 1 : Number(hunk[2]);
+      newLine = Number(hunk[3]);
+      newRemaining = hunk[4] === undefined ? 1 : Number(hunk[4]);
+      inHunk = oldRemaining > 0 || newRemaining > 0;
       continue;
-    }
-    if (!inHunk) continue;
-    if (line.startsWith('+')) {
-      current.addedLines.push({ line: newLine, text: line.slice(1) });
-      newLine += 1;
-    } else if (line.startsWith(' ')) {
-      newLine += 1;
-    } else if (line.startsWith('-')) {
-      // Removed lines never participate in content scanning.
-    } else if (line.startsWith('\\')) {
-      // The "no newline" marker is diff metadata.
-    } else {
-      inHunk = false;
     }
   }
   flush();
@@ -271,7 +328,14 @@ export function checkDiff(diffText, options = {}) {
     if (file.newPath !== null && targetPath && isPrivatePath(targetPath)) {
       findings.push({ type: 'path', path: targetPath });
     }
-    if (options.pathsOnly || file.binary || file.newPath === null || !targetPath) continue;
+    if (options.pathsOnly || file.newPath === null || !targetPath) continue;
+    if (file.binary) {
+      if (options.deletedPaths?.has(targetPath)) continue;
+      findings.push(ack === undefined
+        ? { type: 'binary', path: targetPath }
+        : { type: 'binary-ack', path: targetPath, reason: ack });
+      continue;
+    }
 
     for (const added of file.addedLines) {
       for (const entry of denylist.hard ?? []) {
@@ -335,6 +399,7 @@ export function loadDenylist(filePath) {
     if (!source || typeof source.path !== 'string' || !(source.sha256 === null || /^[a-f0-9]{64}$/.test(source.sha256))) {
       throw new Error('denylist has an invalid source entry');
     }
+    if (source.path === 'interview-prep/*.md') throw new Error('denylist is stale');
     const sourcePath = isAbsolute(source.path) ? source.path : resolve(sourceRoot, source.path);
     if (!existsSync(sourcePath)) continue;
     let currentHash;
@@ -346,6 +411,28 @@ export function loadDenylist(filePath) {
     if (typeof source.sha256 !== 'string' || source.sha256 !== currentHash) {
       throw new Error('denylist is stale');
     }
+  }
+
+  const recordedInterviewFiles = new Map(parsed.sources
+    .filter((source) => /^interview-prep\/[^/]+\.md$/i.test(normalizeRepoPath(source.path)))
+    .map((source) => [normalizeRepoPath(source.path), source.sha256]));
+  const interviewDir = join(sourceRoot, 'interview-prep');
+  let currentInterviewFiles = [];
+  try {
+    if (existsSync(interviewDir)) {
+      currentInterviewFiles = readdirSync(interviewDir, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && entry.name.toLocaleLowerCase().endsWith('.md'))
+        .map((entry) => {
+          const path = `interview-prep/${entry.name}`;
+          return [path, sha256(readFileSync(join(interviewDir, entry.name)))];
+        });
+    }
+  } catch {
+    throw new Error('denylist source cannot be checked');
+  }
+  if (recordedInterviewFiles.size !== currentInterviewFiles.length
+    || currentInterviewFiles.some(([path, hash]) => recordedInterviewFiles.get(path) !== hash)) {
+    throw new Error('denylist is stale');
   }
   return parsed;
 }
@@ -448,7 +535,6 @@ export async function buildDenylist({ root = mainWorktree(process.cwd()), out = 
       .map((entry) => join(interviewDir, entry.name))
       .sort((a, b) => a.localeCompare(b));
   }
-  if (interviewFiles.length === 0) sources.push({ path: 'interview-prep/*.md', sha256: null });
   for (const filePath of interviewFiles) {
     const bytes = addSourcePath(filePath);
     if (!bytes) continue;
@@ -499,15 +585,18 @@ function parseArgs(argv) {
   if (options['paths-only'] && options.denylist) throw new Error('paths-only does not accept a denylist');
   if (mode === 'range') {
     const rangeParts = String(options.range).split('..');
-    if (rangeParts.length !== 2 || !rangeParts[0] || !rangeParts[1]) throw new Error('range must be <base>..<head>');
+    if (rangeParts.length !== 2 || !rangeParts[1]) throw new Error('range must be <base>..<head>');
   }
   return { ...options, mode };
 }
 
 function parseRange(value) {
-  const match = String(value).match(/^(.+)\.\.([^.].*)$/);
-  if (!match) throw new Error('range must be <base>..<head>');
-  return { base: match[1], head: match[2] };
+  const range = String(value);
+  const separator = range.indexOf('..');
+  if (separator < 0 || separator + 2 >= range.length || range.indexOf('..', separator + 2) >= 0) {
+    throw new Error('range must be <base>..<head>');
+  }
+  return { base: range.slice(0, separator), head: range.slice(separator + 2) };
 }
 
 function emptyTree(repo) {
@@ -524,21 +613,76 @@ function commitDiff(repo, commit) {
   const parents = commitParents(repo, commit);
   const parent = parents[0] ?? emptyTree(repo);
   const diff = git(repo, ['diff', '--no-ext-diff', '--no-color', '--binary', '--find-renames', '--unified=0', parent, commit, '--']).stdout;
-  return { diff, base: parent };
+  const pathInfo = changedPathInfo(repo, ['diff', '-z', '--name-status', '-C', '-M', parent, commit, '--']);
+  return { diff, base: parent, ...pathInfo };
 }
 
 function listRangeCommits(repo, base, head) {
-  return git(repo, ['rev-list', `${base}..${head}`]).stdout.split(/\r?\n/).filter(Boolean);
+  const revision = base ? `${base}..${head}` : head;
+  return git(repo, ['rev-list', revision]).stdout.split(/\r?\n/).filter(Boolean);
 }
 
-function emitFindings(findings) {
-  for (const finding of findings) {
-    if (finding.type === 'path') console.error(`private path: ${finding.path}`);
-    else if (finding.type === 'hard') console.error(`${finding.path}:${finding.line} ${finding.category}`);
-    else if (finding.type === 'soft') console.error(`${finding.path}:${finding.line} ${finding.category} ${finding.value}`);
-    else if (finding.type === 'soft-ack') {
-      console.error(`${finding.path}:${finding.line} ${finding.category} ${finding.value} (acknowledged: ${finding.reason})`);
+function changedPathInfo(repo, args) {
+  const fields = git(repo, args).stdout.split('\0');
+  if (fields.at(-1) === '') fields.pop();
+  const findings = [];
+  const deletedPaths = new Set();
+  for (let i = 0; i < fields.length;) {
+    const status = fields[i++];
+    let targetPath;
+    if (/^[RC]/.test(status)) {
+      if (i + 1 >= fields.length) throw new Error('git path status was malformed');
+      i += 1; // source path
+      targetPath = fields[i++];
+    } else {
+      if (i >= fields.length) throw new Error('git path status was malformed');
+      targetPath = fields[i++];
+      if (status.startsWith('D')) {
+        deletedPaths.add(targetPath);
+        continue;
+      }
     }
+    if (isPrivatePath(targetPath)) findings.push({ type: 'path', path: targetPath });
+  }
+  return { pathFindings: findings, deletedPaths };
+}
+
+function redactDiagnostic(value, denylist) {
+  let output = String(value);
+  const hard = denylist?.hard ?? [];
+  const literalValues = hard
+    .filter((entry) => entry.category !== 'phone')
+    .map((entry) => String(entry.value ?? '').trim())
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+  for (const secret of literalValues) {
+    output = output.replace(new RegExp(escapeRegExp(secret), 'giu'), '[REDACTED]');
+  }
+
+  const phoneNeedles = hard
+    .filter((entry) => entry.category === 'phone')
+    .map((entry) => digits(entry.value))
+    .filter(Boolean)
+    .map((number) => number.length >= 7 ? number.slice(-9) : number);
+  if (phoneNeedles.length) {
+    output = output.replace(/[+\d][+\d\s().-]*/g, (candidate) => {
+      const run = digits(candidate);
+      return phoneNeedles.some((needle) => run.includes(needle)) ? '[REDACTED]' : candidate;
+    });
+  }
+  return output;
+}
+
+function emitFindings(findings, denylist) {
+  for (const finding of findings) {
+    let message;
+    if (finding.type === 'path') message = `private path: ${finding.path}`;
+    else if (finding.type === 'hard') message = `${finding.path}:${finding.line} ${finding.category}`;
+    else if (finding.type === 'soft') message = `${finding.path}:${finding.line} ${finding.category} ${finding.value}`;
+    else if (finding.type === 'soft-ack') message = `privacy-guard: acknowledged soft match; reason: ${finding.reason}`;
+    else if (finding.type === 'binary') message = `binary file: ${finding.path}`;
+    else if (finding.type === 'binary-ack') message = `privacy-guard: acknowledged binary file: ${finding.path}; reason: ${finding.reason}`;
+    if (message) console.error(redactDiagnostic(message, denylist));
   }
 }
 
@@ -551,9 +695,12 @@ function requireDenylist(repo, override) {
   }
 }
 
-function checkOne(diff, { repo, base, denylist, pathsOnly = false }) {
-  const checked = checkDiff(diff, { repo, base, denylist, pathsOnly });
+function checkOne(diff, { repo, base, denylist, pathsOnly = false, pathFindings = null, deletedPaths = null }) {
+  const checked = checkDiff(diff, { repo, base, denylist, pathsOnly, deletedPaths });
   if (String(diff).trim() && checked.fileCount === 0) throw new Error('diff could not be parsed');
+  if (pathFindings) {
+    checked.findings = [...checked.findings.filter((finding) => finding.type !== 'path'), ...pathFindings];
+  }
   return checked;
 }
 
@@ -596,7 +743,10 @@ async function runCli(argv) {
       const { base, head } = parseRange(options.range);
       for (const commit of listRangeCommits(repo, base, head)) {
         const committed = commitDiff(repo, commit);
-        const checked = checkOne(committed.diff, { repo, base: committed.base, denylist, pathsOnly: options['paths-only'] });
+        const checked = checkOne(committed.diff, {
+          repo, base: committed.base, denylist, pathsOnly: options['paths-only'],
+          pathFindings: committed.pathFindings, deletedPaths: committed.deletedPaths,
+        });
         allFindings.push(...checked.findings);
         count += 1;
       }
@@ -618,7 +768,9 @@ async function runCli(argv) {
         }
         for (const commit of commits) {
           const committed = commitDiff(repo, commit);
-          const checked = checkOne(committed.diff, { repo, base: committed.base, denylist });
+          const checked = checkOne(committed.diff, {
+            repo, base: committed.base, denylist, pathFindings: committed.pathFindings, deletedPaths: committed.deletedPaths,
+          });
           allFindings.push(...checked.findings);
           count += 1;
         }
@@ -626,9 +778,13 @@ async function runCli(argv) {
     } else {
       const base = git(repo, ['rev-parse', 'HEAD']).stdout.trim();
       let diff;
+      let pathInfo = null;
       if (options.mode === 'patch') diff = readFileSync(resolve(options.patch), 'utf8');
-      else diff = git(repo, ['diff', '--cached', '--no-ext-diff', '--no-color', '--binary', '--find-renames', '--unified=0', 'HEAD', '--']).stdout;
-      const checked = checkOne(diff, { repo, base, denylist });
+      else {
+        diff = git(repo, ['diff', '--cached', '--no-ext-diff', '--no-color', '--binary', '--find-renames', '--unified=0', 'HEAD', '--']).stdout;
+        pathInfo = changedPathInfo(repo, ['diff', '--cached', '-z', '--name-status', '-C', '-M', 'HEAD', '--']);
+      }
+      const checked = checkOne(diff, { repo, base, denylist, ...(pathInfo ?? {}) });
       allFindings.push(...checked.findings);
       count = checked.fileCount;
     }
@@ -637,12 +793,11 @@ async function runCli(argv) {
     return 1;
   }
 
-  for (const finding of allFindings) {
-    if (finding.type === 'soft-ack') console.error(`privacy-guard: acknowledged soft match; reason: ${finding.reason}`);
-  }
-  const blockingFindings = allFindings.filter((finding) => finding.type !== 'soft-ack');
+  const acknowledgedFindings = allFindings.filter((finding) => finding.type === 'soft-ack' || finding.type === 'binary-ack');
+  emitFindings(acknowledgedFindings, denylist);
+  const blockingFindings = allFindings.filter((finding) => finding.type !== 'soft-ack' && finding.type !== 'binary-ack');
   if (blockingFindings.length) {
-    emitFindings(blockingFindings);
+    emitFindings(blockingFindings, denylist);
     if (options['paths-only']) console.log('paths-only: no content scan performed');
     return 1;
   }
