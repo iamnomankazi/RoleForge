@@ -73,6 +73,12 @@ function reportHeaders(markdown) {
   };
 }
 
+function reportIdMismatch(report) {
+  const headerId = idValue(report?.candidateId);
+  const summaryId = idValue(report?.summary?.candidate_id ?? report?.summary?.candidateId);
+  return Boolean(headerId && summaryId && headerId !== summaryId);
+}
+
 export function loadReportIndex(reportsDir) {
   const index = new Map();
   index.warnings = [];
@@ -96,7 +102,11 @@ export function loadReportIndex(reportsDir) {
           if (assessment.valid) action = assessment.action;
           else pushWarning(index.warnings, `Report ${file} has an invalid assessment: ${assessment.errors.join('; ')}`);
         }
-        index.set(number, { file, candidateId: headers.candidateId, supersedes: headers.supersedes, summary, action });
+        const report = { file, candidateId: headers.candidateId, supersedes: headers.supersedes, summary, action };
+        if (reportIdMismatch(report)) {
+          pushWarning(index.warnings, `Report ${file} has mismatched candidate IDs: header ${report.candidateId}; Machine Summary ${summary.candidate_id ?? summary.candidateId}`);
+        }
+        index.set(number, report);
       } catch (error) {
         pushWarning(index.warnings, `Could not parse report ${file}: ${error.message}`);
       }
@@ -170,14 +180,13 @@ export function loadIdentityMappings(options = {}) {
     if (!mappings) { pushWarning(warnings, `Ignoring malformed enrichment file ${enrichmentPath}: expected an array or mappings list`); continue; }
     const edges = [];
     for (const mapping of mappings) {
-      if (mapping?.converged === true) continue;
       if (!mapping || typeof mapping !== 'object') {
         pushWarning(warnings, `Ignoring malformed mapping in enrichment file ${enrichmentPath}`);
         continue;
       }
       const oldId = idValue(mapping.source_candidate_id);
       const newId = idValue(mapping.candidate_id);
-      if (oldId && newId && oldId !== newId) edges.push({ old: oldId, new: newId, source: enrichmentPath });
+      if (oldId && newId && oldId !== newId) edges.push({ old: oldId, new: newId, source: enrichmentPath, converged: mapping.converged === true });
       else if (!oldId || !newId) pushWarning(warnings, `Ignoring mapping with invalid candidate IDs in ${enrichmentPath}`);
     }
     edgeSources.push(...edges);
@@ -214,6 +223,7 @@ export function loadIdentityMappings(options = {}) {
 
   const targets = new Map();
   const sources = new Map();
+  // Converged mappings still contribute to cardinality across all sources.
   for (const edge of edgeSources) {
     if (!targets.has(edge.old)) targets.set(edge.old, new Set());
     if (!sources.has(edge.new)) sources.set(edge.new, new Set());
@@ -229,6 +239,10 @@ export function loadIdentityMappings(options = {}) {
     if (ambiguous.has(edge.old) || ambiguous.has(edge.new) || outDegree !== 1 || inDegree !== 1) {
       const reason = outDegree !== 1 ? 'one_to_many' : inDegree !== 1 ? 'many_to_one' : 'ambiguous_id';
       discardedEdges.push({ ...edge, reason });
+      continue;
+    }
+    if (edge.converged) {
+      discardedEdges.push({ ...edge, reason: 'converged' });
       continue;
     }
     if (!equivalent.has(edge.old)) equivalent.set(edge.old, new Set([edge.old]));
@@ -323,9 +337,7 @@ export function rowIdentity(row, reportIndex, mappings) {
   for (const number of reports) {
     const report = reportIndex?.get?.(number);
     const headerId = idValue(report?.candidateId);
-    const summaryId = idValue(report?.summary?.candidate_id ?? report?.summary?.candidateId);
     if (headerId) ids.add(headerId);
-    if (summaryId) ids.add(summaryId);
   }
   const textKey = [companyDuplicateKey(row?.company), roleDuplicateKey(row?.role)].every(Boolean)
     ? `${companyDuplicateKey(row.company)}\0${roleDuplicateKey(row.role)}` : '';
@@ -388,6 +400,30 @@ function discardedMappingComponents(edges) {
   return { componentById, reasonByComponent };
 }
 
+function supersedesComponents(reportIndex) {
+  const adjacent = new Map();
+  for (const [number, report] of reportIndex instanceof Map ? reportIndex : []) {
+    const target = report?.supersedes;
+    if (!Number.isSafeInteger(number) || !Number.isSafeInteger(target)) continue;
+    if (!adjacent.has(number)) adjacent.set(number, new Set());
+    if (!adjacent.has(target)) adjacent.set(target, new Set());
+    adjacent.get(number).add(target);
+    adjacent.get(target).add(number);
+  }
+  const componentByReport = new Map();
+  for (const number of adjacent.keys()) {
+    if (componentByReport.has(number)) continue;
+    const queue = [number];
+    while (queue.length) {
+      const current = queue.pop();
+      if (componentByReport.has(current)) continue;
+      componentByReport.set(current, number);
+      for (const neighbor of adjacent.get(current) ?? []) queue.push(neighbor);
+    }
+  }
+  return componentByReport;
+}
+
 export function groupTrackerRows(rows, reportIndex, mappings, options = {}) {
   const states = Array.isArray(options?.states) ? options.states : [];
   const runCandidates = options?.runCandidates ?? new Map();
@@ -398,6 +434,8 @@ export function groupTrackerRows(rows, reportIndex, mappings, options = {}) {
   const find = (index) => { while (parent[index] !== index) { parent[index] = parent[parent[index]]; index = parent[index]; } return index; };
   const union = (a, b) => { const ra = find(a); const rb = find(b); if (ra !== rb) parent[rb] = ra; };
   const identityOwner = new Map();
+  // Include untracked reports before assigning rows to Supersedes components.
+  const reportComponents = supersedesComponents(reportIndex);
   const reportOwner = new Map();
   for (let index = 0; index < list.length; index += 1) {
     for (const id of identities[index].ids) {
@@ -410,15 +448,9 @@ export function groupTrackerRows(rows, reportIndex, mappings, options = {}) {
       }
     }
     for (const number of identities[index].reports) {
-      if (reportOwner.has(number)) union(index, reportOwner.get(number));
-      else reportOwner.set(number, index);
-    }
-  }
-  for (let index = 0; index < list.length; index += 1) {
-    for (const number of identities[index].reports) {
-      const target = reportIndex?.get?.(number)?.supersedes;
-      if (target == null) continue;
-      if (reportOwner.has(target)) union(index, reportOwner.get(target));
+      const component = reportComponents.get(number) ?? number;
+      if (reportOwner.has(component)) union(index, reportOwner.get(component));
+      else reportOwner.set(component, index);
     }
   }
   const rawGroups = new Map();
@@ -439,6 +471,7 @@ export function groupTrackerRows(rows, reportIndex, mappings, options = {}) {
     const flags = [];
     if (nonEvaluated.size > 1) flags.push('mixed_status');
     if (unknown) flags.push('unknown_status');
+    if (reports.some((number) => reportIdMismatch(reportIndex?.get?.(number)))) flags.push('report_id_mismatch');
     let conflict = false;
     for (let left = 0; left < record.rows.length; left += 1) {
       for (let right = left + 1; right < record.rows.length; right += 1) {

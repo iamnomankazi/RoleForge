@@ -41,6 +41,39 @@ test('Notes ID and report header ID join tracker rows despite different role tex
   assert.deepEqual([...tree.groups[0].ids], [id]);
 });
 
+test('stale Machine Summary IDs never group rows and mismatches flag only the linked group', (t) => {
+  const headerId = cid('a'); const staleId = cid('b');
+  const tree = groupFixture({
+    tracker: trackerTable([
+      row(1, 'Example Oy', 'Current Engineer', 'Evaluated', '[12](reports/012-current.md)'),
+      row(2, 'Example Oy', 'Rejected Engineer', 'Rejected', '', `Canonical candidate ID: ${staleId}`),
+      row(3, 'Example Oy', 'Summary Only', 'Evaluated', '[13](reports/013-summary-only.md)'),
+      row(4, 'Example Oy', 'Same ID', 'Evaluated', '[14](reports/014-matching.md)'),
+      row(5, 'Example Oy', 'Invalid Summary ID', 'Evaluated', '[15](reports/015-invalid.md)'),
+    ]),
+    reports: {
+      '012-current.md': reportMarkdown({ candidateId: headerId, summary: `${summary()}\ncandidate_id: ${staleId}` }),
+      '013-summary-only.md': reportMarkdown({ summary: `${summary()}\ncandidate_id: ${staleId}` }),
+      '014-matching.md': reportMarkdown({ candidateId: headerId, summary: `${summary()}\ncandidate_id: ${headerId}` }),
+      '015-invalid.md': reportMarkdown({ summary: `${summary()}\ncandidate_id: invalid` }),
+    },
+  });
+  t.after(() => tree.fixture.cleanup());
+  assert.equal(tree.groups.length, 4);
+  const current = tree.groups.find((group) => group.rows.some((entry) => entry.num === 1));
+  assert.deepEqual(current.rows.map((entry) => entry.num), [1, 4]);
+  assert.deepEqual([...current.ids], [headerId]);
+  assert.equal(current.open, true);
+  assert.equal(current.status, 'Evaluated');
+  assert.ok(current.flags.includes('report_id_mismatch'));
+  const rejected = tree.groups.find((group) => group.rows.some((entry) => entry.num === 2));
+  assert.equal(rejected.status, 'Rejected');
+  assert.ok(tree.groups.filter((group) => group !== current).every((group) => !group.flags.includes('report_id_mismatch')));
+  assert.deepEqual([...tree.groups.find((group) => group.rows.some((entry) => entry.num === 3)).ids], []);
+  assert.ok(tree.reportIndex.warnings.some((message) => message.includes('012-current.md') && message.includes(headerId) && message.includes(staleId)));
+  assert.ok(!tree.reportIndex.warnings.some((message) => /013-summary-only|014-matching|015-invalid/.test(message)));
+});
+
 test('URL aliases and equal company/role keys are possible duplicates but never grouping evidence', (t) => {
   const a = cid('a'); const b = cid('b');
   const url = 'https://jobs.example.test/opening/1?utm_source=first';
@@ -119,6 +152,27 @@ test('many-to-one and one-to-many edges are discarded across all enrichment file
   assert.ok(tree.groups.every((group) => group.possibleDuplicates.some((entry) => entry.reason === 'discarded_mapping')));
 });
 
+test('converged edges count toward cardinality across enrichment and correction sources', (t) => {
+  const a = cid('a'); const b = cid('b'); const c = cid('c');
+  const tree = groupFixture({
+    tracker: trackerTable([
+      row(1, 'Example Oy', 'Source A', 'Evaluated', '', `Canonical candidate ID: ${a}`),
+      row(2, 'Example Oy', 'Source B', 'Evaluated', '', `Canonical candidate ID: ${b}`),
+      row(3, 'Example Oy', 'Target', 'Rejected', '', `Canonical candidate ID: ${c}`),
+    ]),
+    scanRuns: { converged: { enrichment: [{ source_candidate_id: a, candidate_id: c, converged: true }] } },
+    corrections: { 'ledger.json': { entries: [{ old_candidate_id: b, corrected: [{ candidate_id: c }] }] } },
+  });
+  t.after(() => tree.fixture.cleanup());
+  assert.equal(tree.groups.length, 3);
+  assert.equal(tree.mappings.equivalent.size, 0);
+  assert.deepEqual(tree.mappings.discardedEdges.map((edge) => [edge.old, edge.new, edge.reason]), [
+    [a, c, 'many_to_one'], [b, c, 'many_to_one'],
+  ]);
+  assert.ok(tree.groups.every((group) => group.possibleDuplicates.some((entry) =>
+    entry.reason === 'discarded_mapping' && entry.edgeReasons.includes('many_to_one'))));
+});
+
 test('bad hashes, missing marker, hidden staging and converged mapping do not create edges and warn', (t) => {
   const a = cid('a'); const b = cid('b'); const c = cid('c'); const d = cid('d');
   const tree = createWorkTreeFixture({ scanRuns: {
@@ -170,6 +224,29 @@ test('supersedes joins rows; canonical work state rules and conflict flags are a
   const unknown = tree.groups.find((group) => group.rows.some((entry) => entry.num === 5));
   assert.equal(unknown.open, false);
   assert.ok(unknown.flags.includes('unknown_status'));
+});
+
+test('Supersedes components join rows through reports without tracker rows', (t) => {
+  const tree = groupFixture({
+    tracker: trackerTable([
+      row(1, 'Example Oy', 'Original', 'Rejected', '[1](reports/001-original.md)'),
+      row(2, 'Example Oy', 'Latest', 'Evaluated', '[3](reports/003-latest.md)'),
+      row(3, 'Example Oy', 'Other', 'Evaluated', '[4](reports/004-other.md)'),
+    ]),
+    reports: {
+      '001-original.md': reportMarkdown({ summary: summary() }),
+      '002-middle.md': reportMarkdown({ supersedes: 1, summary: summary() }),
+      '003-latest.md': reportMarkdown({ supersedes: 2, summary: summary() }),
+      '004-other.md': reportMarkdown({ summary: summary() }),
+    },
+  });
+  t.after(() => tree.fixture.cleanup());
+  assert.equal(tree.groups.length, 2);
+  const chain = tree.groups.find((group) => group.rows.some((entry) => entry.num === 1));
+  assert.deepEqual(chain.rows.map((entry) => entry.num), [1, 2]);
+  assert.deepEqual(chain.reports, [1, 3]);
+  assert.equal(chain.status, 'Rejected');
+  assert.equal(chain.open, false);
 });
 
 test('malformed tracker rows, reports and JSON are tolerated with warnings', (t) => {
