@@ -199,6 +199,16 @@ function runCandidateIdDedup(entries, lines, colmap) {
       skipped.push({ rows: numbers, reason: blockedFlags.join(', ') });
       continue;
     }
+    // A destructive merge needs one posting identity. Rows can bridge distinct
+    // candidate IDs (e.g. one tracker row linking two reports); grouping is
+    // fine for refusals, but merging those rows could erase a distinct opening.
+    const groupIds = [...group.ids];
+    const singleIdentity = groupIds.every((value) => value === groupIds[0]
+      || mappings.equivalent?.get(groupIds[0])?.has(value));
+    if (!singleIdentity) {
+      skipped.push({ rows: numbers, reason: `multiple_candidate_ids (${groupIds.length} distinct IDs; review manually)` });
+      continue;
+    }
     const withoutIds = group.rows.filter((row) => ![...rowIdentity(row, reportIndex, mappings).ids]
       .some((id) => !mappings.ambiguous.has(id)));
     if (withoutIds.length) {

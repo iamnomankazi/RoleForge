@@ -194,3 +194,23 @@ test('text-only lookalike rows remain untouched in candidate-ID mode', () => {
     fx.cleanup();
   }
 });
+
+test('groups bridging distinct candidate IDs are skipped, not merged', () => {
+  const first = id('d');
+  const second = id('e');
+  const fx = fixture([
+    trackerRow({ num: 21, role: 'Fictional Data Role', notes: `Canonical candidate ID: ${first}` }),
+    trackerRow({ num: 22, role: 'Fictional Data Role', notes: `Canonical candidate ID: ${first}; Canonical candidate ID: ${second}` }),
+    trackerRow({ num: 23, role: 'Fictional Data Role', notes: `Canonical candidate ID: ${second}` }),
+  ]);
+  try {
+    const before = readFileSync(fx.trackerPath, 'utf8');
+    const result = run(fx, ['--by-candidate-id']);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Skipped #21, #22, #23: multiple_candidate_ids/);
+    assert.doesNotMatch(result.stdout, /Merge group/);
+    assert.equal(readFileSync(fx.trackerPath, 'utf8'), before);
+  } finally {
+    fx.cleanup();
+  }
+});
