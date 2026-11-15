@@ -2,6 +2,10 @@
 import { pass, fail, run, NODE, ROOT } from './helpers.mjs';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { computeAllStats, computeOutcomeStats, printSummary } from '../stats.mjs';
 
 console.log('\nstats.mjs — lifetime pipeline stats aggregator (#1604)');
 try {
@@ -124,3 +128,86 @@ try {
 } catch (e) {
   fail(`stats.mjs tests crashed: ${e.message}`);
 }
+
+const outcomeId = (char) => `cand_v1_${char.repeat(64)}`;
+const outcomeRow = (num, status, notes = '') => `| ${num} | 2026-11-01 | Example Oy | Role ${num} | 4/5 | ${status} | | | ${notes} |`;
+const outcomeTracker = [
+  '| # | Date | Company | Role | Score | Status | PDF | Report | Notes |',
+  '|---|---|---|---|---|---|---|---|---|',
+  outcomeRow(1, 'Applied', 'No reply as of 2026-11-14; NO REPLY AS OF 2026-11-10'),
+  outcomeRow(2, 'Applied', 'Closed by user 2026-10-01: no response; re-applied later'),
+  outcomeRow(3, 'Rejected', `Canonical candidate ID: ${outcomeId('b')}`),
+  outcomeRow(4, 'Applied', `Canonical candidate ID: ${outcomeId('b')}; No reply as of 2026-11-13`),
+  outcomeRow(5, 'Applied', `Canonical candidate ID: ${outcomeId('a')}`),
+  outcomeRow(6, 'Evaluated', `Canonical candidate ID: ${outcomeId('a')}; no reply as of 2026-11-15`),
+  outcomeRow(7, 'Discarded', `Canonical candidate ID: ${outcomeId('c')}; Closed by user 2026-11-01: no response`),
+  outcomeRow(8, 'Discarded', `Canonical candidate ID: ${outcomeId('c')}; CLOSED BY USER 2026-11-02: NO RESPONSE`),
+  ...['Responded', 'Interview', 'Offer', 'Hired'].map((status, index) => outcomeRow(9 + index, status)),
+  outcomeRow(13, 'Evaluated', 'No reply as of 2026-11-30'),
+  outcomeRow(14, 'Discarded', 'Closed by user: owner withdrew'),
+  outcomeRow(15, 'Discarded', 'no response'),
+  '',
+].join('\r\n');
+
+const expectedOutcomes = {
+  responded: 5,
+  responded_by_status: { Responded: 1, Interview: 1, Offer: 1, Hired: 1, Rejected: 1 },
+  no_reply_noted: 2,
+  latest_no_reply_date: '2026-11-15',
+  unchecked: 1,
+  awaiting_total: 3,
+  closed_without_reply: 2,
+  closure_note_on_active_rows: [2],
+  warnings: [],
+};
+
+test('outcomes count posting groups, latest no-reply checks and closure rows separately', () => {
+  assert.deepEqual(computeOutcomeStats(outcomeTracker), expectedOutcomes);
+  assert.deepEqual(computeOutcomeStats(''), {
+    responded: 0,
+    responded_by_status: { Responded: 0, Interview: 0, Offer: 0, Hired: 0, Rejected: 0 },
+    no_reply_noted: 0, latest_no_reply_date: null, unchecked: 0, awaiting_total: 0,
+    closed_without_reply: 0, closure_note_on_active_rows: [], warnings: [],
+  });
+});
+
+test('assembled stats add outcomes without changing funnel or rewriting tracker', (t) => {
+  const root = mkdtempSync(join(ROOT, '.outcomes-stats-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, 'data'));
+  const appsFile = join(root, 'data', 'applications.md');
+  writeFileSync(appsFile, outcomeTracker);
+  const options = {
+    appsFile, root,
+    scanHistoryFile: join(root, 'missing-scan.tsv'), followupsFile: join(root, 'missing-followups.md'),
+    scanRunsFile: join(root, 'missing-runs.tsv'), portalsFile: join(root, 'missing-portals.yml'),
+  };
+  const result = computeAllStats(options);
+  assert.deepEqual(result.outcomes, expectedOutcomes);
+  assert.equal(result.tracker.total, 15);
+  assert.equal(result.tracker.byStatus.Applied, 4);
+  assert.equal(result.funnel.everApplied, 8);
+  assert.equal(result.funnel.everResponded, 3);
+  assert.equal(readFileSync(appsFile, 'utf8'), outcomeTracker);
+  assert.equal(computeAllStats({ ...options, appsFile: join(root, 'missing.md') }).outcomes, null);
+  const summaryLines = [];
+  t.mock.method(console, 'log', (line) => summaryLines.push(line));
+  printSummary(result);
+  assert.ok(summaryLines.some((line) => line.includes('Outcomes:   5 responded') && line.includes('3 awaiting')));
+  assert.ok(summaryLines.some((line) => line.includes('2 no reply noted (latest 2026-11-15) | 1 unchecked | 2 closed without reply (rows)')));
+  assert.ok(summaryLines.some((line) => line.includes('Closure note on active rows') && line.includes('#2')));
+  t.mock.restoreAll();
+
+  mkdirSync(join(root, 'output', 'identity-corrections'), { recursive: true });
+  writeFileSync(join(root, 'output', 'identity-corrections', 'broken.json'), '{');
+  const fallback = computeAllStats(options).outcomes;
+  assert.equal(fallback.awaiting_total, 4);
+  assert.equal(fallback.unchecked, 2);
+  assert.equal(fallback.no_reply_noted, 2);
+  assert.equal(fallback.latest_no_reply_date, '2026-11-14');
+  assert.equal(fallback.closed_without_reply, 2);
+  assert.deepEqual(fallback.closure_note_on_active_rows, [2]);
+  assert.equal(fallback.responded, 5);
+  assert.ok(fallback.warnings.some((warning) => warning.includes('identity corrections')));
+  assert.equal(readFileSync(appsFile, 'utf8'), outcomeTracker);
+});

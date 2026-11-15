@@ -24,6 +24,8 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import yaml from 'js-yaml';
 import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
 import { normalizeStatus } from './followup-cadence.mjs';
+import { loadCanonicalStates } from './tracker-utils.mjs';
+import { loadTrackerRows, loadReportIndex, loadIdentityMappings, groupTrackerRows, WORK_STATE_ORDER } from './tracker-identity.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const APPS_FILE = join(ROOT, 'data', 'applications.md');
@@ -108,6 +110,64 @@ export function trackerStatusByNum(content) {
     if (row) byNum.set(row.num, canonicalStatus(row.status));
   }
   return byNum;
+}
+
+/** Current employer outcomes, grouped by posting; historical closures stay row counts. */
+export function computeOutcomeStats(content, { root = null, trackerPath = null } = {}) {
+  const lines = String(content ?? '').replace(/\r/g, '').split('\n');
+  const columns = resolveColumns(lines);
+  const rows = lines.map((line) => parseTrackerRow(line, columns)).filter(Boolean);
+  const warnings = [];
+  const rowStatus = (raw) => WORK_STATE_ORDER.find((status) => status.toLowerCase() === String(raw).replace(/\*\*/g, '').trim().toLowerCase()) ?? canonicalStatus(raw);
+  let groups = rows.map((row) => ({ status: rowStatus(row.status), rows: [row] }));
+  try {
+    const loaded = trackerPath ? loadTrackerRows(trackerPath) : { rows, warnings: [] };
+    const reports = root ? loadReportIndex(join(root, 'reports')) : new Map();
+    const mappings = root ? loadIdentityMappings({
+      scanRunsDir: join(root, 'output', 'scan-runs'),
+      correctionsDir: join(root, 'output', 'identity-corrections'),
+    }) : {};
+    warnings.push(...loaded.warnings, ...(reports.warnings ?? []), ...(mappings.warnings ?? []));
+    // Incomplete identity sources must not silently merge unrelated applications.
+    // Fall back to row counts and expose the reason to reporting consumers.
+    if (!warnings.length) {
+      const states = loadCanonicalStates(join(ROOT, 'templates', 'states.yml'));
+      groups = groupTrackerRows(loaded.rows, reports, mappings, { states });
+    }
+  } catch (error) {
+    warnings.push(`Outcome grouping unavailable: ${error.message}`);
+  }
+
+  const respondedByStatus = Object.fromEntries(['Responded', 'Interview', 'Offer', 'Hired', 'Rejected'].map((status) => [status, 0]));
+  let noReplyNoted = 0, unchecked = 0, latestNoReplyDate = null;
+  for (const group of groups) {
+    if (Object.hasOwn(respondedByStatus, group.status)) {
+      respondedByStatus[group.status]++;
+    } else if (group.status === 'Applied') {
+      const dates = group.rows.flatMap((row) => [...String(row.notes ?? '').matchAll(/\bNo reply as of (\d{4}-\d{2}-\d{2})\b/gi)].map((match) => match[1]));
+      if (dates.length) {
+        noReplyNoted++;
+        const latest = dates.sort().at(-1);
+        if (!latestNoReplyDate || latest > latestNoReplyDate) latestNoReplyDate = latest;
+      } else unchecked++;
+    }
+  }
+  // A closure note on a row that is Applied (or later) again is a re-application,
+  // not a closed past application: keep it awaiting and report it separately.
+  const closureNoted = rows.filter((row) => /Closed by user/i.test(row.notes ?? '') && /no response/i.test(row.notes ?? ''));
+  const activeStatuses = new Set(['Applied', 'Responded', 'Interview', 'Offer', 'Hired', 'Rejected']);
+  const closureOnActive = closureNoted.filter((row) => activeStatuses.has(rowStatus(row.status)));
+  return {
+    responded: Object.values(respondedByStatus).reduce((sum, count) => sum + count, 0),
+    responded_by_status: respondedByStatus,
+    no_reply_noted: noReplyNoted,
+    latest_no_reply_date: latestNoReplyDate,
+    unchecked,
+    awaiting_total: noReplyNoted + unchecked,
+    closed_without_reply: closureNoted.length - closureOnActive.length,
+    closure_note_on_active_rows: closureOnActive.map((row) => row.num),
+    warnings,
+  };
 }
 
 // ── Cumulative funnel ───────────────────────────────────────────────
@@ -347,6 +407,7 @@ export function computeRunStats(content) {
  */
 export function computeAllStats({
   appsFile = APPS_FILE,
+  root = dirname(dirname(appsFile)),
   scanHistoryFile = SCAN_HISTORY_FILE,
   followupsFile = FOLLOWUPS_FILE,
   scanRunsFile = SCAN_RUNS_FILE,
@@ -373,6 +434,7 @@ export function computeAllStats({
     },
     tracker,
     funnel: tracker ? computeFunnel(tracker.byStatus) : null,
+    outcomes: apps ? computeOutcomeStats(apps, { root, trackerPath: appsFile }) : null,
     scan,
     portals: portals ? computePortalStats(portals, scan, scanHist ? scanCompanyNames(scanHist) : []) : null,
     followups: fups && apps ? computeFollowupStats(fups, trackerStatusByNum(apps)) : null,
@@ -381,7 +443,7 @@ export function computeAllStats({
 }
 
 /** Human-readable table. pdfPct/reportPct are JSON-only by design — no job-search decision follows from them. */
-function printSummary(stats) {
+export function printSummary(stats) {
   const line = '━'.repeat(45);
   console.log(`\n${line}`);
   console.log(`Pipeline Stats — ${stats.metadata.generatedAt}`);
@@ -401,6 +463,14 @@ function printSummary(stats) {
   if (f) {
     const small = f.smallSample ? ' (small sample — rates indicative only)' : '';
     console.log(`Funnel:     ever applied ${f.everApplied} → responded ${f.everResponded} (${f.responseRate}%) → interview ${f.everInterview} (${f.interviewRate}%) → offer ${f.everOffer} (${f.offerRate}%)${small}`);
+  }
+  const o = stats.outcomes;
+  if (o) {
+    const statuses = Object.entries(o.responded_by_status).map(([status, count]) => `${status} ${count}`).join(' · ');
+    console.log(`Outcomes:   ${o.responded} responded (${statuses}) | ${o.awaiting_total} awaiting`);
+    console.log(`            ${o.no_reply_noted} no reply noted${o.latest_no_reply_date ? ` (latest ${o.latest_no_reply_date})` : ''} | ${o.unchecked} unchecked | ${o.closed_without_reply} closed without reply (rows)`);
+    if (o.closure_note_on_active_rows?.length) console.log(`            Closure note on active rows (re-applied? check): #${o.closure_note_on_active_rows.join(', #')}`);
+    if (o.warnings.length) console.log('            Grouping unavailable; outcomes counted per row (see JSON warnings)');
   }
   const s = stats.scan;
   if (s) {

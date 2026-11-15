@@ -9,6 +9,7 @@
  *
  * Usage:
  *   node set-status.mjs <report#|company> <state> [--note "..."] [--role "..."] [--dry-run] [--json]
+ *   node set-status.mjs --row N --note-only --note "..." [--dry-run] [--json]
  *
  * Row resolution:
  *   - numeric argument → exact match on the # column
@@ -60,12 +61,14 @@ const EXIT_LOCK_TIMEOUT = 4;
 const USAGE = `Usage: node set-status.mjs <row#|company> <state> [--note "..."] [--role "..."] [--dry-run] [--json]
        node set-status.mjs --row N <state> [...]
        node set-status.mjs --report N <state> [...]
+       node set-status.mjs <N|--row N|--report N> --note-only --note "..." [--dry-run] [--json]
 
   <row#|company>     Legacy selector: tracker # or company name
   <state>            Canonical state from templates/states.yml (aliases accepted)
   --row N            Select an exact tracker row ID
   --report N         Select the row linking an exact report ID
   --note "..."       Append to the Notes cell ("; "-separated, idempotent)
+  --note-only        Preserve status; requires --note and an exact selector, no <state>
   --role "..."       Disambiguate when several rows share the company (fuzzy match)
   --dry-run          Resolve and validate, but write nothing
   --json             Machine-readable output on stdout (errors included)
@@ -78,7 +81,7 @@ the internal --application-manifest, --candidate-id, and --submission-event proo
 const rawArgs = process.argv.slice(2);
 const positional = [];
 const flags = {
-  note: null, role: null, dryRun: false, json: false,
+  note: null, noteOnly: false, role: null, dryRun: false, json: false,
   row: null, report: null,
   applicationManifest: null, candidateId: null, submissionEvent: null,
 };
@@ -109,6 +112,7 @@ for (let i = 0; i < rawArgs.length; i++) {
     i++;
   }
   else if (a === '--dry-run') { flags.dryRun = true; }
+  else if (a === '--note-only') { flags.noteOnly = true; }
   else if (a === '--json') { flags.json = true; }
   else if (a.startsWith('--')) { failUsage(`Unknown flag: ${a}`); }
   else { positional.push(a); }
@@ -118,7 +122,11 @@ if (flags.row !== null && flags.report !== null) {
   failUsage('--row and --report are mutually exclusive');
 }
 const explicitSelector = flags.row !== null || flags.report !== null;
-if ((explicitSelector && positional.length !== 1) || (!explicitSelector && positional.length !== 2)) {
+const expectedPositionals = (explicitSelector ? 1 : 2) - (flags.noteOnly ? 1 : 0);
+if (flags.noteOnly && positional.length !== expectedPositionals) {
+  failUsage('--note-only accepts an exact selector and no state argument');
+}
+if (!flags.noteOnly && ((explicitSelector && positional.length !== 1) || (!explicitSelector && positional.length !== 2))) {
   failUsage(explicitSelector
     ? `With ${flags.row !== null ? '--row' : '--report'}, provide only the state`
     : (positional.length === 0 ? null : `Expected 2 arguments (selector, state), got ${positional.length}`));
@@ -127,6 +135,12 @@ if ((explicitSelector && positional.length !== 1) || (!explicitSelector && posit
 const selector = explicitSelector ? null : positional[0];
 const stateInput = explicitSelector ? positional[0] : positional[1];
 const isBareNumericSelector = selector !== null && /^\d+$/.test(selector);
+if (flags.noteOnly && (!explicitSelector && !isBareNumericSelector)) {
+  failUsage('--note-only requires an exact selector: --row N, --report N, or bare numeric N');
+}
+if (flags.noteOnly && !cell(flags.note ?? '')) {
+  failUsage('--note-only requires a non-empty --note');
+}
 
 /**
  * Emit a structured error and exit.
@@ -179,8 +193,8 @@ try {
 } catch (err) {
   failWith(EXIT_USAGE, 'states-error', `Cannot load canonical states from ${STATES_FILE}: ${err.message}`);
 }
-const newStatus = resolveCanonicalState(stateInput, states);
-if (!newStatus) {
+let newStatus = flags.noteOnly ? null : resolveCanonicalState(stateInput, states);
+if (!flags.noteOnly && !newStatus) {
   const valid = states.map(s => s.label).join(' · ');
   failWith(EXIT_USAGE, 'invalid-state', `"${stateInput}" is not a canonical state. Valid states: ${valid}`);
 }
@@ -331,9 +345,10 @@ if (flags.role && !(roleFuzzyMatch(target.role, flags.role)
   failWith(EXIT_NOT_FOUND, 'role-mismatch', `Selected row role "${target.role}" does not match --role "${flags.role}"`);
 }
 const oldStatus = target.status;
+if (flags.noteOnly) newStatus = oldStatus;
 const note = flags.note != null ? cell(flags.note) : null;
 
-if (newStatus === 'Applied') {
+if (!flags.noteOnly && newStatus === 'Applied') {
   if (!flags.applicationManifest || !flags.candidateId || !flags.submissionEvent) {
     failWith(EXIT_USAGE, 'applied-confirmation-required',
       'Applied status requires an application-batch submission confirmation; use application-submission.mjs');
