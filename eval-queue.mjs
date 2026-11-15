@@ -469,7 +469,8 @@ function assertProfileShape(profile) {
   const texts = (value) => Array.isArray(value) && value.every(text);
   const answer = (value) => typeof value === 'boolean' || text(value);
   const languages = (value) => mapping(value) && Object.values(value).every((level) => text(level)
-    || mapping(level) && ['cefr', 'level'].every((key) => !Object.hasOwn(level, key) || text(level[key])));
+    // Blank optional subfields (null) are allowed: prescreen falls back from cefr to level.
+    || mapping(level) && ['cefr', 'level'].every((key) => !Object.hasOwn(level, key) || level[key] == null || text(level[key])));
   for (const path of ['graduation_date', 'expected_graduation_date', 'education_details.expected_graduation_date']) {
     field(path, text, 'a date string');
   }

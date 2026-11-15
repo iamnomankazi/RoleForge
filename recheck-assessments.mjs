@@ -289,6 +289,11 @@ export function recheckAssessments({ root = process.cwd(), profilePath, liveness
     entry.replay_graduation = replay.graduation_window;
     const replayBlocker = replay.blockers.find((blocker) => blocker.code === 'graduation_window') ?? null;
     entry.replay_blocker = replayBlocker ? { evidence: replayBlocker.evidence, detail: replayBlocker.detail } : null;
+    if (!profile.graduation_date && replay.graduation_window != null) {
+      // The description states a graduation window but there is no current date to compare it with.
+      cannotCheck('no_profile_graduation_date');
+      continue;
+    }
     if (reportHasBlocker && replayBlocker) {
       counts.blocker_still_applies += 1;
       lists.blocker_still_applies.push(entry);

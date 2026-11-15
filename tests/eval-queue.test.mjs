@@ -574,3 +574,15 @@ test('scales across 150 queued candidates, 1,500 indexed run records, and 400 re
   t.diagnostic(`large synthetic queue completed in ${(performance.now() - start).toFixed(0)} ms`);
   assert.equal(result.include.length, 150);
 });
+
+test('blank optional language subfields are accepted and fall back to the level', (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const id = cid('f');
+  const run = putRun(f, 'null-cefr-profile', [candidate(id, {
+    description: `German C1 is required. ${description}`,
+  })]);
+  put(join(f.root, 'config', 'profile.yml'),
+    'home_country: Finland\nauthorized_countries: [Finland]\nlanguages:\n  english: fluent\n  german:\n    cefr: null\n    level: C1\n');
+  const result = queue(f, [run]);
+  assert.deepEqual(result.include.map((entry) => entry.candidate_id), [id]);
+});

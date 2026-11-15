@@ -86,7 +86,7 @@ export function findGraduationDates(text) {
     for (const [clauseIndex, clause] of clauses.entries()) {
       const previous = clauses[clauseIndex - 1];
       const followsLabel = previous && !previous.dates.length
-        && /\bgraduat\w*\s*:\s*$|\bexpected\s*$/i.test(previous.text);
+        && /\bgraduat\w*(?:\s+date)?\s*:?\s*$|\bexpected(?:\s+graduat\w*)?(?:\s+date)?\s*:?\s*$/i.test(previous.text);
       if (!GRADUATION_WORDING.test(clause.text) && !followsLabel) continue;
       const monthDates = clause.dates.filter((date) => date.parsed.month != null);
       const selectedDates = monthDates.length

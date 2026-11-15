@@ -130,3 +130,9 @@ test('underscored profile keys quoted in report evidence count as graduation wor
   const found = findGraduationDates('JD: "enrolled for one more year"; profile.yml: "expected_graduation_date: 31/12/2026"');
   assert.deepEqual(found.map(({ raw, month, year }) => ({ raw, month, year })), [{ raw: '31/12/2026', month: 12, year: 2026 }]);
 });
+
+test('a parenthesised date directly after a graduation label is the graduation date', () => {
+  for (const text of ['Expected graduation (May 2027)', 'Graduation date: (May 2027)']) {
+    assert.deepEqual(findGraduationDates(text).map(({ month, year }) => ({ month, year })), [{ month: 5, year: 2027 }], text);
+  }
+});

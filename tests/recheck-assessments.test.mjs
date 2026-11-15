@@ -298,7 +298,8 @@ test('missing or unusable profile dates prevent checking every graduation-relate
       writeFileSync(join(fixture.root, 'config', 'profile.yml'), profileText);
       const result = recheckAssessments({ root: fixture.root, livenessDirs: [fixture.liveness] });
       assert.equal(result.profile_graduation_date, null);
-      for (const number of [10, 12, 13, 14, 18, 19]) {
+      // 011 has no graduation wording, but its verified description states a window: still uncheckable.
+      for (const number of [10, 11, 12, 13, 14, 18, 19]) {
         const entry = result.lists.cannot_check.find((item) => item.report === number);
         assert.equal(entry?.reason, 'no_profile_graduation_date', `report ${number}`);
         assert.ok(Array.isArray(entry.cites_profile_dates));
@@ -306,7 +307,7 @@ test('missing or unusable profile dates prevent checking every graduation-relate
       }
       assert.deepEqual(result.lists.cannot_check.find((entry) => entry.report === 10).cites_profile_dates, ['2026-12']);
       assert.deepEqual(result.lists.cannot_check.find((entry) => entry.report === 12).cites_profile_dates, ['2026-12']);
-      assert.equal(result.counts.unchanged, 2);
+      assert.equal(result.counts.unchanged, 1);
       for (const [name, entries] of Object.entries(result.lists)) {
         if (name !== 'cannot_check') assert.deepEqual(entries, [], name);
       }
