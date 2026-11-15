@@ -1895,7 +1895,7 @@ function transientPreOpenErrorClass(error, stage) {
     const spawnFailure = codes.some((code) => ['ENOENT', 'EACCES'].includes(code))
       && (/^spawn\b/i.test(error?.syscall || error?.cause?.syscall || '') || /\bspawn(?:Sync)?\b/i.test(message));
     // A missing browser installation or host dependency is permanent, not a retry case.
-    if (/\bmissing dependencies\b|\bExecutable doesn't exist\b|\bplaywright install\b|\bis not installed\b/i.test(message)) return null;
+    if (/\bmissing (?:host |system |shared )?(?:dependencies|librar(?:y|ies))\b|\berror while loading shared librar|\bExecutable doesn't exist\b|\bplaywright install\b|\bnot installed\b/i.test(message)) return null;
     if (timeout || spawnFailure
         || /\bbrowserType\.launch(?:PersistentContext)?:|\bfailed to launch\b|\bbrowser(?: process)? launch (?:failed|failure)\b|\bTarget page, context or browser has been closed\b/i.test(message)) return launchClass;
     return null;
@@ -1933,8 +1933,10 @@ async function observeCandidatePageLoad(page, attempt, { inspectDocument = false
   if (inspectDocument && !attempt.pageLoaded) {
     try {
       // An untouched about:blank still has an empty <head></head><body></body> skeleton.
-      const empty = await page.evaluate(() => !(document.head?.childElementCount
-        || document.body?.childElementCount || document.body?.innerText?.trim().length));
+      // Positively identify an empty skeleton; any other layout counts as loaded.
+      const empty = await page.evaluate(() => Boolean(document.documentElement && document.head && document.body
+        && !document.body.shadowRoot && document.head.childElementCount === 0
+        && document.body.childElementCount === 0 && !String(document.body.innerText ?? '').trim()));
       if (empty !== true) attempt.pageLoaded = true;
     } catch {
       attempt.pageLoaded = true;

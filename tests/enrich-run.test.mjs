@@ -230,6 +230,10 @@ test('apply_url rejects lookalike hosts and gh_jid outside Greenhouse without wr
     'https://fake.personio.example.test/job/123',
     'https://ordinary.example.test/unrelated?gh_jid=123',
     'https://jobs.lever.co/example/123?gh_jid=123',
+    'https://boards-api.greenhouse.io/v1/boards/example/jobs/123',
+    'https://support.greenhouse.io/example/jobs/123',
+    'https://greenhouse.io/example/jobs/123',
+    'https://api.personio.de/job/123',
     'https://fakepersonio.com/job/123',
     'https://personio.com/job/123',
     'https://personio.de/job/123',
@@ -262,7 +266,6 @@ test('apply_url rejects lookalike hosts and gh_jid outside Greenhouse without wr
 
 test('apply_url accepts the supported ATS posting hosts', async () => {
   const urls = [
-    'https://greenhouse.io/example/jobs/123',
     'https://boards.greenhouse.io/example/jobs/123',
     'https://job-boards.greenhouse.io/example/jobs/123',
     'https://job-boards.eu.greenhouse.io/example/jobs/123',

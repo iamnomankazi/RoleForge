@@ -78,14 +78,15 @@ function validateHttpUrl(value, label, { httpsOnly = false } = {}) {
 function supportedOverrideAtsHost(url) {
   const host = url.hostname.toLowerCase();
   const subdomainOf = (domain) => host.endsWith(`.${domain}`);
-  const greenhouse = host === 'greenhouse.io' || subdomainOf('greenhouse.io');
+  // Posting hosts only: API and support subdomains are not application destinations.
+  const greenhouse = ['boards.greenhouse.io', 'job-boards.greenhouse.io', 'job-boards.eu.greenhouse.io'].includes(host);
   // The identity parser accepts gh_jid on any host; overrides must stay on Greenhouse.
   if (url.searchParams.has('gh_jid') && !greenhouse) return false;
   return greenhouse
     || ['jobs.lever.co', 'jobs.eu.lever.co', 'jobs.ashbyhq.com',
       'jobs.smartrecruiters.com', 'careers.smartrecruiters.com', 'apply.workable.com'].includes(host)
     || subdomainOf('myworkdayjobs.com')
-    || subdomainOf('personio.de') || subdomainOf('personio.com');
+    || /^[a-z0-9][a-z0-9-]*.jobs.personio.(?:de|com)$/.test(host);
 }
 
 function validateOverrides(overrides, sourceIds) {

@@ -305,6 +305,8 @@ test('pre-open transient classification is limited to transport, liveness, and l
       [`${stage} invalid argument code`, { code: 'ERR_INVALID_ARG_TYPE', message: 'browserType.launch: Failed to launch' }, stage, null],
       [`${stage} unexpected error`, { message: 'Fictional process failed to start' }, stage, null],
       [`${stage} missing host dependencies`, { message: 'browserType.launchPersistentContext: Host system is missing dependencies to run browsers.' }, stage, null],
+      [`${stage} host dependency wording`, { message: 'browserType.launch: missing host dependencies' }, stage, null],
+      [`${stage} shared library`, { message: 'browserType.launch: error while loading shared libraries: libfictional.so' }, stage, null],
       [`${stage} browser not installed`, { message: "browserType.launch: Executable doesn't exist at /fictional/chrome" }, stage, null],
     ]),
     ['unexpected error', { message: 'Unexpected fictional error' }, 'liveness', null],
@@ -413,6 +415,8 @@ test('shared blank documents and candidate popups bound pre-open retries', async
   const cases = [
     ['empty shared document', 'about:blank', '', '', 'api', false],
     ['untouched blank skeleton', 'about:blank', '<head></head><body></body>', '', 'api', false],
+    ['blank document without body', 'about:blank', '', '', 'no_body', true],
+    ['blank body with shadow root', 'about:blank', '', '', 'shadow_body', true],
     ['shared HTML without navigation', 'about:blank', '<main>Fictional form</main>', '', 'api', true],
     ['shared body text', 'about:blank', '', 'Fictional form', 'api', true],
     ['unreadable shared document', 'about:blank', '', '', 'evaluate_error', true],
@@ -440,8 +444,13 @@ test('shared blank documents and candidate popups bound pre-open retries', async
           if (kind === 'evaluate_popup') fake.context.emit('page', {});
           return runInNewContext(`(${fn})()`, {
             document: {
+              documentElement: {},
               head: { childElementCount: 0 },
-              body: { innerText: text, childElementCount: /<(?![/]?(?:head|body)\b)[a-z]/i.test(html) ? 1 : 0 },
+              body: kind === 'no_body' ? null : {
+                innerText: text,
+                shadowRoot: kind === 'shadow_body' ? {} : null,
+                childElementCount: /<(?![/]?(?:head|body)\b)[a-z]/i.test(html) ? 1 : 0,
+              },
             },
           });
         };
