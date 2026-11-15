@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { writeImmutableScanRun } from '../scan-candidate-contract.mjs';
@@ -166,10 +166,19 @@ test('owner CV overrides record the automatic choice and bind, validate, and dis
   }
 });
 
-test('override integrity and deterministic replay reject tampering and invalid records', () => {
+test('override integrity and deterministic replay reject tampering and invalid records', async () => {
   const f = fixture();
   try {
     const options = { manifestPath: f.batch.manifestPath, candidateId: f.candidateId, root: f.root };
+    const automatic = createDocumentPlan(options);
+    for (const change of [
+      (copy) => { copy.cv.override = { reason: 'Injected override.', automatic: { variant: copy.cv.variant, decision: copy.cv.decision, path: copy.cv.path } }; },
+      (copy) => { copy.cv.decision = 'owner_override'; },
+    ]) {
+      const copy = structuredClone(automatic);
+      change(copy);
+      assert.throws(() => validateDocumentPlan(rehashPlan(copy), f.batch.manifestPath, f.root), /Selected CV changed|CV override/);
+    }
     const plan = createDocumentPlan({ ...options, cvOverride: { variant: 'ai_ml', reason: 'Owner reviewed the role.' } });
     for (const change of [
       (copy) => { copy.cv.override.reason = 'Changed reason.'; },
@@ -182,6 +191,7 @@ test('override integrity and deterministic replay reject tampering and invalid r
     }
     for (const change of [
       (copy) => { copy.cv.override.automatic = { error: 'Invented automatic failure' }; },
+      (copy) => { copy.cv.override.automatic.variant = 'master'; },
       (copy) => { copy.cv.variant = 'master'; },
       (copy) => { copy.cv.variant = 'unapproved'; },
       (copy) => { delete copy.cv.override; },
@@ -191,6 +201,15 @@ test('override integrity and deterministic replay reject tampering and invalid r
       change(copy);
       assert.throws(() => validateDocumentPlan(rehashPlan(copy), f.batch.manifestPath, f.root), /Selected CV changed|CV override|approved CV variant/);
     }
+    const altered = structuredClone(plan);
+    altered.cv.override.reason = 'Changed after confirmation.';
+    rehashPlan(altered);
+    assert.notEqual(altered.planHash, plan.planHash);
+    assert.equal(validateDocumentPlan(altered, f.batch.manifestPath, f.root).cvSelection.variant, 'ai_ml');
+    await assert.rejects(() => prepareAndBindDocuments({
+      ...options, plan: altered, confirmPlanHash: plan.planHash,
+    }), /Explicit document-plan confirmation must equal/);
+    assert.equal(existsSync(dirname(altered.coverLetter.pdfPath)), false);
     for (const variant of ['unknown', 'non_tech', '__proto__', 'toString']) {
       assert.throws(() => createDocumentPlan({ ...options, cvOverride: { variant, reason: 'Reviewed.' } }), /approved CV variant/);
     }
@@ -222,20 +241,32 @@ test('an override records an ambiguous automatic role family and replays review-
   }
 });
 
-test('document CLI requires both override flags, previews the override, and prepares the confirmed plan', () => {
-  const script = fileURLToPath(new URL('../application-documents.mjs', import.meta.url));
-  const run = (...args) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8' });
-  for (const flags of [['--cv-variant', 'master'], ['--cv-reason', 'Reviewed.']]) {
-    const result = run('plan', ...flags);
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /--cv-variant and --cv-reason must be supplied together/);
-  }
+test('document CLI ignores --root, requires both override flags, previews the override, and prepares the confirmed plan', () => {
   const f = fixture();
   try {
-    const common = ['--root', f.root, '--manifest', f.batch.manifestPath, '--candidate-id', f.candidateId];
+    // Run the CLI with its module-defined ROOT in an isolated synthetic project.
+    const sourceRoot = fileURLToPath(new URL('..', import.meta.url));
+    for (const name of readdirSync(sourceRoot).filter((name) => name.endsWith('.mjs'))) {
+      copyFileSync(join(sourceRoot, name), join(f.root, name));
+    }
+    copyFileSync(join(sourceRoot, 'tracker-aliases.json'), join(f.root, 'tracker-aliases.json'));
+    cpSync(join(sourceRoot, 'templates'), join(f.root, 'templates'), { recursive: true });
+    symlinkSync(join(sourceRoot, 'node_modules'), join(f.root, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
+    const script = join(f.root, 'application-documents.mjs');
+    const run = (...args) => spawnSync(process.execPath, [script, ...args], { cwd: f.root, encoding: 'utf8' });
+    const help = run('--help');
+    assert.equal(help.status, 0, help.stderr);
+    assert.doesNotMatch(help.stdout, /--root/);
+    for (const flags of [['--cv-variant', 'master'], ['--cv-reason', 'Reviewed.']]) {
+      const result = run('plan', ...flags);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /--cv-variant and --cv-reason must be supplied together/);
+    }
+    const common = ['--root', join(f.root, 'ignored-root'), '--manifest', relative(f.root, f.batch.manifestPath), '--candidate-id', f.candidateId];
     const result = run('plan', ...common, '--cv-variant', 'ai_ml', '--cv-reason', 'Owner reviewed the ML emphasis.');
     assert.equal(result.status, 0, result.stderr);
     const preview = JSON.parse(result.stdout);
+    assert.equal(preview.plan, join(dirname(f.batch.manifestPath), 'documents', f.candidateId, 'plan.json'));
     assert.equal(preview.cv, 'Alex Example AI ML CV.pdf');
     assert.equal(preview.cvVariant, 'ai_ml');
     assert.equal(preview.cvDecision, 'owner_override');

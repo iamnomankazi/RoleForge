@@ -673,8 +673,8 @@ function parseArgs(argv) {
 function usage() {
   return [
     'Usage:',
-    '  node application-documents.mjs plan --manifest <manifest.json> --candidate-id <id> [--jd-file <exact-local-file>] [--claims-manifest <claim-manifest.json>] [--cover-v2-approved <approved.json>] [--cv-variant <variant> --cv-reason "<text>"] [--root <project-root>] [--replace]',
-    '  node application-documents.mjs prepare --manifest <manifest.json> --candidate-id <id> --plan <plan.json> --confirm-plan <sha256> [--root <project-root>] [--replace]',
+    '  node application-documents.mjs plan --manifest <manifest.json> --candidate-id <id> [--jd-file <exact-local-file>] [--claims-manifest <claim-manifest.json>] [--cover-v2-approved <approved.json>] [--cv-variant <variant> --cv-reason "<text>"] [--replace]',
+    '  node application-documents.mjs prepare --manifest <manifest.json> --candidate-id <id> --plan <plan.json> --confirm-plan <sha256> [--replace]',
     '  node application-documents.mjs combine --manifest <manifest.json> --candidate-id <id> --confirm-form-evidence <sha256> [--replace]',
   ].join('\n');
 }
@@ -692,7 +692,6 @@ async function main() {
       claimManifestPath: options['claims-manifest'] || null,
       coverV2Approved: options['cover-v2-approved'] || null,
       cvOverride: options.cvOverride || null,
-      root: options.root || ROOT,
       replace: options.replace,
     });
     const planPath = join(dirname(resolve(options.manifest)), 'documents', plan.candidateId, 'plan.json');
@@ -718,7 +717,6 @@ async function main() {
       candidateId: options['candidate-id'],
       plan,
       confirmPlanHash: options['confirm-plan'],
-      root: options.root || ROOT,
       replace: options.replace,
     });
     console.log(JSON.stringify(result, null, 2));
