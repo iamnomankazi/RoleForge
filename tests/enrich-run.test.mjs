@@ -231,6 +231,7 @@ test('listing_url re-sourcing clears old aliases and liveness while preserving s
     assert.equal(candidate.url, nextUrl);
     assert.equal(candidate.original_url, nextUrl);
     assert.equal(candidate.source_url, 'https://board.example.test/listing/100');
+    assert.deepEqual(candidate.provenance.filter((entry) => entry.input === 'synthetic-source'), [{ input: 'synthetic-source', row: 1 }]);
     assert.ok(!candidate.url_aliases.includes(oldUrl));
     assert.equal(candidate.liveness_status, 'unconfirmed');
     assert.match(candidate.liveness_reason, /re-sourced/i);
@@ -256,6 +257,8 @@ test('re-sourcing to another Greenhouse requisition derives new identity without
     assert.equal(candidateAt(result).ats_provider, 'greenhouse');
     assert.equal(candidateAt(result).ats_tenant, 'example');
     assert.equal(candidateAt(result).requisition_id, '200');
+    // No prior source_url: the previous listing becomes the attribution.
+    assert.equal(candidateAt(result).source_url, oldUrl);
     assert.notEqual(candidateAt(result).candidate_id, source.candidate_id);
     assert.equal(result.enrichment[0].previous_ats_identity.requisition_id, '100');
   } finally { f.cleanup(); }
@@ -281,6 +284,179 @@ test('re-sourcing to an employer page drops all old ATS identity', async () => {
     assert.notEqual(candidate.candidate_id, source.candidate_id);
     assert.equal(candidate.url, newUrl);
     assert.equal(result.enrichment[0].previous_ats_identity.requisition_id, '100');
+  } finally { f.cleanup(); }
+});
+
+test('re-sourcing clears every contract and identity URL input independently', async () => {
+  const oldUrl = 'https://boards.greenhouse.io/example/jobs/100';
+  const urlFields = [
+    'url', 'original_url', 'originalUrl', 'listing_url', 'listingUrl', 'job_url', 'jobUrl',
+    'resolved_url', 'resolvedUrl', 'final_url', 'finalUrl', 'apply_url', 'applyUrl',
+    'canonical_url', 'canonicalUrl', 'url_aliases', 'urlAliases',
+  ];
+  for (const [index, field] of urlFields.entries()) {
+    const f = fixture([{ company: 'Example Oy', title: 'Engineer', url: 'https://careers.example.test/roles/source' }]);
+    try {
+      const source = f.sourceCandidates[0];
+      const sourcePath = join(f.sourceRunDir, 'candidates.json');
+      const rows = JSON.parse(readFileSync(sourcePath, 'utf8'));
+      rows[0][field] = field === 'url_aliases' || field === 'urlAliases' ? [oldUrl] : oldUrl;
+      writeFileSync(sourcePath, `${JSON.stringify(rows, null, 2)}\n`, 'utf8');
+      f.writeLiveManifest();
+      const nextUrl = 'https://careers.example.test/roles/current';
+      const result = await enrich(f, `url-resourced-${index}`, {
+        overrides: { [source.candidate_id]: { listing_url: nextUrl, reason: 'Owner confirmed current listing' } },
+      });
+      const candidate = candidateAt(result);
+      assert.equal(candidate.url, nextUrl, field);
+      assert.equal(candidate.ats_provider, null, field);
+      assert.equal(candidate.ats_tenant, null, field);
+      assert.equal(candidate.requisition_id, null, field);
+      assert.equal(candidate.provider, candidate.source, field); // no ATS identity: provider falls back to discovery attribution
+      assert.ok(!candidate.url_aliases.some((url) => url.includes('boards.greenhouse.io')), field);
+      assert.equal(result.enrichment[0].previous_urls[field] != null, true, field);
+    } finally { f.cleanup(); }
+  }
+});
+
+test('re-sourcing clears every explicit identity source, including source as a provider fallback', async () => {
+  const identityCases = [
+    ['ats_provider', 'greenhouse'], ['atsProvider', 'greenhouse'],
+    ['ats_tenant', 'example'], ['atsTenant', 'example'], ['tenant', 'example'],
+    ['boardToken', 'example'], ['board_token', 'example'],
+    ['companyIdentifier', 'example'], ['company_identifier', 'example'],
+    ['companySlug', 'example'], ['company_slug', 'example'],
+    ['requisition_id', '100'], ['requisitionId', '100'], ['jobId', '100'], ['job_id', '100'],
+    ['requisition', '100'], ['provider', 'greenhouse'], ['source', 'greenhouse'],
+  ];
+  for (const [index, [field, value]] of identityCases.entries()) {
+    const f = fixture([{
+      company: 'Example Oy', title: 'Engineer', url: 'https://careers.example.test/roles/source',
+      provider: 'greenhouse', ats_tenant: 'example', requisition_id: '100',
+    }]);
+    try {
+      const source = f.sourceCandidates[0];
+      const sourcePath = join(f.sourceRunDir, 'candidates.json');
+      const rows = JSON.parse(readFileSync(sourcePath, 'utf8'));
+      rows[0][field] = value;
+      writeFileSync(sourcePath, `${JSON.stringify(rows, null, 2)}\n`, 'utf8');
+      f.writeLiveManifest();
+      const result = await enrich(f, `identity-resourced-${index}`, {
+        overrides: { [source.candidate_id]: { listing_url: 'https://careers.example.test/roles/current', reason: 'Owner confirmed current listing' } },
+      });
+      const candidate = candidateAt(result);
+      assert.equal(candidate.ats_provider, null, field);
+      assert.equal(candidate.ats_tenant, null, field);
+      assert.equal(candidate.requisition_id, null, field);
+      assert.equal(candidate.provider, candidate.source, field); // no ATS identity: provider falls back to discovery attribution
+    } finally { f.cleanup(); }
+  }
+});
+
+test('a URL-only re-sourced row maps to the final ATS identity of a merged source row', async () => {
+  const sharedUrl = 'https://careers.example.test/roles/shared';
+  const f = fixture([
+    {
+      company: 'Example Oy', title: 'Engineer One', url: sharedUrl,
+      ats_provider: 'greenhouse', ats_tenant: 'example', requisition_id: '999',
+    },
+    { company: 'Example Oy', title: 'Engineer Two', url: 'https://careers.example.test/roles/other' },
+  ]);
+  try {
+    f.writeLiveManifest();
+    const [sourceA, sourceB] = f.sourceCandidates;
+    const result = await enrich(f, 'url-merge-mapping', {
+      overrides: {
+        [sourceB.candidate_id]: { listing_url: sharedUrl, reason: 'Owner confirmed shared listing' },
+      },
+    });
+    assert.equal(result.candidates.length, 1);
+    assert.equal(result.enrichment.length, 2);
+    assert.ok(result.enrichment.every((entry) => entry.candidate_id === result.candidates[0].candidate_id));
+    assert.equal(result.enrichment.find((entry) => entry.source_candidate_id === sourceA.candidate_id).candidate_id,
+      result.candidates[0].candidate_id);
+    const mappedB = result.enrichment.find((entry) => entry.source_candidate_id === sourceB.candidate_id);
+    assert.equal(mappedB.candidate_id, result.candidates[0].candidate_id);
+    assert.equal(mappedB.status, 'converged');
+    assert.equal(mappedB.converged, true);
+    assert.ok(mappedB.changes.includes('candidate_id_changed'));
+  } finally { f.cleanup(); }
+});
+
+test('portal company lookup uses the final apply URL identity and explicit company wins', async () => {
+  const f = fixture([{ company: 'Original Display', title: 'Engineer', url: 'https://careers.example.test/roles/one' }]);
+  try {
+    f.writeLiveManifest();
+    writeFileSync(join(f.root, 'portals.yml'), [
+      'tracked_companies:', '  - name: Portal Display', '    provider: greenhouse', '    ats_tenant: example', '',
+    ].join('\n'));
+    const sourceId = f.sourceCandidates[0].candidate_id;
+    const applied = await enrich(f, 'portal-final-apply', {
+      overrides: { [sourceId]: {
+        apply_url: 'https://boards.greenhouse.io/example/jobs/321', reason: 'Owner verified application endpoint',
+      } },
+    });
+    assert.equal(candidateAt(applied).company, 'Portal Display');
+    assert.ok(applied.enrichment[0].changes.includes('company_from_portals'));
+
+    const resourced = await enrich(f, 'portal-final-resourced', {
+      overrides: { [sourceId]: {
+        listing_url: 'https://boards.greenhouse.io/example/jobs/654', reason: 'Owner confirmed current posting',
+      } },
+    });
+    assert.equal(candidateAt(resourced).company, 'Portal Display');
+    assert.ok(resourced.enrichment[0].changes.includes('company_from_portals'));
+
+    const explicit = await enrich(f, 'portal-company-override', {
+      overrides: { [sourceId]: {
+        apply_url: 'https://boards.greenhouse.io/example/jobs/321', company: 'Owner Display',
+        reason: 'Owner verified company display name',
+      } },
+    });
+    assert.equal(candidateAt(explicit).company, 'Owner Display');
+    assert.ok(explicit.enrichment[0].changes.includes('company_override'));
+  } finally { f.cleanup(); }
+});
+
+test('portal lookup derives Greenhouse tenant from a board URL or API configuration', async () => {
+  for (const [index, configField, configUrl] of [
+    [0, 'careers_url', 'https://boards.greenhouse.io/example'],
+    [1, 'api', 'https://boards-api.greenhouse.io/v1/boards/example/jobs'],
+  ]) {
+    const f = fixture([{
+      company: 'Original Display', title: 'Engineer', url: 'https://boards.greenhouse.io/example/jobs/321',
+    }]);
+    try {
+      f.writeLiveManifest();
+      writeFileSync(join(f.root, 'portals.yml'), [
+        'tracked_companies:', '  - name: Portal Display', '    provider: greenhouse', `    ${configField}: ${configUrl}`, '',
+      ].join('\n'));
+      const result = await enrich(f, `portal-config-tenant-${index}`);
+      assert.equal(candidateAt(result).company, 'Portal Display');
+    } finally { f.cleanup(); }
+  }
+});
+
+test('enrichment preserves configured location ordering for planning and publication', async () => {
+  const f = fixture([
+    { company: 'Example Oy', title: 'Finland Role', url: 'https://careers.example.test/roles/finland', location: 'Finland' },
+    { company: 'Example Oy', title: 'Germany Role', url: 'https://careers.example.test/roles/germany', location: 'Germany' },
+    { company: 'Example Oy', title: 'Netherlands Role', url: 'https://careers.example.test/roles/netherlands', location: 'Netherlands' },
+  ]);
+  try {
+    f.writeLiveManifest();
+    mkdirSync(join(f.root, 'config'), { recursive: true });
+    writeFileSync(join(f.root, 'config', 'profile.yml'), 'scan:\n  location_priority:\n    - Netherlands\n    - Finland\n    - Germany\n', 'utf8');
+    const planned = await enrich(f, 'configured-location-plan', { dryRun: true });
+    assert.deepEqual(planned.candidates.map((candidate) => candidate.title), [
+      'Netherlands Role', 'Finland Role', 'Germany Role',
+    ]);
+    const published = await enrich(f, 'configured-location-published');
+    assert.deepEqual(published.candidates.map((candidate) => candidate.title), [
+      'Netherlands Role', 'Finland Role', 'Germany Role',
+    ]);
+    assert.deepEqual(JSON.parse(readFileSync(join(published.runDir, 'candidates.json'), 'utf8'))
+      .map((candidate) => candidate.title), ['Netherlands Role', 'Finland Role', 'Germany Role']);
   } finally { f.cleanup(); }
 });
 

@@ -11,6 +11,7 @@ import yaml from 'js-yaml';
 import {
   atsIdentityFromUrl,
   candidateIdentityMetadata,
+  collectCandidateIdentityAliases,
 } from './candidate-identity.mjs';
 import {
   buildImmutableScanRun,
@@ -28,6 +29,13 @@ const EXPLICIT_IDENTITY_KEYS = [
   'ats_provider', 'atsProvider', 'ats_tenant', 'atsTenant', 'tenant', 'boardToken', 'board_token',
   'companyIdentifier', 'company_identifier', 'companySlug', 'company_slug',
   'requisition_id', 'requisitionId', 'jobId', 'job_id', 'requisition', 'provider',
+];
+// `source` and `source_url` are discovery attribution, not identity inputs: they are
+// kept on re-sourcing (spec S-2) so "How did you hear" provenance survives.
+const URL_IDENTITY_KEYS = [
+  'url', 'original_url', 'originalUrl', 'listing_url', 'listingUrl', 'job_url', 'jobUrl',
+  'resolved_url', 'resolvedUrl', 'final_url', 'finalUrl', 'apply_url', 'applyUrl',
+  'canonical_url', 'canonicalUrl', 'url_aliases', 'urlAliases',
 ];
 const OVERRIDE_KEYS = new Set(['apply_url', 'listing_url', 'company', 'reason']);
 
@@ -178,6 +186,26 @@ function tenantFromPostingUrl(value) {
   return parts.length >= 4 ? { provider: parts[1], tenant: parts.slice(2, -1).join(':') } : null;
 }
 
+function greenhouseTenantFromConfigUrl(value) {
+  if (typeof value !== 'string' || !value) return null;
+  let url;
+  try { url = new URL(value); } catch { return null; }
+  if (url.protocol !== 'https:' || url.username || url.password) return null;
+  const host = url.hostname.toLowerCase();
+  if (host === 'boards-api.greenhouse.io') {
+    const match = url.pathname.match(/^\/v1\/boards\/([a-z0-9][a-z0-9_-]*)\/jobs\/?$/i);
+    return match ? match[1] : null;
+  }
+  if (!['boards.greenhouse.io', 'job-boards.greenhouse.io', 'job-boards.eu.greenhouse.io'].includes(host)) return null;
+  if (url.pathname === '/embed/job_board' || url.pathname === '/embed/job_board/') {
+    const values = url.searchParams.getAll('for');
+    return values.length === 1 && /^[a-z0-9][a-z0-9_-]*$/i.test(values[0]) ? values[0] : null;
+  }
+  if (url.pathname === '/embed' || url.pathname.startsWith('/embed/')) return null;
+  const tenant = url.pathname.split('/').filter(Boolean)[0];
+  return tenant && /^[a-z0-9][a-z0-9_-]*$/i.test(tenant) ? tenant : null;
+}
+
 async function portalCompanyNames(config) {
   const entries = Array.isArray(config?.tracked_companies) ? config.tracked_companies : [];
   const providers = await loadProviders(join(SCRIPT_DIR, 'providers'));
@@ -192,9 +220,15 @@ async function portalCompanyNames(config) {
       const resolved = resolveProvider(entry, providers);
       if (!resolved?.provider || normalizePart(resolved.provider.id) !== providerId) continue;
       const configuredTenants = EXPLICIT_TENANT_KEYS.map((key) => entry[key]).filter(Boolean);
-      for (const value of [entry.careers_url, entry.url]) {
+      let providerConfigUrl = null;
+      try { providerConfigUrl = resolved.provider.detect?.(entry)?.url ?? null; } catch { /* ignore unusable provider config */ }
+      for (const value of [entry.careers_url, entry.api, entry.url, providerConfigUrl]) {
         const fromUrl = tenantFromPostingUrl(value);
         if (fromUrl?.provider === providerId) configuredTenants.push(fromUrl.tenant);
+        if (providerId === 'greenhouse') {
+          const greenhouseTenant = greenhouseTenantFromConfigUrl(value);
+          if (greenhouseTenant) configuredTenants.push(greenhouseTenant);
+        }
       }
       if (configuredTenants.some((value) => normalizePart(value) === tenant)) return entry.name.trim();
     }
@@ -310,6 +344,7 @@ export async function planEnrichment({
     const reasons = [];
     const previousListingUrl = candidateListingUrl(original);
     let previousAtsIdentity = null;
+    let previousUrls = null;
     let descriptionFailure = null;
     const record = liveness.rows[sourceId] && typeof liveness.rows[sourceId] === 'object'
       ? liveness.rows[sourceId] : null;
@@ -322,14 +357,14 @@ export async function planEnrichment({
     if (isResourced) {
       previousAtsIdentity = explicitIdentityValues(row);
       for (const key of EXPLICIT_IDENTITY_KEYS) delete row[key];
+      previousUrls = Object.fromEntries(URL_IDENTITY_KEYS
+        .filter((key) => row[key] != null && row[key] !== '' && !(Array.isArray(row[key]) && row[key].length === 0))
+        .map((key) => [key, row[key]]));
+      for (const key of URL_IDENTITY_KEYS) delete row[key];
+      row.source_url = row.source_url || row.sourceUrl || previousListingUrl;
+      delete row.sourceUrl;
       row.url = owner.listing_url;
       row.original_url = owner.listing_url;
-      row.resolved_url = null;
-      row.apply_url = null;
-      row.applyUrl = null;
-      row.canonical_url = null;
-      row.url_aliases = [];
-      row.source_url = row.source_url || row.sourceUrl || previousListingUrl;
       row.liveness_status = 'unconfirmed';
       row.livenessStatus = 'unconfirmed';
       row.liveness_code = 'enrich:unconfirmed';
@@ -373,28 +408,27 @@ export async function planEnrichment({
       }
     }
 
-    if (!isResourced) {
-      let identity;
-      try { identity = candidateIdentityMetadata(row); } catch (error) {
-        if (owner && Object.hasOwn(owner, 'apply_url')) {
-          throw new Error(`Override for ${sourceId} conflicts with the record identity: ${error.message}`);
-        }
-        throw error;
-      }
-      const portalCompany = companyForCandidate(identity);
-      if (portalCompany && row.company !== portalCompany) {
-        row.company = portalCompany;
-        changes.push('company_from_portals');
-        reasons.push(`Company name matched portals.yml: ${portalCompany}`);
-      }
-    }
-
     if (owner && Object.hasOwn(owner, 'apply_url')) {
       row.apply_url = owner.apply_url;
       row.applyUrl = undefined;
       changes.push('apply_url_override');
       reasons.push(owner.reason);
     }
+
+    let identity;
+    try { identity = candidateIdentityMetadata(row); } catch (error) {
+      if (owner && Object.hasOwn(owner, 'apply_url')) {
+        throw new Error(`Override for ${sourceId} conflicts with the record identity: ${error.message}`);
+      }
+      throw error;
+    }
+    const portalCompany = companyForCandidate(identity);
+    if (portalCompany && row.company !== portalCompany) {
+      row.company = portalCompany;
+      changes.push('company_from_portals');
+      reasons.push(`Company name matched portals.yml: ${portalCompany}`);
+    }
+
     if (owner && Object.hasOwn(owner, 'company')) {
       if (row.company !== owner.company) changes.push('company_override');
       row.company = owner.company;
@@ -416,7 +450,6 @@ export async function planEnrichment({
       throw error;
     }
     if (!normalized) throw new Error(`Source candidate ${sourceId} cannot be normalized by the scan contract`);
-    if (normalized.candidate_id !== sourceId) changes.push('candidate_id_changed');
     transformed.push(row);
     sourceMetadata.push({
       source_candidate_id: sourceId,
@@ -426,12 +459,15 @@ export async function planEnrichment({
       reason: reasons.join('; ') || (record ? 'No enrichment changes were needed' : 'No liveness entry was available'),
       previous_listing_url: isResourced ? previousListingUrl : null,
       previous_ats_identity: isResourced && Object.keys(previousAtsIdentity).length ? previousAtsIdentity : null,
+      ...(isResourced && Object.keys(previousUrls).length ? { previous_urls: previousUrls } : {}),
       liveness_status: mappingLivenessStatus,
       liveness_checked_at: checkedAt,
       ...(descriptionDigest ? { description_sha256: descriptionDigest } : {}),
       ...(storedDescriptionDigest ? { stored_description_sha256: storedDescriptionDigest } : {}),
     });
   }
+
+  const sourceIdentityAliases = transformed.map((row) => collectCandidateIdentityAliases(row));
 
   const inputs = [{ name: 'enrich-run', rows: transformed }];
   const derivedFrom = sourceRunId;
@@ -449,13 +485,27 @@ export async function planEnrichment({
     createdAt,
     sourceArchitecture: 'enrich-run',
     metadata: metadataBase,
-    locationPriority: [],
   });
-  const outputIds = new Set(built.candidates.map((candidate) => candidate.candidate_id));
-  for (const entry of sourceMetadata) {
-    if (!outputIds.has(entry.candidate_id)) {
-      throw new Error(`Enrichment mapping for ${entry.source_candidate_id} does not match built candidate IDs`);
+  const outputCandidates = built.candidates.map((candidate) => ({
+    candidate,
+    identity: collectCandidateIdentityAliases(candidate),
+  }));
+  for (const [index, entry] of sourceMetadata.entries()) {
+    const identity = sourceIdentityAliases[index];
+    const matches = outputCandidates.filter(({ identity: outputIdentity }) => (
+      identity.ats.length
+        ? identity.ats.some((ats) => outputIdentity.ats.includes(ats))
+        : Boolean(identity.primaryUrl) && identity.primaryUrl === outputIdentity.primaryUrl
+    ));
+    if (matches.length !== 1) {
+      throw new Error(`Enrichment mapping for ${entry.source_candidate_id} resolved to ${matches.length} built candidates`);
     }
+    const finalCandidateId = matches[0].candidate.candidate_id;
+    if (entry.source_candidate_id !== finalCandidateId) {
+      entry.changes.push('candidate_id_changed');
+      if (entry.status === 'unchanged') entry.status = 'enriched';
+    }
+    entry.candidate_id = finalCandidateId;
   }
   const counts = new Map();
   for (const entry of sourceMetadata) counts.set(entry.candidate_id, (counts.get(entry.candidate_id) || 0) + 1);
@@ -477,7 +527,6 @@ export async function planEnrichment({
     createdAt,
     sourceArchitecture: 'enrich-run',
     metadata,
-    locationPriority: [],
   });
   if (JSON.stringify(finalBuilt.candidates) !== JSON.stringify(built.candidates)) {
     throw new Error('Scan contract candidates changed while binding enrichment.json hash');
@@ -514,7 +563,6 @@ export async function enrichRun(options = {}) {
     createdAt: plan.createdAt,
     sourceArchitecture: 'enrich-run',
     metadata: plan.metadata,
-    locationPriority: [],
     extraFiles: { 'enrichment.json': plan.enrichmentContent },
   });
   if (JSON.stringify(written.candidates) !== JSON.stringify(plan.candidates)) {
