@@ -26,6 +26,18 @@ test('doctor reports graduation-date mismatches as non-blocking JSON warnings', 
     const matching = run();
     assert.equal(matching.status, 0, matching.stderr);
     assert.deepEqual(JSON.parse(matching.stdout).warnings, []);
+
+    writeFileSync(resolve(root, 'cv.md'), '**Master of Science in Computer Science** | 2023 - Present (graduation expected May 2027)\n');
+    const educationMatches = run();
+    assert.equal(educationMatches.status, 0, educationMatches.stderr);
+    assert.deepEqual(JSON.parse(educationMatches.stdout).warnings, []);
+
+    writeFileSync(resolve(root, 'config/profile.yml'), 'education_details:\n  expected_graduation_date: 31/12/2026\n');
+    const educationMismatch = run();
+    assert.equal(educationMismatch.status, 0, educationMismatch.stderr);
+    assert.ok(JSON.parse(educationMismatch.stdout).warnings.some((warning) => (
+      warning === 'Graduation date in cv.md line 1 (May 2027) differs from config/profile.yml (31/12/2026)'
+    )));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -58,6 +58,47 @@ function mentionsGraduationTiming(summary) {
   return evidence.some((value) => /\bgraduation\s+date\b/i.test(value) || findGraduationDates(value).length > 0);
 }
 
+function citedDates(summary) {
+  const values = [
+    ...evidenceValues(summary?.soft_gaps),
+    ...evidenceValues(summary?.flags),
+    ...evidenceValues(summary?.blockers),
+    ...evidenceValues(summary?.prescreen?.flags),
+    ...evidenceValues(summary?.prescreen?.blockers),
+    ...evidenceValues(summary?.next_action),
+  ];
+  // A graduation_window blocker's evidence is graduation-related by definition,
+  // even when the quoted date is shown without surrounding graduation wording.
+  const contextualBlockerEvidence = graduationBlockers(summary)
+    .flatMap((blocker) => evidenceValues(blocker.evidence))
+    .map((value) => `Graduation date: ${value}`);
+  return [...values, ...contextualBlockerEvidence];
+}
+
+function profileDateParts(value) {
+  if (typeof value !== 'string') return null;
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return match ? { year: Number(match[1]), month: Number(match[2]) } : null;
+}
+
+function addCitationDetails(entry, summary, profileGraduationDate) {
+  const current = profileDateParts(profileGraduationDate);
+  const citations = new Map();
+  for (const value of citedDates(summary)) {
+    for (const date of findGraduationDates(value)) {
+      const normalized = date.month == null
+        ? String(date.year)
+        : `${date.year}-${String(date.month).padStart(2, '0')}`;
+      citations.set(normalized, date);
+    }
+  }
+  entry.cites_profile_dates = [...citations.keys()];
+  entry.cites_stale_profile_date = current
+    ? [...citations.values()].some((date) => date.year !== current.year
+      || (date.month != null && date.month !== current.month))
+    : false;
+}
+
 function safeDescriptionFilename(candidateId) {
   const filename = `${candidateId}.txt`;
   return /^[A-Za-z0-9._-]{1,200}\.txt$/.test(filename) && candidateId !== '.' && candidateId !== '..'
@@ -166,10 +207,12 @@ export function recheckAssessments({ root = process.cwd(), profilePath, liveness
   const warnings = [...(reportIndex.warnings ?? []), ...(runCandidates.warnings ?? []), ...(mappings.warnings ?? [])];
   const superseded = new Set([...reportIndex.values()].map((report) => report.supersedes).filter(Number.isFinite));
   const lists = {
-    blocker_would_clear: [], blocker_would_appear: [], wording_mentions_graduation: [], cannot_check: [],
+    blocker_would_clear: [], blocker_still_applies: [], blocker_not_reproducible: [],
+    blocker_would_appear: [], wording_mentions_graduation: [], cannot_check: [],
   };
   const counts = {
-    blocker_would_clear: 0, blocker_would_appear: 0, wording_mentions_graduation: 0,
+    blocker_would_clear: 0, blocker_still_applies: 0, blocker_not_reproducible: 0,
+    blocker_would_appear: 0, wording_mentions_graduation: 0,
     cannot_check: 0, unchanged: 0, skipped_legacy: 0, skipped_superseded: 0,
   };
   const manifestCache = new Map();
@@ -222,14 +265,24 @@ export function recheckAssessments({ root = process.cwd(), profilePath, liveness
     const replayBlocker = replay.blockers.find((blocker) => blocker.code === 'graduation_window') ?? null;
     entry.replay_blocker = replayBlocker ? { evidence: replayBlocker.evidence, detail: replayBlocker.detail } : null;
     const reportHasBlocker = graduationBlockers(summary).length > 0;
-    if (reportHasBlocker && !replayBlocker) {
+    if (reportHasBlocker && replay.graduation_window?.eligible === true) {
       counts.blocker_would_clear += 1;
+      addCitationDetails(entry, summary, profile.graduation_date);
       lists.blocker_would_clear.push(entry);
+    } else if (reportHasBlocker && replayBlocker) {
+      counts.blocker_still_applies += 1;
+      addCitationDetails(entry, summary, profile.graduation_date);
+      lists.blocker_still_applies.push(entry);
+    } else if (reportHasBlocker && replay.graduation_window == null) {
+      counts.blocker_not_reproducible += 1;
+      addCitationDetails(entry, summary, profile.graduation_date);
+      lists.blocker_not_reproducible.push(entry);
     } else if (!reportHasBlocker && replayBlocker) {
       counts.blocker_would_appear += 1;
       lists.blocker_would_appear.push(entry);
     } else if (mentionsGraduationTiming(summary)) {
       counts.wording_mentions_graduation += 1;
+      addCitationDetails(entry, summary, profile.graduation_date);
       lists.wording_mentions_graduation.push(entry);
     } else {
       counts.unchanged += 1;
@@ -277,10 +330,13 @@ Options:
 function printHuman(result) {
   console.log(`Graduation assessment recheck (${result.profile_graduation_date ?? 'no profile date'})`);
   console.log(`Counts: ${JSON.stringify(result.counts)}`);
-  for (const key of ['blocker_would_clear', 'blocker_would_appear', 'wording_mentions_graduation']) {
+  for (const key of [
+    'blocker_would_clear', 'blocker_still_applies', 'blocker_not_reproducible',
+    'blocker_would_appear', 'wording_mentions_graduation',
+  ]) {
     console.log(`\n${key.replaceAll('_', ' ')} (${result.lists[key].length})`);
     for (const entry of result.lists[key]) {
-      console.log(`  #${entry.report} ${entry.title || '(untitled)'} — ${entry.company || '(unknown company)'} [${entry.file}]`);
+      console.log(`  #${entry.report} ${entry.title || '(untitled)'} cites_stale_profile_date=${entry.cites_stale_profile_date ?? false}`);
     }
   }
   if (result.warnings.length) console.log(`\nWarnings: ${result.warnings.length}`);

@@ -21,6 +21,40 @@ test('findGraduationDates recognizes month names, abbreviations, and supported n
   ]);
 });
 
+test('graduation dates take precedence over study-period years on the same line', () => {
+  const educationLine = '**Master of Science in Computer Science** | 2023 - Present (graduation expected May 2027)';
+  assert.deepEqual(findGraduationDates(educationLine), [
+    { month: 5, year: 2027, raw: 'May 2027', line: 1 },
+  ]);
+  assert.deepEqual(checkGraduationConsistency({
+    profile: { graduation_date: '31/05/2027' },
+    files: [{ path: 'cv.md', text: educationLine }],
+  }).mismatches, []);
+  assert.deepEqual(checkGraduationConsistency({
+    profile: { graduation_date: '31/12/2026' },
+    files: [{ path: 'cv.md', text: educationLine }],
+  }).mismatches.map(({ raw }) => raw), ['May 2027']);
+});
+
+test('year-only graduation dates must be attached to graduation wording, not a study range', () => {
+  assert.deepEqual(findGraduationDates('2021 - 2023 (graduated 2023)'), [
+    { month: null, year: 2023, raw: '2023', line: 1 },
+  ]);
+  assert.deepEqual(findGraduationDates('Graduation expected 12/2026'), [
+    { month: 12, year: 2026, raw: '12/2026', line: 1 },
+  ]);
+  assert.deepEqual(findGraduationDates('Expected 2027'), [
+    { month: null, year: 2027, raw: '2027', line: 1 },
+  ]);
+  assert.deepEqual(findGraduationDates('Applicants graduated before 2026'), [
+    { month: null, year: 2026, raw: '2026', line: 1 },
+  ]);
+  assert.deepEqual(findGraduationDates('2023 – 2025 (graduation date: 31.12.2026)'), [
+    { month: 12, year: 2026, raw: '31.12.2026', line: 1 },
+  ]);
+  assert.deepEqual(findGraduationDates('Graduation expected after the study period 2023 - 2025'), []);
+});
+
 test('consistency compares month and year, ignores unrelated dates, and compares year-only statements by year', () => {
   const profile = { education_details: { expected_graduation_date: '31/05/2027' } };
   const result = checkGraduationConsistency({ profile, files: [

@@ -5,7 +5,8 @@ const MONTHS = new Map([
   ['nov', 11], ['november', 11], ['dec', 12], ['december', 12],
 ]);
 const MONTH_PATTERN = '(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)';
-const GRADUATION_WORDING = /\bgraduat\w*\b|\bdegree\s+(?:completion|completed|finish(?:ed|ing))\b|\b(?:completed|finishing)\s+(?:(?:my|the|a)\s+)?(?:degree|studies|program)\b/i;
+const GRADUATION_WORDING = /\bgraduat\w*\b|\bdegree\s+(?:completion|completed|finish(?:ed|ing))\b|\b(?:completed|finishing)\s+(?:(?:my|the|a)\s+)?(?:degree|studies|program)\b|\bexpected\s+\d{4}\b/i;
+const DIRECT_GRADUATION_YEAR = /(?:\bgraduat\w*|\bdegree\s+(?:completion|completed|finish(?:ed|ing))\b)\s*(?:(?:date|expected|in|by|on|around|year|is|before|after|until|through)\s*){0,4}[:,\-]?\s*$|\bexpected\s*$/i;
 const DATE_PATTERN = new RegExp([
   String.raw`(?<![\p{L}\p{N}])\d{4}-\d{2}-\d{2}(?![\p{L}\p{N}])`,
   String.raw`(?<![\p{L}\p{N}])\d{1,2}[/.]\d{1,2}[/.]\d{4}(?![\p{L}\p{N}])`,
@@ -56,10 +57,16 @@ export function findGraduationDates(text) {
     if (!GRADUATION_WORDING.test(line)) continue;
     DATE_PATTERN.lastIndex = 0;
     let match;
+    const lineDates = [];
     while ((match = DATE_PATTERN.exec(line))) {
       const date = parsedDate(match[0]);
-      if (date) results.push({ ...date, raw: match[0], line: index + 1 });
+      if (date) lineDates.push({ ...date, raw: match[0], line: index + 1, index: match.index });
     }
+    const monthDates = lineDates.filter((date) => date.month != null);
+    const selectedDates = monthDates.length
+      ? monthDates
+      : lineDates.filter((date) => DIRECT_GRADUATION_YEAR.test(line.slice(0, date.index)));
+    results.push(...selectedDates.map(({ index: _index, ...date }) => date));
   }
   return results;
 }
