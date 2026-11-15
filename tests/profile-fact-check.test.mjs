@@ -36,6 +36,56 @@ test('graduation dates take precedence over study-period years on the same line'
   }).mismatches.map(({ raw }) => raw), ['May 2027']);
 });
 
+test('graduation dates are associated with their clause rather than other dates on the line', () => {
+  for (const [text, expected] of [
+    ['Studies September 2023 - May 2027 (graduation expected May 2027)', [
+      { month: 5, year: 2027, raw: 'May 2027', line: 1 },
+    ]],
+    ['Graduation expected 2028; project released May 2027', [
+      { month: null, year: 2028, raw: '2028', line: 1 },
+    ]],
+    ['**MSc** | 2023 - Present (graduation expected May 2027)', [
+      { month: 5, year: 2027, raw: 'May 2027', line: 1 },
+    ]],
+    ['2021 - 2023 (graduated 2023)', [
+      { month: null, year: 2023, raw: '2023', line: 1 },
+    ]],
+    ['Studies September 2023 – May 2027 (graduation expected May 2027)', [
+      { month: 5, year: 2027, raw: 'May 2027', line: 1 },
+    ]],
+    ['Graduation expected May 2027, project released June 2028.', [
+      { month: 5, year: 2027, raw: 'May 2027', line: 1 },
+    ]],
+    ['Project released May 2027. Graduation expected 2028! Project updated June 2029.', [
+      { month: null, year: 2028, raw: '2028', line: 1 },
+    ]],
+    ['Graduation expected 2028 (project released May 2027)', [
+      { month: null, year: 2028, raw: '2028', line: 1 },
+    ]],
+    ['Graduation: (May 2027)', [
+      { month: 5, year: 2027, raw: 'May 2027', line: 1 },
+    ]],
+    ['Graduation expected, 2028; project released May 2027', [
+      { month: null, year: 2028, raw: '2028', line: 1 },
+    ]],
+    ['Graduation date: Jan. 2027; project released May 2028.', [
+      { month: 1, year: 2027, raw: 'Jan. 2027', line: 1 },
+    ]],
+    ['Graduation date: 31.05.2027. Project released June 2028.', [
+      { month: 5, year: 2027, raw: '31.05.2027', line: 1 },
+    ]],
+    ['Graduation expected May 2027 – June 2028', [
+      { month: 5, year: 2027, raw: 'May 2027', line: 1 },
+    ]],
+    ['Graduation expected 2028 or May 2027; graduated 2026.', [
+      { month: 5, year: 2027, raw: 'May 2027', line: 1 },
+      { month: null, year: 2026, raw: '2026', line: 1 },
+    ]],
+  ]) {
+    assert.deepEqual(findGraduationDates(text), expected, text);
+  }
+});
+
 test('year-only graduation dates must be attached to graduation wording, not a study range', () => {
   assert.deepEqual(findGraduationDates('2021 - 2023 (graduated 2023)'), [
     { month: null, year: 2023, raw: '2023', line: 1 },
@@ -74,4 +124,9 @@ test('consistency compares month and year, ignores unrelated dates, and compares
     profile: { graduation_date: '31/05/2027' },
     files: [{ path: 'cv.md', text: 'Degree completion in 2028.' }],
   }).mismatches.map(({ year }) => year), [2028]);
+});
+
+test('underscored profile keys quoted in report evidence count as graduation wording', () => {
+  const found = findGraduationDates('JD: "enrolled for one more year"; profile.yml: "expected_graduation_date: 31/12/2026"');
+  assert.deepEqual(found.map(({ raw, month, year }) => ({ raw, month, year })), [{ raw: '31/12/2026', month: 12, year: 2026 }]);
 });

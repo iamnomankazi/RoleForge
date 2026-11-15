@@ -49,24 +49,52 @@ function parsedDate(raw) {
   return null;
 }
 
+function dateClauses(line) {
+  const dates = [...line.matchAll(DATE_PATTERN)];
+  const clauses = [];
+  let start = 0;
+  for (const boundary of line.matchAll(/[;(),]|[.!?](?=\s|$)|\s+-\s+|–/gu)) {
+    // Periods in numeric dates and month abbreviations belong to the date.
+    if (dates.some((date) => boundary.index >= date.index && boundary.index < date.index + date[0].length)) continue;
+    if (/[-–]/u.test(boundary[0])) {
+      const before = dates.some((date) => date.index + date[0].length <= boundary.index
+        && !line.slice(date.index + date[0].length, boundary.index).trim());
+      const after = dates.some((date) => date.index >= boundary.index + boundary[0].length
+        && !line.slice(boundary.index + boundary[0].length, date.index).trim());
+      if (!before || !after) continue;
+    }
+    clauses.push({ start, end: boundary.index });
+    start = boundary.index + boundary[0].length;
+  }
+  clauses.push({ start, end: line.length });
+  return clauses.map(({ start, end }) => ({
+    text: line.slice(start, end),
+    dates: dates.filter((date) => date.index >= start && date.index < end)
+      .map((date) => ({ raw: date[0], index: date.index - start, parsed: parsedDate(date[0]) }))
+      .filter((date) => date.parsed),
+  }));
+}
+
 /** Finds date statements tied to graduation wording. Lines are one-based. */
 export function findGraduationDates(text) {
   if (typeof text !== 'string' || !text) return [];
   const results = [];
-  for (const [index, line] of text.split(/\r?\n/).entries()) {
-    if (!GRADUATION_WORDING.test(line)) continue;
-    DATE_PATTERN.lastIndex = 0;
-    let match;
-    const lineDates = [];
-    while ((match = DATE_PATTERN.exec(line))) {
-      const date = parsedDate(match[0]);
-      if (date) lineDates.push({ ...date, raw: match[0], line: index + 1, index: match.index });
+  for (const [index, rawLine] of text.split(/\r?\n/).entries()) {
+    // Config keys such as expected_graduation_date use underscores; read them as words (same length, same indexes).
+    const line = rawLine.replace(/_/g, ' ');
+    const clauses = dateClauses(line);
+    for (const [clauseIndex, clause] of clauses.entries()) {
+      const previous = clauses[clauseIndex - 1];
+      const followsLabel = previous && !previous.dates.length
+        && /\bgraduat\w*\s*:\s*$|\bexpected\s*$/i.test(previous.text);
+      if (!GRADUATION_WORDING.test(clause.text) && !followsLabel) continue;
+      const monthDates = clause.dates.filter((date) => date.parsed.month != null);
+      const selectedDates = monthDates.length
+        ? monthDates
+        : clause.dates.filter((date) => DIRECT_GRADUATION_YEAR.test(clause.text.slice(0, date.index))
+          || (followsLabel && !clause.text.slice(0, date.index).trim()));
+      results.push(...selectedDates.map(({ parsed, raw }) => ({ ...parsed, raw, line: index + 1 })));
     }
-    const monthDates = lineDates.filter((date) => date.month != null);
-    const selectedDates = monthDates.length
-      ? monthDates
-      : lineDates.filter((date) => DIRECT_GRADUATION_YEAR.test(line.slice(0, date.index)));
-    results.push(...selectedDates.map(({ index: _index, ...date }) => date));
   }
   return results;
 }

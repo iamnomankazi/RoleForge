@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import { validateMachineSummary } from './assessment-contract.mjs';
@@ -55,7 +55,7 @@ function mentionsGraduationTiming(summary) {
     ...evidenceValues(summary?.prescreen?.blockers),
     ...evidenceValues(summary?.next_action),
   ];
-  return evidence.some((value) => /\bgraduation\s+date\b/i.test(value) || findGraduationDates(value).length > 0);
+  return evidence.some((value) => /\bgraduat\w*\b/i.test(value) || findGraduationDates(value).length > 0);
 }
 
 function citedDates(summary) {
@@ -171,20 +171,38 @@ function isInside(target, directory) {
   return path === '' || (!isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`));
 }
 
-function assertSafeOutput(outPath, { root, profilePath, livenessDirs }) {
-  const reportsDir = join(root, 'reports');
-  const scanRunsDir = join(root, 'output', 'scan-runs');
-  if (isInside(outPath, reportsDir) || isInside(outPath, scanRunsDir)) {
-    throw new Error('--out cannot point inside reports/ or output/scan-runs/');
+function canonicalPath(path) {
+  let current = resolve(path);
+  const suffix = [];
+  while (true) {
+    try { return resolve(realpathSync(current), ...suffix); }
+    catch (error) {
+      if (error?.code !== 'ENOENT' && error?.code !== 'ENOTDIR') throw error;
+      const parent = dirname(current);
+      if (parent === current) return resolve(path);
+      suffix.unshift(basename(current));
+      current = parent;
+    }
   }
-  const evidenceDirs = [join(root, 'output', 'identity-corrections'), ...livenessDirs];
-  if (evidenceDirs.some((directory) => isInside(outPath, directory))) {
-    throw new Error('--out cannot point inside identity-correction or liveness evidence directories');
+}
+
+function assertSafeOutput(outPath, { root, profilePath, livenessDirs }) {
+  const canonicalOut = canonicalPath(outPath);
+  const protectedDirs = [
+    ...['reports', 'data', 'config', 'output/scan-runs', 'output/application-batches', 'output/identity-corrections']
+      .map((part) => [join(root, part), `${part}/`]),
+    ...livenessDirs.map((directory) => [directory, 'liveness evidence directories']),
+  ];
+  for (const [directory, label] of protectedDirs) {
+    if (isInside(outPath, directory) || isInside(canonicalOut, canonicalPath(directory))) {
+      throw new Error(`--out cannot point inside ${label}`);
+    }
   }
   const protectedFiles = [profilePath, join(root, 'cv.md'), join(root, 'modes', '_profile.md')];
-  if (protectedFiles.some((file) => relative(file, outPath) === '')) {
+  if (protectedFiles.some((file) => relative(file, outPath) === '' || relative(canonicalPath(file), canonicalOut) === '')) {
     throw new Error('--out cannot overwrite the profile, CV, or profile notes');
   }
+  return canonicalOut;
 }
 
 /** Replays deterministic graduation-window prescreening without changing inputs. */
@@ -237,11 +255,18 @@ export function recheckAssessments({ root = process.cwd(), profilePath, liveness
     const candidateId = candidateIdFrom(report, summary);
     const entry = entryBase({ reportNumber, summary, candidateId, validation });
     entry.file = relative(projectRoot, report.file).split(sep).join('/');
+    addCitationDetails(entry, summary, profile.graduation_date);
+    const reportHasBlocker = graduationBlockers(summary).length > 0;
+    const reportMentionsGraduation = mentionsGraduationTiming(summary);
 
     const cannotCheck = (reason) => {
       counts.cannot_check += 1;
       lists.cannot_check.push({ ...entry, reason });
     };
+    if (!profile.graduation_date && (reportHasBlocker || reportMentionsGraduation)) {
+      cannotCheck('no_profile_graduation_date');
+      continue;
+    }
     if (!candidateId) {
       cannotCheck('no_candidate_id');
       continue;
@@ -264,25 +289,20 @@ export function recheckAssessments({ root = process.cwd(), profilePath, liveness
     entry.replay_graduation = replay.graduation_window;
     const replayBlocker = replay.blockers.find((blocker) => blocker.code === 'graduation_window') ?? null;
     entry.replay_blocker = replayBlocker ? { evidence: replayBlocker.evidence, detail: replayBlocker.detail } : null;
-    const reportHasBlocker = graduationBlockers(summary).length > 0;
-    if (reportHasBlocker && replay.graduation_window?.eligible === true) {
-      counts.blocker_would_clear += 1;
-      addCitationDetails(entry, summary, profile.graduation_date);
-      lists.blocker_would_clear.push(entry);
-    } else if (reportHasBlocker && replayBlocker) {
+    if (reportHasBlocker && replayBlocker) {
       counts.blocker_still_applies += 1;
-      addCitationDetails(entry, summary, profile.graduation_date);
       lists.blocker_still_applies.push(entry);
+    } else if (reportHasBlocker && replay.graduation_window?.eligible === true) {
+      counts.blocker_would_clear += 1;
+      lists.blocker_would_clear.push(entry);
     } else if (reportHasBlocker && replay.graduation_window == null) {
       counts.blocker_not_reproducible += 1;
-      addCitationDetails(entry, summary, profile.graduation_date);
       lists.blocker_not_reproducible.push(entry);
     } else if (!reportHasBlocker && replayBlocker) {
       counts.blocker_would_appear += 1;
       lists.blocker_would_appear.push(entry);
-    } else if (mentionsGraduationTiming(summary)) {
+    } else if (reportMentionsGraduation) {
       counts.wording_mentions_graduation += 1;
-      addCitationDetails(entry, summary, profile.graduation_date);
       lists.wording_mentions_graduation.push(entry);
     } else {
       counts.unchanged += 1;
@@ -350,8 +370,8 @@ function runCli() {
     if (args.out) {
       const outPath = resolve(args.out);
       const root = resolve(args.root);
-      assertSafeOutput(outPath, { root, profilePath: resolve(args.profile ?? join(root, 'config', 'profile.yml')), livenessDirs: args.livenessDirs.map((path) => resolve(path)) });
-      writeFileSync(outPath, `${JSON.stringify(result, null, 2)}\n`, 'utf8');
+      const safeOutPath = assertSafeOutput(outPath, { root, profilePath: resolve(args.profile ?? join(root, 'config', 'profile.yml')), livenessDirs: args.livenessDirs.map((path) => resolve(path)) });
+      writeFileSync(safeOutPath, `${JSON.stringify(result, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
     }
     if (args.json) console.log(JSON.stringify(result, null, 2));
     else printHuman(result);

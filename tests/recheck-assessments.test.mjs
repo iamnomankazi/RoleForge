@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -225,4 +225,192 @@ test('wording_mentions_graduation keeps reports outside blocker classifications 
     assert.deepEqual(entry.cites_profile_dates, ['2027-05']);
     assert.equal(entry.cites_stale_profile_date, false);
   });
+});
+
+test('a later replay graduation blocker takes precedence over the first eligible window', () => {
+  const fixture = makeFixture();
+  try {
+    const file = join(fixture.runs, 'candidates.json');
+    const candidates = JSON.parse(readFileSync(file, 'utf8'));
+    candidates.find((candidate) => candidate.candidate_id === fixture.ids.a).description = [
+      'Applicants must have graduated between 2026 and 2028.',
+      'Applicants must have graduated between 2023 and 2025.',
+      'Synthetic role requirements continue. '.repeat(5),
+    ].join('\n');
+    writeJson(file, candidates);
+    const result = recheckAssessments({ root: fixture.root });
+    assert.ok(!result.lists.blocker_would_clear.some((entry) => entry.report === 10));
+    const entry = result.lists.blocker_still_applies.find((item) => item.report === 10);
+    assert.equal(entry.replay_graduation.eligible, true);
+    assert.match(entry.replay_blocker.evidence, /2023 and 2025/);
+    assert.deepEqual(entry.cites_profile_dates, ['2026-12']);
+    assert.equal(entry.cites_stale_profile_date, true);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('every listed entry includes citation details, including new blockers and early exits', () => {
+  const fixture = makeFixture();
+  try {
+    for (const [number, id, evidence] of [
+      ['011', fixture.ids.b, 'Graduation expected December 2026.'],
+      ['012', fixture.ids.c, 'Graduation expected May 2027.'],
+      ['014', null, 'Graduation expected 2028.'],
+    ]) {
+      writeFileSync(join(fixture.reports, `${number}-synthetic.md`), report({
+        id, body: summary({ id, softGaps: [evidence] }),
+      }));
+    }
+    const result = recheckAssessments({ root: fixture.root, livenessDirs: [fixture.liveness] });
+    for (const entry of Object.values(result.lists).flat()) {
+      assert.ok(Array.isArray(entry.cites_profile_dates), `report ${entry.report}`);
+      assert.equal(typeof entry.cites_stale_profile_date, 'boolean', `report ${entry.report}`);
+    }
+    const appear = result.lists.blocker_would_appear[0];
+    assert.deepEqual(appear.cites_profile_dates, ['2026-12']);
+    assert.equal(appear.cites_stale_profile_date, true);
+    const missingDescription = result.lists.cannot_check.find((entry) => entry.report === 12);
+    assert.equal(missingDescription.reason, 'no_verified_description');
+    assert.deepEqual(missingDescription.cites_profile_dates, ['2027-05']);
+    assert.equal(missingDescription.cites_stale_profile_date, false);
+    const missingId = result.lists.cannot_check.find((entry) => entry.report === 14);
+    assert.equal(missingId.reason, 'no_candidate_id');
+    assert.deepEqual(missingId.cites_profile_dates, ['2028']);
+    assert.equal(missingId.cites_stale_profile_date, true);
+    assert.deepEqual(result.lists.blocker_not_reproducible[0].cites_profile_dates, ['2026-12']);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('missing or unusable profile dates prevent checking every graduation-related report', () => {
+  const fixture = makeFixture();
+  try {
+    // Missing profile dates also take precedence over missing identity or descriptions.
+    writeFileSync(join(fixture.reports, '014-synthetic.md'), report({ body: summary({
+      softGaps: ['Graduation timing needs review.'],
+    }) }));
+    writeFileSync(join(fixture.reports, '012-synthetic.md'), report({ id: fixture.ids.c, body: summary({
+      id: fixture.ids.c, softGaps: ['Graduation expected December 2026.'],
+    }) }));
+    for (const profileText of ['education_details: {}\n', 'graduation_date: not-a-date\n', 'graduation_date: 2027-02-30\n']) {
+      writeFileSync(join(fixture.root, 'config', 'profile.yml'), profileText);
+      const result = recheckAssessments({ root: fixture.root, livenessDirs: [fixture.liveness] });
+      assert.equal(result.profile_graduation_date, null);
+      for (const number of [10, 12, 13, 14, 18, 19]) {
+        const entry = result.lists.cannot_check.find((item) => item.report === number);
+        assert.equal(entry?.reason, 'no_profile_graduation_date', `report ${number}`);
+        assert.ok(Array.isArray(entry.cites_profile_dates));
+        assert.equal(entry.cites_stale_profile_date, false);
+      }
+      assert.deepEqual(result.lists.cannot_check.find((entry) => entry.report === 10).cites_profile_dates, ['2026-12']);
+      assert.deepEqual(result.lists.cannot_check.find((entry) => entry.report === 12).cites_profile_dates, ['2026-12']);
+      assert.equal(result.counts.unchanged, 2);
+      for (const [name, entries] of Object.entries(result.lists)) {
+        if (name !== 'cannot_check') assert.deepEqual(entries, [], name);
+      }
+    }
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+function outputCli(fixture, out, { cwd = fixture.root, extra = [] } = {}) {
+  return spawnSync(process.execPath, [
+    resolve(ROOT, 'recheck-assessments.mjs'), '--root', fixture.root,
+    '--liveness', fixture.liveness, ...extra, '--out', out,
+  ], { cwd, encoding: 'utf8' });
+}
+
+test('--out refuses protected directories, profile files, and nonexistent descendants without modifying inputs', () => {
+  const fixture = makeFixture();
+  try {
+    const directories = [
+      'reports', 'data', 'config', 'output/scan-runs', 'output/application-batches',
+      'output/identity-corrections', 'liveness-synthetic',
+    ];
+    for (const directory of directories) mkdirSync(join(fixture.root, directory), { recursive: true });
+    mkdirSync(join(fixture.root, 'modes'));
+    writeFileSync(join(fixture.root, 'cv.md'), 'Synthetic CV.\n');
+    writeFileSync(join(fixture.root, 'modes', '_profile.md'), 'Synthetic profile notes.\n');
+    const customProfile = join(fixture.root, 'custom-profile.yml');
+    writeFileSync(customProfile, 'graduation_date: 31/05/2027\n');
+    const before = allFileBytes(fixture.root);
+    for (const directory of directories) {
+      for (const out of [join(fixture.root, directory), join(fixture.root, directory, 'missing', 'recheck.json')]) {
+        const cli = outputCli(fixture, out);
+        assert.equal(cli.status, 1, out);
+        assert.match(cli.stderr, /--out cannot point inside/, out);
+      }
+    }
+    for (const file of ['cv.md', 'modes/_profile.md']) {
+      const cli = outputCli(fixture, join(fixture.root, file));
+      assert.equal(cli.status, 1);
+      assert.match(cli.stderr, /cannot overwrite the profile, CV, or profile notes/);
+    }
+    const custom = outputCli(fixture, customProfile, { extra: ['--profile', customProfile] });
+    assert.equal(custom.status, 1);
+    assert.match(custom.stderr, /cannot overwrite the profile, CV, or profile notes/);
+    assert.equal(allFileBytes(fixture.root).size, before.size);
+    for (const [file, bytes] of before) assert.deepEqual(readFileSync(file), bytes, file);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('--out refuses a symlink or junction alias to protected evidence', (t) => {
+  const fixture = makeFixture();
+  try {
+    const directories = [
+      'reports', 'data', 'config', 'output/scan-runs', 'output/application-batches',
+      'output/identity-corrections', 'liveness-synthetic', 'modes',
+    ];
+    const aliases = [];
+    for (const [index, directory] of directories.entries()) {
+      const target = join(fixture.root, directory);
+      mkdirSync(target, { recursive: true });
+      const alias = join(fixture.root, `protected-alias-${index}`);
+      try { symlinkSync(target, alias, process.platform === 'win32' ? 'junction' : 'dir'); }
+      catch (error) { t.skip(`Symlink/junction creation unavailable: ${error.code ?? error.message}`); return; }
+      aliases.push({ alias, directory });
+    }
+    writeFileSync(join(fixture.root, 'modes', '_profile.md'), 'Synthetic profile notes.\n');
+    const reportBytes = readFileSync(join(fixture.reports, '010-synthetic.md'));
+    for (const { alias, directory } of aliases) {
+      const suffix = directory === 'modes' ? '_profile.md' : join('missing', 'recheck.json');
+      const cli = outputCli(fixture, join(alias, suffix));
+      assert.equal(cli.status, 1);
+      assert.match(cli.stderr, directory === 'modes'
+        ? /cannot overwrite the profile, CV, or profile notes/
+        : /cannot point inside/);
+      assert.equal(existsSync(join(alias, 'missing')), false);
+    }
+    const existing = outputCli(fixture, join(aliases[0].alias, '010-synthetic.md'));
+    assert.equal(existing.status, 1);
+    assert.match(existing.stderr, /cannot point inside reports/);
+    assert.deepEqual(readFileSync(join(fixture.reports, '010-synthetic.md')), reportBytes);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('--out resolves against cwd and exclusively creates an output without overwriting', () => {
+  const fixture = makeFixture();
+  try {
+    const cwd = join(fixture.root, 'scratch');
+    mkdirSync(cwd);
+    const first = outputCli(fixture, 'recheck.json', { cwd });
+    assert.equal(first.status, 0, first.stderr);
+    const out = join(cwd, 'recheck.json');
+    const bytes = readFileSync(out);
+    assert.equal(JSON.parse(bytes).schema, 'recheck-assessments/1');
+    assert.equal(existsSync(join(fixture.root, 'recheck.json')), false);
+    const second = outputCli(fixture, 'recheck.json', { cwd });
+    assert.equal(second.status, 1);
+    assert.match(second.stderr, /EEXIST/);
+    assert.deepEqual(readFileSync(out), bytes);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
 });
