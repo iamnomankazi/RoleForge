@@ -9,18 +9,21 @@
  */
 
 import { existsSync, readFileSync } from 'fs';
-import { dirname } from 'path';
+import { basename, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import {
   acquireTrackerLock,
   cell,
+  loadCanonicalStates,
   normalizeCompany,
   rebuildRow,
+  resolveCanonicalState,
   resolveTrackerPath,
   trackerLockDirFor,
   writeFileAtomic,
 } from './tracker-utils.mjs';
 import { parseTrackerRow, resolveColumns } from './tracker-parse.mjs';
+import { groupTrackerRows, loadIdentityMappings, loadReportIndex } from './tracker-identity.mjs';
 
 export const MANUAL_SUBMISSION_SOURCE = 'Source: user-confirmed manual submission';
 
@@ -107,6 +110,62 @@ function resolveTarget(rows, company, role) {
   return exact[0] ?? null;
 }
 
+function reportNumbers(value) {
+  const numbers = new Set();
+  const text = String(value ?? '');
+  for (const match of text.matchAll(/\[(\d+)\]/g)) numbers.add(Number(match[1]));
+  for (const match of text.matchAll(/(?:^|[\\/])(\d{1,9})(?:[-_.]|$)/g)) numbers.add(Number(match[1]));
+  return [...numbers];
+}
+
+function resolveExplicitTarget(rows, options, company, role) {
+  if (options.row != null && options.report != null) {
+    throw new ManualApplicationError('usage', '--row and --report are mutually exclusive');
+  }
+  if (options.row == null && options.report == null) return resolveTarget(rows, company, role);
+
+  const selector = options.row ?? options.report;
+  if (!/^\d+$/.test(String(selector)) || !Number.isSafeInteger(Number(selector))) {
+    throw new ManualApplicationError('usage', `${options.row != null ? '--row' : '--report'} expects a positive integer`);
+  }
+  const number = Number(selector);
+  const matches = rows.filter((row) => options.row != null
+    ? row.num === number
+    : reportNumbers(row.report).includes(number));
+  if (!matches.length) {
+    const label = options.row != null ? `tracker row #${number}` : `report #${number}`;
+    throw new ManualApplicationError('not-found', `No tracker row matches ${label}`);
+  }
+  if (matches.length > 1) {
+    throw new ManualApplicationError('ambiguous', `Selector #${number} matches multiple tracker rows`, {
+      candidates: matches.map(({ num, company: rowCompany, role: rowRole }) => ({ num, company: rowCompany, role: rowRole })),
+    });
+  }
+  const [target] = matches;
+  if (company && normalizeCompany(company) !== normalizeCompany(target.company)) {
+    throw new ManualApplicationError('selector-mismatch', `Company "${company}" does not match selected tracker row #${target.num} (${target.company})`);
+  }
+  if (role && normalizeRole(role) !== normalizeRole(target.role)) {
+    throw new ManualApplicationError('selector-mismatch', `Role "${role}" does not match selected tracker row #${target.num} (${target.role})`);
+  }
+  return target;
+}
+
+function identityGroupForRows(rows, trackerPath, rootOverride, states) {
+  const trackerDir = dirname(trackerPath);
+  const projectRoot = rootOverride ?? (basename(trackerDir).toLowerCase() === 'data' ? dirname(trackerDir) : trackerDir);
+  try {
+    const reportIndex = loadReportIndex(join(projectRoot, 'reports'));
+    const mappings = loadIdentityMappings({
+      scanRunsDir: join(projectRoot, 'output', 'scan-runs'),
+      correctionsDir: join(projectRoot, 'output', 'identity-corrections'),
+    });
+    return groupTrackerRows(rows, reportIndex, mappings, { states });
+  } catch {
+    return rows.map((row) => ({ rows: [row], ids: new Set(), open: row.status === 'Evaluated', status: row.status, flags: [] }));
+  }
+}
+
 /**
  * Apply one explicit user-confirmed manual submission to the tracker.
  */
@@ -120,7 +179,11 @@ export async function confirmManualApplication(options, dependencies = {}) {
 
   const company = cell(options.company);
   const requestedRole = cell(options.role);
-  if (!company || !normalizeCompany(company)) {
+  const hasExplicitSelector = options.row != null || options.report != null;
+  if (options.row != null && options.report != null) {
+    throw new ManualApplicationError('usage', '--row and --report are mutually exclusive');
+  }
+  if (!hasExplicitSelector && (!company || !normalizeCompany(company))) {
     throw new ManualApplicationError('company-required', 'Company is required');
   }
 
@@ -149,9 +212,35 @@ export async function confirmManualApplication(options, dependencies = {}) {
     const lines = content.split(/\r?\n/);
     const colmap = resolveColumns(lines);
     const rows = parseRows(lines, colmap);
-    const target = resolveTarget(rows, company, requestedRole);
+    const target = resolveExplicitTarget(rows, options, company, requestedRole);
 
     if (target) {
+      const states = loadCanonicalStates(new URL('./templates/states.yml', import.meta.url));
+      const groups = identityGroupForRows(rows, trackerPath, dependencies.root, states);
+      const group = groups.find((entry) => entry.rows.some((row) => row.lineIdx === target.lineIdx));
+      const siblings = (group?.rows ?? []).filter((row) => row.lineIdx !== target.lineIdx)
+        .map((row) => ({ num: row.num, status: row.status }));
+      const appliedSiblingStatuses = new Set(['Applied', 'Responded', 'Interview', 'Offer', 'Hired', 'Rejected']);
+      const blockingSiblings = siblings.filter((row) => appliedSiblingStatuses.has(resolveCanonicalState(row.status, states)));
+      if (blockingSiblings.length) {
+        return {
+          changed: false,
+          created: false,
+          idempotent: true,
+          identityConflict: true,
+          num: target.num,
+          company: target.company,
+          role: target.role,
+          oldStatus: target.status,
+          newStatus: target.status,
+          date: target.date,
+          source: 'user-confirmed manual submission',
+          blockingSiblings,
+          siblings,
+          tracker: trackerPath,
+          ...(options.dryRun ? { dryRun: true } : {}),
+        };
+      }
       const parts = lines[target.lineIdx].split('|').map((value) => value.trim());
       const requiredWidth = Math.max(colmap.date ?? 0, colmap.status, colmap.notes ?? 0);
       while (parts.length <= requiredWidth) parts.push('');
@@ -190,6 +279,7 @@ export async function confirmManualApplication(options, dependencies = {}) {
         newStatus: 'Applied',
         date: parts[colmap.date],
         source: 'user-confirmed manual submission',
+        siblings,
         tracker: trackerPath,
         ...(options.dryRun ? { dryRun: true } : {}),
       };
@@ -235,6 +325,7 @@ export async function confirmManualApplication(options, dependencies = {}) {
       newStatus: 'Applied',
       date: effectiveDate,
       source: 'user-confirmed manual submission',
+      siblings: [],
       tracker: trackerPath,
       ...(options.dryRun ? { dryRun: true } : {}),
     };
@@ -251,16 +342,32 @@ export function parseArgs(argv) {
     userConfirmed: false,
     dryRun: false,
     json: false,
+    row: null,
+    report: null,
   };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
     if (arg === '--company') options.company = argv[++index] ?? '';
     else if (arg === '--role') options.role = argv[++index] ?? '';
     else if (arg === '--date') options.date = argv[++index] ?? '';
+    else if (arg === '--row' || arg === '--report') {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith('--')) {
+        throw new ManualApplicationError('usage', `Missing value for ${arg}`);
+      }
+      if (!/^\d+$/.test(value)) throw new ManualApplicationError('usage', `${arg} expects a positive integer, got "${value}"`);
+      const key = arg.slice(2);
+      if (options[key] != null) throw new ManualApplicationError('usage', `Duplicate option: ${arg}`);
+      options[key] = value;
+      index += 1;
+    }
     else if (arg === '--user-confirmed') options.userConfirmed = true;
     else if (arg === '--dry-run') options.dryRun = true;
     else if (arg === '--json') options.json = true;
     else throw new ManualApplicationError('usage', `Unknown argument: ${arg}`);
+  }
+  if (options.row != null && options.report != null) {
+    throw new ManualApplicationError('usage', '--row and --report are mutually exclusive');
   }
   return options;
 }
@@ -272,6 +379,13 @@ if (isMain) {
   try {
     const options = parseArgs(process.argv.slice(2));
     const result = await confirmManualApplication(options);
+    if (!options.json) {
+      const siblings = (result.siblings ?? []).map((row) => `#${row.num} (${row.status})`).join(', ') || 'none';
+      const blocked = result.blockingSiblings?.length
+        ? `; already applied by ${result.blockingSiblings.map((row) => `#${row.num} (${row.status})`).join(', ')}`
+        : '';
+      console.log(`Identity siblings: ${siblings}${blocked}`);
+    }
     if (options.json) console.log(JSON.stringify(result, null, 2));
     else {
       const verb = result.created ? 'created and marked' : result.changed ? 'marked' : 'already recorded as';

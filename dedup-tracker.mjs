@@ -12,11 +12,12 @@
 
 import './lib/operational-cli.mjs';
 import { readFileSync, copyFileSync, existsSync, mkdirSync } from 'fs';
-import { join, dirname } from 'path';
+import { basename, join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { rebuildRow, trackerLockDirFor, acquireTrackerLock, writeFileAtomic } from './tracker-utils.mjs';
+import { rebuildRow, trackerLockDirFor, acquireTrackerLock, writeFileAtomic, loadCanonicalStates, resolveCanonicalState } from './tracker-utils.mjs';
 import { resolveColumns, parseTrackerRow, normalizeVia } from './tracker-parse.mjs';
 import { normalizeOpeningText, sameOpening, unionEvidence } from './tracker-evidence.mjs';
+import { groupTrackerRows, loadIdentityMappings, loadReportIndex, rowIdentity } from './tracker-identity.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 // Support both layouts: data/applications.md (boilerplate) and applications.md
@@ -28,6 +29,7 @@ const APPS_FILE = process.env.CAREER_OPS_TRACKER
     ? join(CAREER_OPS, 'data/applications.md')
     : join(CAREER_OPS, 'applications.md');
 const DRY_RUN = process.argv.includes('--dry-run');
+const BY_CANDIDATE_ID = process.argv.includes('--by-candidate-id');
 
 // Ensure the target tracker directory exists in both normal and fixture mode.
 mkdirSync(dirname(APPS_FILE), { recursive: true });
@@ -147,6 +149,122 @@ function parseAppLine(line) {
   return parseTrackerRow(line, COLMAP);
 }
 
+function trackerProjectRoot(trackerPath) {
+  const trackerDir = dirname(trackerPath);
+  return basename(trackerDir).toLowerCase() === 'data' ? dirname(trackerDir) : trackerDir;
+}
+
+function formatRowIdentity(row) {
+  return `#${row.num} | ${row.company} | ${row.role} | ${row.status} | ${row.report || '-'}`;
+}
+
+function followupReferences(followupsPath, removedNumbers) {
+  if (!existsSync(followupsPath)) return [];
+  const content = readFileSync(followupsPath, 'utf8');
+  return content.split(/\r?\n/).flatMap((line, index) => {
+    let appNum = null;
+    const pin = line.match(/^-\s+next\s+#(\d+)\s+/i);
+    if (pin) appNum = Number(pin[1]);
+    else if (line.startsWith('|')) {
+      const parts = line.split('|').map((value) => value.trim());
+      if (parts.length >= 8) {
+        const parsed = Number.parseInt(parts[2], 10);
+        if (Number.isFinite(parsed)) appNum = parsed;
+      }
+    }
+    return appNum != null && removedNumbers.has(appNum) ? [{ line: index + 1, text: line, appNum }] : [];
+  });
+}
+
+function runCandidateIdDedup(entries, lines, colmap) {
+  const projectRoot = trackerProjectRoot(APPS_FILE);
+  const states = loadCanonicalStates(new URL('./templates/states.yml', import.meta.url));
+  const reportIndex = loadReportIndex(join(projectRoot, 'reports'));
+  const mappings = loadIdentityMappings({
+    scanRunsDir: join(projectRoot, 'output', 'scan-runs'),
+    correctionsDir: join(projectRoot, 'output', 'identity-corrections'),
+  });
+  const groups = groupTrackerRows(entries, reportIndex, mappings, { states });
+  const plans = [];
+  const skipped = [];
+  for (const group of groups) {
+    if (group.rows.length < 2) continue;
+    const numbers = group.rows.map((row) => `#${row.num}`).join(', ');
+    if (!group.ids.size) {
+      skipped.push({ rows: numbers, reason: 'no unambiguous candidate ID on this group' });
+      continue;
+    }
+    const blockedFlags = group.flags.filter((flag) => ['mixed_status', 'conflict', 'unknown_status'].includes(flag));
+    if (blockedFlags.length) {
+      skipped.push({ rows: numbers, reason: blockedFlags.join(', ') });
+      continue;
+    }
+    const withoutIds = group.rows.filter((row) => ![...rowIdentity(row, reportIndex, mappings).ids]
+      .some((id) => !mappings.ambiguous.has(id)));
+    if (withoutIds.length) {
+      skipped.push({ rows: numbers, reason: `row(s) without strong candidate ID: ${withoutIds.map((row) => `#${row.num}`).join(', ')}` });
+      continue;
+    }
+    if (colmap.notes == null) {
+      skipped.push({ rows: numbers, reason: 'tracker has no Notes column for preserving removed evidence' });
+      continue;
+    }
+    const keepers = group.rows.filter((row) => resolveCanonicalState(row.status, states) === group.status)
+      .sort((left, right) => left.num - right.num || left.lineIdx - right.lineIdx);
+    if (!keepers.length) {
+      skipped.push({ rows: numbers, reason: `no row has canonical display status ${group.status}` });
+      continue;
+    }
+    const keeper = keepers[0];
+    const removed = group.rows.filter((row) => row !== keeper);
+    plans.push({ group, keeper, removed });
+  }
+
+  console.log(`Candidate-ID dedup: ${entries.length} entries loaded`);
+  console.log('Report links from removed rows are stored in Notes because Report consumers expect one link per cell.');
+  for (const plan of plans) {
+    console.log(`Merge group (${[...plan.group.ids].join(', ')}):`);
+    console.log(`  Keep ${formatRowIdentity(plan.keeper)}`);
+    for (const row of plan.removed) console.log(`  Remove ${formatRowIdentity(row)}`);
+  }
+  for (const item of skipped) console.log(`Skipped ${item.rows}: ${item.reason}`);
+  if (!plans.length && !skipped.length) console.log('No candidate-ID duplicate groups found');
+
+  const removedNumbers = new Set(plans.flatMap((plan) => plan.removed.map((row) => row.num)));
+  const followupsPath = join(dirname(APPS_FILE), 'follow-ups.md');
+  const references = followupReferences(followupsPath, removedNumbers);
+  if (references.length) {
+    console.error(`Follow-up entries reference rows selected for removal in ${followupsPath}:`);
+    for (const reference of references) console.error(`  line ${reference.line} (app #${reference.appNum}): ${reference.text}`);
+    console.error('Aborting without writing the tracker.');
+    process.exitCode = 1;
+    return;
+  }
+
+  const linesToRemove = new Set();
+  for (const { keeper, removed } of plans) {
+    const parts = lines[keeper.lineIdx].split('|').map((value) => value.trim());
+    const mergedNotes = unionEvidence(...[keeper, ...removed].map((row) => row.notes));
+    const reportNotes = removed
+      .filter((row) => row.report && !['-', '—', 'â€”'].includes(row.report.trim().toLowerCase()))
+      .map((row) => `Merged #${row.num} ${row.report}`);
+    parts[colmap.notes] = unionEvidence(mergedNotes, ...reportNotes);
+    lines[keeper.lineIdx] = rebuildRow(parts);
+    for (const row of removed) linesToRemove.add(row.lineIdx);
+  }
+  for (const index of [...linesToRemove].sort((left, right) => right - left)) lines.splice(index, 1);
+
+  if (DRY_RUN) {
+    console.log('(dry-run - no changes written)');
+  } else if (linesToRemove.size) {
+    copyFileSync(APPS_FILE, `${APPS_FILE}.bak`);
+    writeFileAtomic(APPS_FILE, lines.join('\n'));
+    console.log('Written to applications.md (backup: applications.md.bak)');
+  } else {
+    console.log('No candidate-ID duplicates merged');
+  }
+}
+
 // Read
 if (!existsSync(APPS_FILE)) {
   console.log('No applications.md found. Nothing to dedup.');
@@ -179,8 +297,18 @@ for (let i = 0; i < lines.length; i++) {
   }
 }
 
-console.log(`📊 ${entries.length} entries loaded`);
+if (!BY_CANDIDATE_ID) console.log(`📊 ${entries.length} entries loaded`);
 
+if (BY_CANDIDATE_ID) {
+  try {
+    runCandidateIdDedup(entries, lines, COLMAP);
+  } catch (error) {
+    console.error(`Candidate-ID dedup failed: ${error.message}`);
+    process.exitCode = 1;
+  } finally {
+    trackerLock?.release();
+  }
+} else {
 // Group by company+role. Unknown-employer rows (Company `?`, #1596) all
 // normalize to the same empty key, so they group by their Via channel instead:
 // the same agency re-blasting one listing IS a duplicate, while the same role
@@ -297,3 +425,4 @@ if (!DRY_RUN && removed > 0) {
   console.log('✅ No duplicates found');
 }
 trackerLock?.release();
+}

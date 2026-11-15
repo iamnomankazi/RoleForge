@@ -6,6 +6,7 @@ import test from 'node:test';
 import {
   MANUAL_SUBMISSION_SOURCE,
   ManualApplicationError,
+  parseArgs,
   confirmManualApplication,
 } from '../manual-application-confirmation.mjs';
 import { parseTrackerRow, resolveColumns } from '../tracker-parse.mjs';
@@ -143,6 +144,93 @@ test('requires clarification when company-only context matches multiple roles', 
       (error) => error instanceof ManualApplicationError
         && error.code === 'ambiguous'
         && error.details.candidates.length === 2,
+    );
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('--row and --report select exact existing tracker rows', async () => {
+  const fx = fixture(
+    '| 7 | 2026-07-20 | Example Oy | Backend Engineer | N/A | Evaluated |  | [12](reports/012-example.md) |  |\n',
+  );
+  try {
+    assert.equal(parseArgs(['--row', '7', '--user-confirmed']).row, '7');
+    assert.equal(parseArgs(['--report', '12', '--user-confirmed']).report, '12');
+    const byRow = await confirmManualApplication({ row: 7, userConfirmed: true }, { trackerPath: fx.trackerPath });
+    assert.equal(byRow.num, 7);
+    assert.equal(byRow.changed, true);
+    const byReport = await confirmManualApplication({ report: 12, userConfirmed: true }, { trackerPath: fx.trackerPath });
+    assert.equal(byReport.num, 7);
+    assert.equal(byReport.changed, false);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('explicit selectors accept matching optional company and role and reject mismatches', async () => {
+  const fx = fixture('| 8 | 2026-07-20 | Example Oy | Backend Engineer | N/A | Evaluated |  |  |  |\n');
+  try {
+    const before = readFileSync(fx.trackerPath, 'utf8');
+    await assert.rejects(
+      confirmManualApplication({ row: 8, company: 'Different Oy', role: 'Backend Engineer', userConfirmed: true }, { trackerPath: fx.trackerPath }),
+      (error) => error instanceof ManualApplicationError && error.code === 'selector-mismatch' && /Company/.test(error.message),
+    );
+    await assert.rejects(
+      confirmManualApplication({ row: 8, company: 'Example Oy', role: 'Frontend Engineer', userConfirmed: true }, { trackerPath: fx.trackerPath }),
+      (error) => error instanceof ManualApplicationError && error.code === 'selector-mismatch' && /Role/.test(error.message),
+    );
+    assert.equal(readFileSync(fx.trackerPath, 'utf8'), before);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('unknown exact row errors without writing', async () => {
+  const fx = fixture('| 9 | 2026-07-20 | Example Oy | Backend Engineer | N/A | Evaluated |  |  |  |\n');
+  try {
+    const before = readFileSync(fx.trackerPath, 'utf8');
+    await assert.rejects(
+      confirmManualApplication({ row: 99, userConfirmed: true }, { trackerPath: fx.trackerPath }),
+      (error) => error instanceof ManualApplicationError && error.code === 'not-found',
+    );
+    await assert.rejects(
+      confirmManualApplication({ report: 99, userConfirmed: true }, { trackerPath: fx.trackerPath }),
+      (error) => error instanceof ManualApplicationError && error.code === 'not-found',
+    );
+    assert.equal(readFileSync(fx.trackerPath, 'utf8'), before);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('an already Applied identity sibling makes confirmation idempotent and is listed', async () => {
+  const id = `cand_v1_${'4'.repeat(64)}`;
+  const fx = fixture(
+    `| 10 | 2026-07-20 | Example Oy | Original Fictional Role | N/A | Applied |  |  | Canonical candidate ID: ${id} |\n`
+    + `| 11 | 2026-07-21 | Example Oy | Renamed Fictional Role | N/A | Evaluated |  |  | Canonical candidate ID: ${id} |\n`,
+  );
+  try {
+    const before = readFileSync(fx.trackerPath, 'utf8');
+    const result = await confirmManualApplication({ row: 11, userConfirmed: true }, { trackerPath: fx.trackerPath });
+    assert.equal(result.changed, false);
+    assert.equal(result.idempotent, true);
+    assert.equal(result.identityConflict, true);
+    assert.deepEqual(result.blockingSiblings, [{ num: 10, status: 'Applied' }]);
+    assert.deepEqual(result.siblings, [{ num: 10, status: 'Applied' }]);
+    assert.equal(readFileSync(fx.trackerPath, 'utf8'), before);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('--row and --report are mutually exclusive and selectors still require user confirmation', async () => {
+  assert.throws(() => parseArgs(['--row', '1', '--report', '2']), /mutually exclusive/);
+  const fx = fixture('| 1 | 2026-07-20 | Example Oy | Backend Engineer | N/A | Evaluated |  |  |  |\n');
+  try {
+    await assert.rejects(
+      confirmManualApplication({ row: 1 }, { trackerPath: fx.trackerPath }),
+      (error) => error instanceof ManualApplicationError && error.code === 'confirmation-required',
     );
   } finally {
     fx.cleanup();

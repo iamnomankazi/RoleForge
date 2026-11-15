@@ -4,11 +4,14 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import {
+  assertNoDuplicateApplications,
   abandonApplicationBatch,
   createApplicationBatch,
   loadBatchState,
 } from '../application-batch.mjs';
+import { companyDuplicateKey, roleDuplicateKey } from '../tracker-identity.mjs';
 
 function withFixture(callback) {
   const root = mkdtempSync(join(tmpdir(), 'roleforge-batch-duplicates-'));
@@ -45,6 +48,34 @@ function writeRun(f, runId, company, title = f.candidate.title) {
   writeFileSync(join(runDir, 'manifest.json'), JSON.stringify({ run_id: runId }));
   writeFileSync(join(runDir, 'candidates.json'), JSON.stringify([candidate]));
   return { sourceRunId: runId, selectedUrls: [candidate.url] };
+}
+
+function candidateId(letter) {
+  return `cand_v1_${letter.repeat(64)}`;
+}
+
+function identityCandidate(id, company = 'Other Fictional Labs', title = 'Different Fictional Role') {
+  return { candidate_id: id, company, title };
+}
+
+function writeTrackerRows(f, rows) {
+  mkdirSync(join(f.root, 'data'), { recursive: true });
+  writeFileSync(f.trackerPath, [
+    '| # | Date | Company | Role | Score | Status | PDF | Report | Notes |',
+    '|---|---|---|---|---|---|---|---|---|',
+    ...rows.map((row) => `| ${row.num} | 2026-10-01 | ${row.company} | ${row.role} | 4/5 | ${row.status} | - | ${row.report ?? '-'} | ${row.notes ?? ''} |`),
+  ].join('\n'));
+}
+
+function writeEnrichmentMapping(f, runId, sourceId, targetId) {
+  const runDir = join(f.root, 'output', 'scan-runs', runId);
+  mkdirSync(runDir, { recursive: true });
+  const bytes = JSON.stringify({ mappings: [{ source_candidate_id: sourceId, candidate_id: targetId }] });
+  writeFileSync(join(runDir, 'enrichment.json'), bytes);
+  writeFileSync(join(runDir, 'manifest.json'), JSON.stringify({ metadata: {
+    tool: 'enrich-run',
+    enrichment_sha256: createHash('sha256').update(bytes).digest('hex'),
+  } }));
 }
 
 for (const suffix of [
@@ -249,6 +280,96 @@ test('distinct company or role allows creation without an override', () => withF
   f.writeTracker('Evaluated', f.candidate.company, 'Senior Data Analyst');
   abandonApplicationBatch(first.manifestPath, { root: f.root, entireBatch: true, reason: 'Reset fictional batch for the second case.' });
   assert.equal(f.create('different-role').manifest.duplicateOverride, undefined);
+}));
+
+test('shared duplicate-key outputs stay pinned across legal suffixes, technologies, Unicode and punctuation', () => {
+  const companyCases = [
+    ['Example GmbH & Co. KG', 'example'],
+    ['Example Oy', 'example'],
+    ['München Oy', 'münchen'],
+    ['Åland, Example Inc.', 'ålandexample'],
+    ['A.B. & C Oy', 'abc'],
+  ];
+  const roleCases = [
+    ['Senior C++ Engineer', 'seniorcplusplusengineer'],
+    ['C# Developer', 'csharpdeveloper'],
+    ['.NET Engineer', 'dotnetengineer'],
+    ['Données – QA/UX!', 'donnéesqaux'],
+  ];
+  for (const [value, expected] of companyCases) assert.equal(companyDuplicateKey(value), expected, value);
+  for (const [value, expected] of roleCases) assert.equal(roleDuplicateKey(value), expected, value);
+});
+
+for (const status of ['Applied', 'Rejected', 'Discarded']) {
+  test(`candidate ID on a ${status} tracker row refuses a different company and role`, () => withFixture((f) => {
+    const id = candidateId('a');
+    writeTrackerRows(f, [{ num: 51, company: 'Example Oy', role: 'Original Fictional Role', status, notes: `Canonical candidate ID: ${id}` }]);
+    assert.throws(() => assertNoDuplicateApplications(f.root, [identityCandidate(id)]), (error) => {
+      assert.match(error.message, new RegExp(`#51 \\(${status}\\)`));
+      assert.match(error.message, /--allow-duplicate/);
+      return true;
+    });
+  }));
+}
+
+test('report header candidate ID links a row to a different-role duplicate', () => withFixture((f) => {
+  const id = candidateId('b');
+  writeTrackerRows(f, [{ num: 52, company: 'Acme GmbH', role: 'Prior Fictional Role', status: 'Applied', report: '[12](../reports/012-fictional.md)' }]);
+  mkdirSync(join(f.root, 'reports'), { recursive: true });
+  writeFileSync(join(f.root, 'reports', '012-fictional.md'), `**Candidate ID:** ${id}\n\n## Machine Summary\n`);
+  assert.throws(() => assertNoDuplicateApplications(f.root, [identityCandidate(id)]), /#52 \(Applied\)/);
+}));
+
+test('a one-to-one correction mapping refuses a linked tracker row', () => withFixture((f) => {
+  const oldId = candidateId('c'); const correctedId = candidateId('d');
+  writeTrackerRows(f, [{ num: 53, company: 'Example Oy', role: 'Prior Fictional Role', status: 'Rejected', notes: `Canonical candidate ID: ${oldId}` }]);
+  writeEnrichmentMapping(f, 'fixture-enrichment', oldId, correctedId);
+  assert.throws(() => assertNoDuplicateApplications(f.root, [identityCandidate(correctedId)]), /#53 \(Rejected\)/);
+}));
+
+test('ambiguous IDs and shared URL aliases alone do not create identity refusals', () => withFixture((f) => {
+  const ambiguousId = candidateId('e');
+  writeTrackerRows(f, [{ num: 54, company: 'Example Oy', role: 'Original Fictional Role', status: 'Applied', notes: `Canonical candidate ID: ${ambiguousId}` }]);
+  mkdirSync(join(f.root, 'output', 'identity-corrections'), { recursive: true });
+  writeFileSync(join(f.root, 'output', 'identity-corrections', 'fixture.json'), JSON.stringify({
+    entries: [],
+    old_ids_shared_by_distinct_openings: [{ old_candidate_id: ambiguousId, distinct_openings: ['fixture-a', 'fixture-b'] }],
+  }));
+  assert.doesNotThrow(() => assertNoDuplicateApplications(f.root, [identityCandidate(ambiguousId)]));
+
+  const rowId = candidateId('f'); const selectedId = candidateId('1');
+  writeTrackerRows(f, [{ num: 55, company: 'Example Oy', role: 'Original Fictional Role', status: 'Applied', notes: `Canonical candidate ID: ${rowId}` }]);
+  const runDir = join(f.root, 'output', 'scan-runs', 'alias-run');
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(join(runDir, 'manifest.json'), JSON.stringify({ created_at: '2026-10-01' }));
+  writeFileSync(join(runDir, 'candidates.json'), JSON.stringify([
+    { candidate_id: rowId, company: 'Example Oy', title: 'Original Fictional Role', url: 'https://jobs.example.test/shared' },
+    { candidate_id: selectedId, company: 'Other Fictional Labs', title: 'Different Fictional Role', url_aliases: ['https://jobs.example.test/shared'] },
+  ]));
+  assert.doesNotThrow(() => assertNoDuplicateApplications(f.root, [identityCandidate(selectedId)]));
+}));
+
+test('an identity group whose tracker rows are all Evaluated remains open', () => withFixture((f) => {
+  const id = candidateId('2');
+  writeTrackerRows(f, [
+    { num: 56, company: 'Example Oy', role: 'Original Fictional Role', status: 'Evaluated', notes: `Canonical candidate ID: ${id}` },
+    { num: 57, company: 'Example Oy', role: 'Related Fictional Role', status: 'Evaluated', notes: `Canonical candidate ID: ${id}` },
+  ]);
+  assert.doesNotThrow(() => assertNoDuplicateApplications(f.root, [identityCandidate(id)]));
+}));
+
+test('same candidate ID in an active batch refuses and an abandoned batch permits a retry', () => withFixture((f) => {
+  const original = f.create('identity-batch');
+  const id = original.manifest.candidates[0].candidate_id;
+  assert.throws(() => assertNoDuplicateApplications(f.root, [identityCandidate(id)]), /application batch identity-batch/);
+  abandonApplicationBatch(original.manifestPath, { root: f.root, entireBatch: true, reason: 'Fixture batch was abandoned.' });
+  assert.doesNotThrow(() => assertNoDuplicateApplications(f.root, [identityCandidate(id)]));
+}));
+
+test('the explicit duplicate override bypasses tracker and batch identity checks', () => withFixture((f) => {
+  const id = candidateId('3');
+  writeTrackerRows(f, [{ num: 58, company: 'Example Oy', role: 'Original Fictional Role', status: 'Applied', notes: `Canonical candidate ID: ${id}` }]);
+  assert.doesNotThrow(() => assertNoDuplicateApplications(f.root, [identityCandidate(id)], { allowDuplicateReason: 'Fictional retry approved.' }));
 }));
 
 test('CLI refuses duplicates, requires an override value, and persists the explicit override reason', () => withFixture((f) => {
