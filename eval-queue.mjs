@@ -524,6 +524,7 @@ function loadApplicationBatches(root) {
     const statePath = join(batchesDir, batchId, 'state.json');
     let state = null;
     try { state = JSON.parse(readFileSync(statePath, 'utf8')); } catch {}
+    const stateRows = Array.isArray(state?.candidates) ? state.candidates : null;
     for (const [index, row] of manifest.candidates.entries()) {
       if (!row || typeof row !== 'object' || Array.isArray(row)) {
         throw new Error(`Malformed application-batch manifest ${manifestPath}: candidate ${index + 1} must be an object`);
@@ -534,8 +535,14 @@ function loadApplicationBatches(root) {
         throw new Error(`Malformed application-batch manifest ${manifestPath}: candidate ${index + 1} has invalid candidate_id`);
       }
       if (!byCandidateId.has(candidateId)) byCandidateId.set(candidateId, []);
+      const stateRow = stateRows?.[index];
+      const stateValue = stateRow && typeof stateRow === 'object' && !Array.isArray(stateRow) ? stateRow : null;
+      // Abandoned counts only when the state row is readable and names this exact candidate (the
+      // application-batch duplicate guard also ignores abandoned rows); missing, malformed or
+      // mismatched state stays an active claim.
+      const abandoned = stateValue?.state === 'abandoned' && stateValue.candidate_id === candidateId;
       byCandidateId.get(candidateId).push({ batch_id: manifest.batchId ?? batchId,
-        state: state?.candidates?.[index]?.state ?? null });
+        state: typeof stateValue?.state === 'string' ? stateValue.state : null, abandoned });
     }
   }
   return byCandidateId;
@@ -549,7 +556,8 @@ function applicationBatchMatch(candidateId, batches, strongIds) {
   }
   if (!matches.size) return null;
   const entries = [...matches.values()].sort((a, b) => a.batch_id.localeCompare(b.batch_id));
-  return { batch_ids: entries.map((entry) => entry.batch_id),
+  return { active: entries.some((entry) => !entry.abandoned),
+    batch_ids: entries.map((entry) => entry.batch_id),
     candidate_states: entries.map(({ batch_id, state }) => ({ batch_id, state })) };
 }
 
@@ -695,10 +703,14 @@ export function buildEvalQueue({ runDirs = [], livenessDirs = [], root = SCRIPT_
       continue;
     }
     const batchEvidence = applicationBatchMatch(candidate.candidate_id, applicationBatches, strongIds);
-    if (batchEvidence) {
-      excludeCandidate(candidate, run, live, 'in_application_batch', batchEvidence);
+    if (batchEvidence?.active) {
+      const { active, ...detail } = batchEvidence;
+      excludeCandidate(candidate, run, live, 'in_application_batch', detail);
       continue;
     }
+    // Only abandoned batch attempts: queue normally, but keep the history visible.
+    const abandonedBatches = batchEvidence ? { reason: 'abandoned_application_batch',
+      batch_ids: batchEvidence.batch_ids } : null;
     const winner = winners.get(groupKeyFor(item));
     if (winner !== item) {
       excludeCandidate(candidate, run, live, 'duplicate_in_queue', {
@@ -737,6 +749,7 @@ export function buildEvalQueue({ runDirs = [], livenessDirs = [], root = SCRIPT_
     }
     const possibleDuplicates = buildPossibleDuplicates(candidate, duplicateIndexes, tracked, mappings, strongIds,
       trackedMatch, weakTrackedMatch, discarded);
+    if (abandonedBatches) possibleDuplicates.push(abandonedBatches);
     const queueRecord = { candidate_id: candidate.candidate_id, run_id: run.run_id, run_dir: run.dir,
       company: candidate.company ?? '', title: candidate.title ?? candidate.role ?? '', location: candidate.location ?? null,
       url: candidate.url ?? null, description_chars: description.length, description_sha256: sha256(Buffer.from(description, 'utf8')),

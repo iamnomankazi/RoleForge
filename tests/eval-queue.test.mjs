@@ -64,7 +64,11 @@ function putBatch(f, batchId, candidateIds, { states = [], rawManifest, rawState
   const manifest = rawManifest ?? { batchId, candidates: candidateIds.map((candidate_id) => ({ candidate_id })) };
   putJson(join(dir, 'manifest.json'), manifest);
   if (rawState !== undefined) put(join(dir, 'state.json'), rawState);
-  else if (states.length) putJson(join(dir, 'state.json'), { candidates: states.map((state) => ({ state })) });
+  else if (states.length) {
+    putJson(join(dir, 'state.json'), { candidates: states.map((state, index) => (
+      state && typeof state === 'object' ? state : { candidate_id: candidateIds[index], state }
+    )) });
+  }
   return dir;
 }
 
@@ -585,4 +589,37 @@ test('blank optional language subfields are accepted and fall back to the level'
     'home_country: Finland\nauthorized_countries: [Finland]\nlanguages:\n  english: fluent\n  german:\n    cefr: null\n    level: C1\n');
   const result = queue(f, [run]);
   assert.deepEqual(result.include.map((entry) => entry.candidate_id), [id]);
+});
+
+test('abandoned-only application batches do not exclude; active, missing, malformed or mismatched state still does', (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const onlyAbandoned = cid('a'); const mixed = cid('b'); const noState = cid('c'); const noId = cid('d');
+  const wrongId = cid('e'); const sibling = cid('f'); const mappedOld = cid('1'); const mappedNew = cid('2');
+  const brokenRows = cid('3');
+  putBatch(f, 'old-attempt', [onlyAbandoned, mixed, sibling], { states: ['abandoned', 'abandoned', 'form_prepared'] });
+  putBatch(f, 'later-attempt', [mixed], { states: ['not_opened'] });
+  putBatch(f, 'no-state', [noState]);
+  putBatch(f, 'state-without-id', [noId], { states: [{ state: 'abandoned' }] });
+  putBatch(f, 'state-other-id', [wrongId], { states: [{ candidate_id: cid('9'), state: 'abandoned' }] });
+  putBatch(f, 'state-rows-not-array', [brokenRows], { rawState: JSON.stringify({ candidates: { 0: { candidate_id: brokenRows, state: 'abandoned' } } }) });
+  putBatch(f, 'mapped-abandoned', [mappedOld], { states: ['abandoned'] });
+  const run = putRun(f, 'mixed-batches', [candidate(onlyAbandoned), candidate(mixed), candidate(noState), candidate(noId),
+    candidate(wrongId), candidate(sibling), candidate(brokenRows)]);
+  const enrichment = JSON.stringify([{ source_candidate_id: mappedOld, candidate_id: mappedNew }]);
+  const mappedRun = putRun(f, 'mapped-abandoned-run', [candidate(mappedNew)], { enriched: true, enrichment });
+  const result = queue(f, [run, mappedRun]);
+  const excluded = new Map(result.exclude.map((entry) => [entry.candidate_id, entry]));
+  for (const id of [mixed, noState, noId, wrongId, sibling, brokenRows]) {
+    assert.equal(excluded.get(id)?.reason, 'in_application_batch', id);
+    assert.equal('active' in excluded.get(id).detail, false);
+  }
+  assert.deepEqual(excluded.get(mixed).detail.candidate_states, [
+    { batch_id: 'later-attempt', state: 'not_opened' }, { batch_id: 'old-attempt', state: 'abandoned' },
+  ]);
+  const included = new Map([...result.include, ...result.needs_liveness].map((entry) => [entry.candidate_id, entry]));
+  for (const [id, batchId] of [[onlyAbandoned, 'old-attempt'], [mappedNew, 'mapped-abandoned']]) {
+    assert.ok(included.has(id), id);
+    assert.deepEqual(included.get(id).possible_duplicates.filter((entry) => entry.reason === 'abandoned_application_batch'),
+      [{ reason: 'abandoned_application_batch', batch_ids: [batchId] }]);
+  }
 });
