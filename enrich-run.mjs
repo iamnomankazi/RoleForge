@@ -75,6 +75,19 @@ function validateHttpUrl(value, label, { httpsOnly = false } = {}) {
   return url;
 }
 
+function supportedOverrideAtsHost(url) {
+  const host = url.hostname.toLowerCase();
+  const subdomainOf = (domain) => host.endsWith(`.${domain}`);
+  const greenhouse = host === 'greenhouse.io' || subdomainOf('greenhouse.io');
+  // The identity parser accepts gh_jid on any host; overrides must stay on Greenhouse.
+  if (url.searchParams.has('gh_jid') && !greenhouse) return false;
+  return greenhouse
+    || ['jobs.lever.co', 'jobs.eu.lever.co', 'jobs.ashbyhq.com',
+      'jobs.smartrecruiters.com', 'careers.smartrecruiters.com', 'apply.workable.com'].includes(host)
+    || subdomainOf('myworkdayjobs.com')
+    || subdomainOf('personio.de') || subdomainOf('personio.com');
+}
+
 function validateOverrides(overrides, sourceIds) {
   if (overrides == null) return {};
   if (typeof overrides !== 'object' || Array.isArray(overrides)) {
@@ -96,8 +109,8 @@ function validateOverrides(overrides, sourceIds) {
       throw new Error(`Override for ${candidateId} cannot set both apply_url and listing_url`);
     }
     if (Object.hasOwn(entry, 'apply_url')) {
-      validateHttpUrl(entry.apply_url, `Override apply_url for ${candidateId}`, { httpsOnly: true });
-      if (!atsIdentityFromUrl(entry.apply_url)) {
+      const url = validateHttpUrl(entry.apply_url, `Override apply_url for ${candidateId}`, { httpsOnly: true });
+      if (!supportedOverrideAtsHost(url) || !atsIdentityFromUrl(entry.apply_url)) {
         throw new Error(`Override apply_url for ${candidateId} must identify a supported ATS posting`);
       }
     }
@@ -415,26 +428,6 @@ export async function planEnrichment({
       reasons.push(owner.reason);
     }
 
-    let identity;
-    try { identity = candidateIdentityMetadata(row); } catch (error) {
-      if (owner && Object.hasOwn(owner, 'apply_url')) {
-        throw new Error(`Override for ${sourceId} conflicts with the record identity: ${error.message}`);
-      }
-      throw error;
-    }
-    const portalCompany = companyForCandidate(identity);
-    if (portalCompany && row.company !== portalCompany) {
-      row.company = portalCompany;
-      changes.push('company_from_portals');
-      reasons.push(`Company name matched portals.yml: ${portalCompany}`);
-    }
-
-    if (owner && Object.hasOwn(owner, 'company')) {
-      if (row.company !== owner.company) changes.push('company_override');
-      row.company = owner.company;
-      reasons.push(owner.reason);
-    }
-
     let normalized;
     try {
       normalized = normalizeCanonicalCandidate(row, {
@@ -478,25 +471,32 @@ export async function planEnrichment({
     liveness_sha256: sha256(liveness.bytes),
     overrides_sha256: overridesHash,
   };
-  const built = buildImmutableScanRun({
+  const build = (metadata) => buildImmutableScanRun({
     root: projectRoot,
     runId: outRunId,
     inputs,
     createdAt,
     sourceArchitecture: 'enrich-run',
-    metadata: metadataBase,
+    metadata,
   });
+  const built = build(metadataBase);
   const outputCandidates = built.candidates.map((candidate) => ({
     candidate,
     identity: collectCandidateIdentityAliases(candidate),
   }));
+  const groups = new Map();
   for (const [index, entry] of sourceMetadata.entries()) {
     const identity = sourceIdentityAliases[index];
-    const matches = outputCandidates.filter(({ identity: outputIdentity }) => (
-      identity.ats.length
-        ? identity.ats.some((ats) => outputIdentity.ats.includes(ats))
-        : Boolean(identity.primaryUrl) && identity.primaryUrl === outputIdentity.primaryUrl
-    ));
+    // A merge can retain the first row's null ATS fields while deriving an ATS ID.
+    let matches = identity.ats.length ? outputCandidates.filter(({ candidate, identity: outputIdentity }) => (
+      candidate.candidate_id === entry.candidate_id
+        || identity.ats.some((ats) => outputIdentity.ats.includes(ats))
+    )) : [];
+    if (!matches.length) {
+      matches = outputCandidates.filter(({ identity: outputIdentity }) => (
+        Boolean(identity.primaryUrl) && outputIdentity.urls.includes(identity.primaryUrl)
+      ));
+    }
     if (matches.length !== 1) {
       throw new Error(`Enrichment mapping for ${entry.source_candidate_id} resolved to ${matches.length} built candidates`);
     }
@@ -506,7 +506,36 @@ export async function planEnrichment({
       if (entry.status === 'unchanged') entry.status = 'enriched';
     }
     entry.candidate_id = finalCandidateId;
+    if (!groups.has(finalCandidateId)) groups.set(finalCandidateId, []);
+    groups.get(finalCandidateId).push(index);
   }
+
+  for (const [candidateId, indices] of groups) {
+    const owners = indices.map((index) => ownerOverrides[sourceMetadata[index].source_candidate_id])
+      .filter((owner) => owner && Object.hasOwn(owner, 'company'));
+    const companyOverrides = [...new Set(owners.map((owner) => contractText(owner.company)))];
+    if (companyOverrides.length > 1) {
+      throw new Error(`Conflicting company overrides for converged candidate ${candidateId}: ${indices.map((index) => sourceMetadata[index].source_candidate_id).join(', ')}`);
+    }
+    // Recover the group's final ATS identity from its sources, even if the merged fields lost it.
+    const identityIndex = indices.find((index) => sourceIdentityAliases[index].ats.length);
+    const identity = candidateIdentityMetadata(transformed[identityIndex ?? indices[0]]);
+    const company = companyOverrides[0] || contractText(companyForCandidate(identity));
+    if (!company) continue;
+    const change = owners.length ? 'company_override' : 'company_from_portals';
+    const reason = owners.length ? [...new Set(owners.map((owner) => owner.reason))].join('; ')
+      : `Company name matched portals.yml: ${company}`;
+    for (const index of indices) {
+      const entry = sourceMetadata[index];
+      if (contractText(transformed[index].company) !== company) {
+        entry.changes.push(change);
+        if (['unchanged', 'no_liveness'].includes(entry.status)) entry.status = 'enriched';
+      }
+      transformed[index].company = company;
+      entry.reason = `${entry.reason}; ${reason}`;
+    }
+  }
+  const reconciled = build(metadataBase);
   const counts = new Map();
   for (const entry of sourceMetadata) counts.set(entry.candidate_id, (counts.get(entry.candidate_id) || 0) + 1);
   for (const entry of sourceMetadata) {
@@ -520,15 +549,8 @@ export async function planEnrichment({
   const enrichmentContent = `${JSON.stringify(sourceMetadata, null, 2)}\n`;
   const enrichmentHash = sha256(Buffer.from(enrichmentContent, 'utf8'));
   const metadata = { ...metadataBase, enrichment_sha256: enrichmentHash };
-  const finalBuilt = buildImmutableScanRun({
-    root: projectRoot,
-    runId: outRunId,
-    inputs,
-    createdAt,
-    sourceArchitecture: 'enrich-run',
-    metadata,
-  });
-  if (JSON.stringify(finalBuilt.candidates) !== JSON.stringify(built.candidates)) {
+  const finalBuilt = build(metadata);
+  if (JSON.stringify(finalBuilt.candidates) !== JSON.stringify(reconciled.candidates)) {
     throw new Error('Scan contract candidates changed while binding enrichment.json hash');
   }
   const preview = previewFrom(sourceMetadata, source.candidates, finalBuilt.candidates);

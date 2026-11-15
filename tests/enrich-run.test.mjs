@@ -68,6 +68,21 @@ function candidateAt(result, index = 0) {
   return result.candidates[index];
 }
 
+function convergenceFixture(urlOnlyFirst) {
+  const f = fixture([
+    { company: 'Example Oy', title: 'URL-only Engineer', url: 'https://careers.example.test/roles/other' },
+    {
+      company: 'Acme GmbH', title: 'ATS Engineer', url: 'https://careers.example.test/roles/shared',
+      ats_provider: 'greenhouse', ats_tenant: 'example', requisition_id: '999',
+    },
+  ]);
+  f.sourceCandidates.sort((left, right) => urlOnlyFirst
+    ? Number(Boolean(left.ats_provider)) - Number(Boolean(right.ats_provider))
+    : Number(Boolean(right.ats_provider)) - Number(Boolean(left.ats_provider)));
+  writeFileSync(join(f.sourceRunDir, 'candidates.json'), `${JSON.stringify(f.sourceCandidates, null, 2)}\n`);
+  return f;
+}
+
 function treeHashes(dir) {
   const result = {};
   for (const name of readdirSync(dir).sort()) {
@@ -208,6 +223,69 @@ test('apply_url must be https and identify a supported ATS', async () => {
       assert.equal(existsSync(join(f.root, 'output', 'scan-runs', `bad-apply-${url.startsWith('http:') ? 'scheme' : 'ats'}`)), false);
     } finally { f.cleanup(); }
   }
+});
+
+test('apply_url rejects lookalike hosts and gh_jid outside Greenhouse without writing', async () => {
+  const urls = [
+    'https://fake.personio.example.test/job/123',
+    'https://ordinary.example.test/unrelated?gh_jid=123',
+    'https://jobs.lever.co/example/123?gh_jid=123',
+    'https://fakepersonio.com/job/123',
+    'https://personio.com/job/123',
+    'https://personio.de/job/123',
+    ...[
+      ['boards.greenhouse.io', '/example/jobs/123'],
+      ['jobs.lever.co', '/example/123'],
+      ['jobs.ashbyhq.com', '/example/123'],
+      ['example.myworkdayjobs.com', '/External/job/Example/Engineer_REQ123'],
+      ['jobs.smartrecruiters.com', '/Example/123'],
+      ['example.personio.de', '/job/123'],
+      ['example.personio.com', '/job/123'],
+      ['apply.workable.com', '/example/j/123'],
+    ].map(([host, path]) => `https://${host}.example.test${path}`),
+  ];
+  const f = fixture();
+  try {
+    f.writeLiveManifest();
+    const before = treeHashes(f.sourceRunDir);
+    for (const [index, url] of urls.entries()) {
+      const outRunId = `unsupported-host-${index}`;
+      await assert.rejects(enrich(f, outRunId, {
+        overrides: { [f.sourceCandidates[0].candidate_id]: { apply_url: url, reason: 'Synthetic endpoint check' } },
+      }), /must identify a supported ATS posting/, url);
+      assert.equal(existsSync(join(f.root, 'output', 'scan-runs', outRunId)), false);
+    }
+    assert.deepEqual(treeHashes(f.sourceRunDir), before);
+    assert.deepEqual(readdirSync(join(f.root, 'output', 'scan-runs')), ['source-run']);
+  } finally { f.cleanup(); }
+});
+
+test('apply_url accepts the supported ATS posting hosts', async () => {
+  const urls = [
+    'https://greenhouse.io/example/jobs/123',
+    'https://boards.greenhouse.io/example/jobs/123',
+    'https://job-boards.greenhouse.io/example/jobs/123',
+    'https://job-boards.eu.greenhouse.io/example/jobs/123',
+    'https://boards.greenhouse.io/embed/job_app?gh_jid=123',
+    'https://jobs.lever.co/example/123',
+    'https://jobs.eu.lever.co/example/123/application',
+    'https://jobs.ashbyhq.com/example/123',
+    'https://example.wd3.myworkdayjobs.com/External/job/Example/Engineer_REQ123',
+    'https://jobs.smartrecruiters.com/Example/123',
+    'https://example.jobs.personio.de/job/123',
+    'https://example.jobs.personio.com/job/123',
+    'https://apply.workable.com/example/j/123',
+  ];
+  const f = fixture();
+  try {
+    f.writeLiveManifest();
+    for (const [index, url] of urls.entries()) {
+      const result = await enrich(f, `supported-host-${index}`, {
+        overrides: { [f.sourceCandidates[0].candidate_id]: { apply_url: url, reason: 'Synthetic endpoint check' } },
+      });
+      assert.equal(candidateAt(result).apply_url, url);
+    }
+  } finally { f.cleanup(); }
 });
 
 test('listing_url re-sourcing clears old aliases and liveness while preserving source provenance', async () => {
@@ -380,6 +458,121 @@ test('a URL-only re-sourced row maps to the final ATS identity of a merged sourc
     assert.equal(mappedB.status, 'converged');
     assert.equal(mappedB.converged, true);
     assert.ok(mappedB.changes.includes('candidate_id_changed'));
+  } finally { f.cleanup(); }
+});
+
+for (const urlOnlyFirst of [true, false]) {
+  const order = urlOnlyFirst ? 'URL-only first' : 'explicit ATS first';
+  for (const companySource of [null, 'owner', 'portals', 'owner over portals', 'matching owners']) {
+    test(`convergence resolves final IDs and company (${order}, ${companySource || 'original company'})`, async () => {
+      const f = convergenceFixture(urlOnlyFirst);
+      try {
+        f.writeLiveManifest();
+        const before = treeHashes(f.sourceRunDir);
+        const urlOnly = f.sourceCandidates.find((candidate) => !candidate.ats_provider);
+        const ats = f.sourceCandidates.find((candidate) => candidate.ats_provider);
+        const overrides = {
+          [urlOnly.candidate_id]: { listing_url: ats.url, reason: 'Owner confirmed shared listing' },
+        };
+        if (companySource?.includes('portals')) {
+          writeFileSync(join(f.root, 'portals.yml'), [
+            'tracked_companies:', '  - name: Portal Example Oy', '    provider: greenhouse', '    ats_tenant: example', '',
+          ].join('\n'));
+        }
+        if (companySource?.includes('owner')) {
+          // Put the override on the later row so the merge's first company cannot win.
+          const ownerIds = companySource === 'matching owners'
+            ? f.sourceCandidates.map((candidate) => candidate.candidate_id)
+            : [f.sourceCandidates[1].candidate_id];
+          for (const id of ownerIds) {
+            overrides[id] = { ...overrides[id], company: '  Owner Example Oy  ', reason: 'Owner confirmed company name' };
+          }
+        }
+        const result = await enrich(f, 'convergence-company', { overrides });
+        assert.equal(result.candidates.length, 1);
+        const candidate = candidateAt(result);
+        assert.equal(candidate.candidate_id, ats.candidate_id);
+        assert.ok(result.enrichment.every((entry) => entry.candidate_id === candidate.candidate_id && entry.converged));
+        const expectedCompany = companySource?.includes('owner') ? 'Owner Example Oy'
+          : companySource === 'portals' ? 'Portal Example Oy' : f.sourceCandidates[0].company;
+        assert.equal(candidate.company, expectedCompany);
+        for (const entry of result.enrichment) {
+          assert.equal(entry.changes.includes('company_override'), Boolean(companySource?.includes('owner')));
+          assert.equal(entry.changes.includes('company_from_portals'), companySource === 'portals');
+        }
+        const published = JSON.parse(readFileSync(join(result.runDir, 'candidates.json'), 'utf8'));
+        assert.deepEqual(published, result.candidates);
+        const content = readFileSync(join(result.runDir, 'enrichment.json'));
+        const manifest = JSON.parse(readFileSync(join(result.runDir, 'manifest.json'), 'utf8'));
+        assert.equal(manifest.metadata.enrichment_sha256, hash(content));
+        assert.deepEqual(JSON.parse(content), result.enrichment);
+        assert.deepEqual(treeHashes(f.sourceRunDir), before);
+      } finally { f.cleanup(); }
+    });
+  }
+
+  test(`conflicting company overrides on a convergence group abort without writing (${order})`, async () => {
+    const f = convergenceFixture(urlOnlyFirst);
+    try {
+      f.writeLiveManifest();
+      const before = treeHashes(f.sourceRunDir);
+      const urlOnly = f.sourceCandidates.find((candidate) => !candidate.ats_provider);
+      const ats = f.sourceCandidates.find((candidate) => candidate.ats_provider);
+      await assert.rejects(enrich(f, 'conflicting-companies', {
+        overrides: {
+          [urlOnly.candidate_id]: { listing_url: ats.url, company: 'Owner Example Oy', reason: 'Synthetic owner name' },
+          [ats.candidate_id]: { company: 'Other Example Oy', reason: 'Conflicting synthetic owner name' },
+        },
+      }), /Conflicting company overrides/);
+      assert.deepEqual(treeHashes(f.sourceRunDir), before);
+      assert.deepEqual(readdirSync(join(f.root, 'output', 'scan-runs')), ['source-run']);
+    } finally { f.cleanup(); }
+  });
+}
+
+test('ambiguous URL aliases cannot silently select a final candidate', async () => {
+  const sharedUrl = 'https://careers.example.test/roles/shared';
+  const f = fixture([
+    {
+      company: 'Example Oy', title: 'First ATS Engineer', url: 'https://careers.example.test/roles/one',
+      ats_provider: 'greenhouse', ats_tenant: 'example', requisition_id: '101', url_aliases: [sharedUrl],
+    },
+    {
+      company: 'Acme GmbH', title: 'Second ATS Engineer', url: 'https://careers.example.test/roles/two',
+      ats_provider: 'greenhouse', ats_tenant: 'example', requisition_id: '202', url_aliases: [sharedUrl],
+    },
+    { company: 'Example Oy', title: 'URL-only Engineer', url: sharedUrl },
+  ]);
+  try {
+    f.writeLiveManifest();
+    const before = treeHashes(f.sourceRunDir);
+    const source = f.sourceCandidates.find((candidate) => !candidate.ats_provider);
+    await assert.rejects(enrich(f, 'ambiguous-mapping'),
+      new RegExp(`Enrichment mapping for ${source.candidate_id} resolved to 3 built candidates`));
+    assert.deepEqual(treeHashes(f.sourceRunDir), before);
+    assert.deepEqual(readdirSync(join(f.root, 'output', 'scan-runs')), ['source-run']);
+  } finally { f.cleanup(); }
+});
+
+test('an unchanged owner company suppresses portal changes for the whole group', async () => {
+  const f = convergenceFixture(true);
+  try {
+    f.writeLiveManifest();
+    const [urlOnly, ats] = f.sourceCandidates;
+    writeFileSync(join(f.root, 'portals.yml'), [
+      'tracked_companies:', '  - name: Portal Example Oy', '    provider: greenhouse', '    ats_tenant: example', '',
+    ].join('\n'));
+    const result = await enrich(f, 'unchanged-owner-company', {
+      overrides: {
+        [urlOnly.candidate_id]: { listing_url: ats.url, company: urlOnly.company, reason: 'Owner confirmed existing name' },
+      },
+    });
+    assert.equal(candidateAt(result).company, urlOnly.company);
+    const urlEntry = result.enrichment.find((entry) => entry.source_candidate_id === urlOnly.candidate_id);
+    const atsEntry = result.enrichment.find((entry) => entry.source_candidate_id === ats.candidate_id);
+    assert.equal(urlEntry.changes.includes('company_override'), false);
+    assert.equal(atsEntry.changes.includes('company_override'), true);
+    assert.ok(result.enrichment.every((entry) => !entry.changes.includes('company_from_portals')));
   } finally { f.cleanup(); }
 });
 
