@@ -9,7 +9,7 @@
  */
 
 import { existsSync, readFileSync } from 'fs';
-import { basename, dirname, join } from 'path';
+import { basename, dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import {
   acquireTrackerLock,
@@ -379,8 +379,12 @@ export function parseArgs(argv) {
   return options;
 }
 
-const isMain = process.argv[1]
-  && fileURLToPath(import.meta.url).toLowerCase() === fileURLToPath(new URL(`file:///${process.argv[1].replace(/\\/g, '/')}`)).toLowerCase();
+// Compare resolved filesystem paths; a hand-built `file:///` + absolute POSIX path
+// gives `//home/...` and never matched on Linux. Case-insensitive only on Windows.
+const samePath = (left, right) => (process.platform === 'win32'
+  ? left.toLowerCase() === right.toLowerCase() : left === right);
+const isMain = Boolean(process.argv[1])
+  && samePath(fileURLToPath(import.meta.url), resolve(process.argv[1]));
 
 if (isMain) {
   try {
