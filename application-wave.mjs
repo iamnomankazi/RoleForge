@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import {
   confirmPreflight,
   loadBatchState,
@@ -20,10 +20,12 @@ import {
 import {
   createDocumentPlan,
   immutableCandidateJdHash,
+  normalizeCvOverride,
   prepareAndBindDocuments,
+  selectDocumentPlanCv,
 } from './application-documents.mjs';
 import { hashFile, sha256Canonical } from './application-integrity.mjs';
-import { loadApplicationProfile, selectApprovedCv } from './application-profile.mjs';
+import { loadApplicationProfile } from './application-profile.mjs';
 import { checkLivenessViaApi } from './liveness-api.mjs';
 import { MAX_SHARED_BROWSER_CANDIDATES, manifestPathForBatch } from './application-shared-browser.mjs';
 import { approveCoverLetterV2 } from './cover-letter-v2.mjs';
@@ -137,14 +139,14 @@ function inspectLetter(root, checkPath, company, title) {
   return item;
 }
 
-function selectDocumentCv(root, contract) {
+function selectDocumentCv(root, contract, cvOverride = null) {
   const sourceRow = contract.sourceCandidate.sourceRow || {};
   const jdValue = sourceRow.description ?? sourceRow.jobDescription;
   if (typeof jdValue !== 'string') throw new Error('Exact JD evidence is unavailable for CV selection');
   const jdText = jdValue.replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
   if (jdText.length < 120) throw new Error('Exact JD evidence is too short for document preparation');
   const profile = loadApplicationProfile(root);
-  return selectApprovedCv(profile, contract.candidate, jdText);
+  return selectDocumentPlanCv(profile, contract.candidate, jdText, cvOverride);
 }
 
 function validateWaveId(value) {
@@ -156,13 +158,22 @@ export function parseApplicationWaveArgs(argv) {
   const command = argv.shift();
   if (!['review', 'approve'].includes(command)) throw new Error('Expected review or approve');
   const options = { command, items: [] };
+  const overrides = new Map();
+  const reasons = new Map();
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     const value = argv[index + 1];
     if (!value || value.startsWith('--')) throw new Error(`Missing value for ${flag}`);
     if (flag === '--wave-id' && options.waveId == null) options.waveId = value;
     else if (command === 'review' && flag === '--item') options.items.push(value);
-    else if (command === 'approve' && flag === '--confirm' && options.confirm == null) options.confirm = value;
+    else if (command === 'review' && ['--cv-override', '--cv-reason'].includes(flag)) {
+      const separator = value.indexOf('=');
+      if (separator < 1 || separator === value.length - 1) throw new Error(`Invalid ${flag} value: ${value}`);
+      const batchId = value.slice(0, separator);
+      const target = flag === '--cv-override' ? overrides : reasons;
+      if (target.has(batchId)) throw new Error(`Duplicate ${flag} for ${batchId}`);
+      target.set(batchId, value.slice(separator + 1));
+    } else if (command === 'approve' && flag === '--confirm' && options.confirm == null) options.confirm = value;
     else if (command === 'approve' && flag === '--claims-manifest' && options.claimManifestPath == null) options.claimManifestPath = value;
     else throw new Error(`Unknown or duplicate option: ${flag}`);
     index += 1;
@@ -178,12 +189,20 @@ export function parseApplicationWaveArgs(argv) {
       return { batchId: value.slice(0, separator), checkPath: value.slice(separator + 1) };
     });
     if (new Set(pairs.map(({ batchId }) => batchId)).size !== pairs.length) throw new Error('Duplicate batch IDs are not allowed');
+    for (const batchId of new Set([...overrides.keys(), ...reasons.keys()])) {
+      const item = pairs.find((entry) => entry.batchId === batchId);
+      if (!item) throw new Error(`CV override batch ${batchId} must be one of the --item values`);
+      if (!overrides.has(batchId) || !reasons.has(batchId)) {
+        throw new Error(`--cv-override and --cv-reason must be supplied together for ${batchId}`);
+      }
+      item.cvOverride = normalizeCvOverride({ variant: overrides.get(batchId), reason: reasons.get(batchId) });
+    }
     options.items = pairs;
   } else if (!options.confirm) throw new Error('Approve requires --confirm <waveHash>');
   return options;
 }
 
-async function reviewOne(root, { batchId, checkPath }, liveness) {
+async function reviewOne(root, { batchId, checkPath, cvOverride = null }, liveness) {
   let manifestPath = null;
   const item = {
     batchId,
@@ -205,6 +224,7 @@ async function reviewOne(root, { batchId, checkPath }, liveness) {
     cvSha256: null,
     liveness: null,
     problems: [],
+    ...(cvOverride !== null ? { cvOverride: normalizeCvOverride(cvOverride) } : {}),
   };
   let loaded = null;
   let contract = null;
@@ -255,10 +275,11 @@ async function reviewOne(root, { batchId, checkPath }, liveness) {
     if (!jdHash) addProblem(item, 'The batch has no immutable stored JD hash.');
     else if (letter.sidecar.jdHash !== jdHash) addProblem(item, 'The letter was checked against a different JD than the immutable batch candidate.');
     try {
-      const cv = selectDocumentCv(root, contract);
+      const cv = selectDocumentCv(root, contract, cvOverride);
       const cvPath = rootFile(root, cv.path, 'Selected approved CV');
       item.cvFilename = basename(cvPath);
       item.cvSha256 = hashFile(cvPath).sha256;
+      if (cv.override) item.cvAutomatic = cv.override.automatic;
     } catch (error) {
       addProblem(item, `Cannot resolve the approved CV selected for this document plan: ${error.message}`);
     }
@@ -285,7 +306,8 @@ function buildReviewMarkdown(waveId, items, waveHash) {
   for (const { item, letterText } of items) {
     lines.push(`## ${item.company || item.batchId} — ${item.title || 'Candidate unavailable'}`, '');
     lines.push(`- Batch: ${item.batchId}`, `- Candidate: ${item.candidateId || '(unavailable)'}`,
-      `- Listing: ${item.listingUrl || '(unavailable)'}`, `- CV: ${item.cvFilename || '(unavailable)'}`,
+      `- Listing: ${item.listingUrl || '(unavailable)'}`, `- CV: ${item.cvFilename || '(unavailable)'}${item.cvOverride
+        ? ` (owner override: ${item.cvOverride.variant}; reason: ${item.cvOverride.reason}; automatic: ${item.cvAutomatic?.variant || item.cvAutomatic?.error || '(unavailable)'})` : ''}`,
       `- Liveness: ${item.liveness ? `${item.liveness.result}${item.liveness.reason ? ` — ${item.liveness.reason}` : ''}` : '(not checked)'}`,
       `- Approval: ${item.problems.length ? '**NOT APPROVABLE**' : '**Ready for approval**'}`,
       `- Problems: ${item.problems.length ? item.problems.map((problem) => `\`${problem.replace(/`/g, "'")}\``).join('; ') : 'None.'}`,
@@ -373,7 +395,10 @@ function assertNoReviewChanges(root, item) {
   if (!jdHash || letter.sidecar.jdHash !== jdHash || item.jdHash !== jdHash) {
     throw new Error('Letter JD hash no longer matches the immutable batch candidate JD evidence');
   }
-  const cv = selectDocumentCv(root, contract);
+  const cv = selectDocumentCv(root, contract, item.cvOverride ?? null);
+  if (item.cvOverride && sha256Canonical(cv.override.automatic) !== sha256Canonical(item.cvAutomatic)) {
+    throw new Error('Automatic CV selection changed since review');
+  }
   const cvPath = rootFile(root, cv.path, 'Selected approved CV');
   if (basename(cvPath) !== item.cvFilename || hashFile(cvPath).sha256 !== item.cvSha256) {
     throw new Error('Selected approved CV changed since review');
@@ -445,12 +470,17 @@ async function approveOne(root, item, claimManifestPath, { approveLetter, create
     candidateId: item.candidateId,
     coverV2Approved: approval,
     claimManifestPath,
+    ...(item.cvOverride ? { cvOverride: item.cvOverride } : {}),
     root,
   });
   assertReviewedCoverPlan(plan, item, checkedApproval);
   // The reviewed CV preview must be the CV the document plan actually binds.
   if (basename(plan.cv.path) !== item.cvFilename || plan.cv.sha256 !== item.cvSha256) {
     throw new Error(`Document plan selected ${basename(plan.cv.path)}, not the reviewed CV ${item.cvFilename}`);
+  }
+  if (item.cvOverride && (plan.cv.decision !== 'owner_override' || plan.cv.variant !== item.cvOverride.variant
+      || sha256Canonical(plan.cv.override) !== sha256Canonical({ reason: item.cvOverride.reason, automatic: item.cvAutomatic }))) {
+    throw new Error('Document plan CV override does not match the reviewed override');
   }
   const saved = writeOrReusePlan(root, current.manifestPath, item.candidateId, plan);
   assertReviewedCoverPlan(saved.plan, item, checkedApproval);
@@ -523,7 +553,7 @@ async function main() {
   else console.log('No fully prepared batches; no shared-browser command is available.');
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
     console.error(error.message || error);
     process.exitCode = 1;

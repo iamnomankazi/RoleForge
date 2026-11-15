@@ -315,12 +315,59 @@ function reviewRequiredFor(error) {
   };
 }
 
+export function normalizeCvOverride(cvOverride) {
+  if (!cvOverride || typeof cvOverride !== 'object' || Array.isArray(cvOverride)
+      || typeof cvOverride.variant !== 'string' || !cvOverride.variant.trim()) {
+    throw new Error('CV override requires a variant and reason');
+  }
+  const reason = cvOverride.reason;
+  if (typeof reason !== 'string' || !reason.trim() || reason.trim().length > 500
+      || /[\r\n\u2028\u2029]/u.test(reason)) {
+    throw new Error('CV override reason must be non-empty, single line, and at most 500 characters');
+  }
+  return { variant: cvOverride.variant, reason: reason.trim() };
+}
+
+export function selectDocumentPlanCv(profile, candidate, jdText, cvOverride = null) {
+  if (cvOverride === null) return selectApprovedCv(profile, candidate, jdText);
+  const { variant, reason } = normalizeCvOverride(cvOverride);
+  if (!Object.hasOwn(profile.approvedCvs, variant) || !profile.approvedCvs[variant]
+      || !statSync(profile.approvedCvs[variant]).isFile()) {
+    throw new Error(`Unknown or unavailable approved CV variant: ${variant}`);
+  }
+  let automatic;
+  let scores = {};
+  try {
+    const selected = selectApprovedCv(profile, candidate, jdText);
+    scores = selected.scores;
+    automatic = { variant: selected.variant, decision: selected.decision, path: selected.path };
+  } catch (error) {
+    automatic = { error: error.message };
+  }
+  return {
+    variant, decision: 'owner_override', scores, path: profile.approvedCvs[variant],
+    override: { reason, automatic },
+  };
+}
+
+function plannedCv(cvSelection) {
+  return {
+    variant: cvSelection.variant,
+    decision: cvSelection.decision,
+    scores: cvSelection.scores,
+    path: cvSelection.path,
+    ...hashFile(cvSelection.path),
+    ...(cvSelection.override ? { override: cvSelection.override } : {}),
+  };
+}
+
 export function createDocumentPlan({
   manifestPath,
   candidateId,
   jdFile = null,
   coverV2Approved = null,
   claimManifestPath = null,
+  cvOverride = null,
   root = ROOT,
   now = new Date(),
   replace = false,
@@ -328,7 +375,7 @@ export function createDocumentPlan({
   const contract = loadPreparationContract(manifestPath, candidateId, { root, allowPausedReplacement: replace });
   const profile = loadApplicationProfile(root);
   const jd = resolveJdEvidence(root, contract.sourceCandidate, jdFile);
-  const cvSelection = selectApprovedCv(profile, contract.candidate, jd.text);
+  const cvSelection = selectDocumentPlanCv(profile, contract.candidate, jd.text, cvOverride);
   const documentsDir = join(dirname(contract.manifestPath), 'documents', contract.candidate.candidate_id);
   const basePlan = {
     schemaVersion: APPLICATION_DOCUMENT_PLAN_SCHEMA_VERSION,
@@ -340,13 +387,7 @@ export function createDocumentPlan({
     sourceCandidateSha256: contract.candidate.sourceCandidateSha256,
     jd: { kind: jd.kind, path: jd.path, sha256: jd.sha256, size: jd.size },
     sourceHashes: documentSourceHashes(profile),
-    cv: {
-      variant: cvSelection.variant,
-      decision: cvSelection.decision,
-      scores: cvSelection.scores,
-      path: cvSelection.path,
-      ...hashFile(cvSelection.path),
-    },
+    cv: plannedCv(cvSelection),
   };
   let plan;
   if (coverV2Approved) {
@@ -415,14 +456,10 @@ export function validateDocumentPlan(plan, manifestPath, root = ROOT, { allowPau
   if (sha256Canonical(plan.jd) !== sha256Canonical({ kind: jd.kind, path: jd.path, sha256: jd.sha256, size: jd.size })) {
     throw new Error('JD changed after planning');
   }
-  const cvSelection = selectApprovedCv(profile, contract.candidate, jd.text);
-  const expectedCv = {
-    variant: cvSelection.variant,
-    decision: cvSelection.decision,
-    scores: cvSelection.scores,
-    path: cvSelection.path,
-    ...hashFile(cvSelection.path),
-  };
+  const cvSelection = selectDocumentPlanCv(profile, contract.candidate, jd.text,
+    plan.cv?.decision === 'owner_override'
+      ? { variant: plan.cv.variant, reason: plan.cv.override?.reason } : null);
+  const expectedCv = plannedCv(cvSelection);
   if (sha256Canonical(plan.cv) !== sha256Canonical(expectedCv)) throw new Error('Selected CV changed after planning');
   if (!['ready', 'review_required'].includes(plan.documentState)) throw new Error('Document plan state is invalid');
   if (plan.coverLetter?.v2Source) {
@@ -624,14 +661,20 @@ function parseArgs(argv) {
       result[arg.slice(2)] = value;
     } else throw new Error(`Unexpected argument: ${arg}`);
   }
+  if (Object.hasOwn(result, 'cv-variant') !== Object.hasOwn(result, 'cv-reason')) {
+    throw new Error('--cv-variant and --cv-reason must be supplied together');
+  }
+  if (Object.hasOwn(result, 'cv-variant')) {
+    result.cvOverride = normalizeCvOverride({ variant: result['cv-variant'], reason: result['cv-reason'] });
+  }
   return result;
 }
 
 function usage() {
   return [
     'Usage:',
-    '  node application-documents.mjs plan --manifest <manifest.json> --candidate-id <id> [--jd-file <exact-local-file>] [--claims-manifest <claim-manifest.json>] [--cover-v2-approved <approved.json>] [--replace]',
-    '  node application-documents.mjs prepare --manifest <manifest.json> --candidate-id <id> --plan <plan.json> --confirm-plan <sha256> [--replace]',
+    '  node application-documents.mjs plan --manifest <manifest.json> --candidate-id <id> [--jd-file <exact-local-file>] [--claims-manifest <claim-manifest.json>] [--cover-v2-approved <approved.json>] [--cv-variant <variant> --cv-reason "<text>"] [--root <project-root>] [--replace]',
+    '  node application-documents.mjs prepare --manifest <manifest.json> --candidate-id <id> --plan <plan.json> --confirm-plan <sha256> [--root <project-root>] [--replace]',
     '  node application-documents.mjs combine --manifest <manifest.json> --candidate-id <id> --confirm-form-evidence <sha256> [--replace]',
   ].join('\n');
 }
@@ -640,6 +683,7 @@ async function main() {
   const [command, ...argv] = process.argv.slice(2);
   if (!command || command === '--help' || command === '-h') return console.log(usage());
   const options = parseArgs(argv);
+  if (options.cvOverride && command !== 'plan') throw new Error('CV overrides are only accepted by the plan command');
   if (command === 'plan') {
     const plan = createDocumentPlan({
       manifestPath: options.manifest,
@@ -647,6 +691,8 @@ async function main() {
       jdFile: options['jd-file'] || null,
       claimManifestPath: options['claims-manifest'] || null,
       coverV2Approved: options['cover-v2-approved'] || null,
+      cvOverride: options.cvOverride || null,
+      root: options.root || ROOT,
       replace: options.replace,
     });
     const planPath = join(dirname(resolve(options.manifest)), 'documents', plan.candidateId, 'plan.json');
@@ -658,6 +704,9 @@ async function main() {
       documentState: plan.documentState,
       reviewRequired: plan.reviewRequired,
       cv: basename(plan.cv.path),
+      cvVariant: plan.cv.variant,
+      cvDecision: plan.cv.decision,
+      ...(plan.cv.override ? { cvReason: plan.cv.override.reason, cvAutomatic: plan.cv.override.automatic } : {}),
       coverLetterText: plan.coverLetter?.text,
     }, null, 2));
     return;
@@ -669,6 +718,7 @@ async function main() {
       candidateId: options['candidate-id'],
       plan,
       confirmPlanHash: options['confirm-plan'],
+      root: options.root || ROOT,
       replace: options.replace,
     });
     console.log(JSON.stringify(result, null, 2));

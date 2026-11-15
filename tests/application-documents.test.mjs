@@ -1,14 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { writeImmutableScanRun } from '../scan-candidate-contract.mjs';
-import { createApplicationBatch, loadBatchState } from '../application-batch.mjs';
-import { candidateLocalDate, createDocumentPlan, prepareAndBindDocuments, validateDocumentPlan } from '../application-documents.mjs';
+import { createApplicationBatch, formatPreflight, loadBatchState, loadPreparationContract } from '../application-batch.mjs';
+import { buildGroundedCoverLetter, candidateLocalDate, createDocumentPlan, prepareAndBindDocuments, validateDocumentPlan } from '../application-documents.mjs';
 import { buildHtml, coverLetterFilename } from '../generate-cover-letter.mjs';
-import { sha256Canonical } from '../application-integrity.mjs';
+import { hashFile, sha256Canonical } from '../application-integrity.mjs';
 import { loadApplicationProfile, selectApprovedCv } from '../application-profile.mjs';
 import { createDraftManifest } from '../cv-claims.mjs';
 import { approveCoverLetterV2, runCoverLetterV2 } from '../cover-letter-v2.mjs';
@@ -20,7 +22,8 @@ function write(root, path, value) {
   return target;
 }
 
-function fixture({ legacyEvidence = false, claimManifest = true, unanchoredClaims = false } = {}) {
+function fixture({ legacyEvidence = false, claimManifest = true, unanchoredClaims = false,
+  title = 'Data Engineer', jdDescription = null } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'career-ops-documents-'));
   write(root, 'config/profile.yml', `candidate:\n  full_name: Alex Example\n  email: alex.example@example.test\n  phone: "+1 202-555-0142"\n  location: Example City, Finland\n  linkedin: https://linkedin.test/alex-example\n  github: https://github.test/alex-example\nlocation:\n  country: Finland\n  city: Example City\ncurrent_status:\n  summary: Graduate student at Example University\n  availability:\n    start: Available immediately\ncompensation:\n  target_range: EUR 50000-55000/year\neducation_details:\n  expected_graduation_date: 31/12/2030\nnarrative:\n  banned_phrases: [excited to leverage, cutting-edge, passionate]\napplication_form:\n  narrative_evidence:\n    - id: fictional-cv-projects\n      topics: [data_engineering, analytics, python_sql, ai_ml, software_backend, motivation_fit]\n      provenance:\n        - sourceType: cv\n          locator: lines:2\ncv:\n  approved_system:\n    master_pdf: output/cv-approved/Alex Example Master CV.pdf\n    role_pdfs:\n      data_engineering: output/cv-approved/Alex Example Data Engineering CV.pdf\n      ai_ml: output/cv-approved/Alex Example AI ML CV.pdf\n      software_backend: output/cv-approved/Alex Example Software Backend CV.pdf\n`);
   const cvText = '## Projects\nIn the fictional Warehouse project, I used Python and SQL for data validation.';
@@ -43,10 +46,10 @@ function fixture({ legacyEvidence = false, claimManifest = true, unanchoredClaim
   for (const name of ['Master', 'Data Engineering', 'AI ML', 'Software Backend']) {
     write(root, `output/cv-approved/Alex Example ${name} CV.pdf`, `%PDF-1.4 ${name}`);
   }
-  const description = 'Acme needs a junior Data Engineer to build Python and SQL ETL data pipelines, PostgreSQL dimensional models, data validation, analytics, and reporting with Git on Linux.';
+  const description = jdDescription || 'Acme needs a junior Data Engineer to build Python and SQL ETL data pipelines, PostgreSQL dimensional models, data validation, analytics, and reporting with Git on Linux.';
   const scan = writeImmutableScanRun({
     root, runId: 'doc-run', sourceArchitecture: 'test',
-    inputs: [{ name: 'fixture', rows: [{ company: 'Acme', title: 'Data Engineer', url: 'https://jobs.example.test/acme/1', description }] }],
+    inputs: [{ name: 'fixture', rows: [{ company: 'Acme', title, url: 'https://jobs.example.test/acme/1', description }] }],
   });
   const batch = createApplicationBatch({ root, sourceRunId: 'doc-run', batchId: 'doc-batch', selectedCandidateIds: [scan.candidates[0].candidate_id] });
   return { root, batch, candidateId: scan.candidates[0].candidate_id, description };
@@ -96,6 +99,157 @@ function answerHash(value) {
   const clean = String(value).replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
   return `sha256:${createHash('sha256').update(clean).digest('hex')}`;
 }
+
+test('a plan without an override is byte-identical to the legacy plan construction', () => {
+  const f = fixture();
+  try {
+    const now = new Date('2030-01-02T12:00:00.000Z');
+    const contract = loadPreparationContract(f.batch.manifestPath, f.candidateId, { root: f.root });
+    const profile = loadApplicationProfile(f.root);
+    const cv = selectApprovedCv(profile, contract.candidate, f.description);
+    const claimManifestPath = join(f.root, 'data', 'cv-claim-anchors.json');
+    const cover = buildGroundedCoverLetter(profile, contract.candidate, f.description, cv, now, { claimManifestPath });
+    const documentsDir = join(dirname(f.batch.manifestPath), 'documents', f.candidateId);
+    // This is the pre-override schema-3 construction, including its field order.
+    const legacy = {
+      schemaVersion: 3,
+      batchId: contract.manifest.batchId,
+      sourceRunId: contract.manifest.sourceRunId,
+      candidateId: f.candidateId,
+      claimManifestPath,
+      createdAt: now.toISOString(),
+      sourceCandidateSha256: contract.candidate.sourceCandidateSha256,
+      jd: { kind: 'source_candidate', path: null, sha256: sha256Canonical({ description: f.description }), size: Buffer.byteLength(f.description) },
+      sourceHashes: Object.fromEntries(['profile', 'cv'].map((key) => [key, { ...profile.sourceFiles[key] }])),
+      cv: { variant: cv.variant, decision: cv.decision, scores: cv.scores, path: cv.path, ...hashFile(cv.path) },
+      documentState: 'ready',
+      reviewRequired: null,
+      coverLetter: {
+        required: true, available: true,
+        pdfPath: join(documentsDir, 'acme_cover_letter.pdf'),
+        textPath: join(documentsDir, 'acme_cover_letter.txt'),
+        payload: cover.payload, text: cover.text, provenance: cover.provenance, claimValidation: cover.claimValidation,
+      },
+    };
+    legacy.planHash = sha256Canonical(legacy);
+    const plan = createDocumentPlan({ manifestPath: f.batch.manifestPath, candidateId: f.candidateId, root: f.root, now });
+    assert.equal(JSON.stringify(plan), JSON.stringify(legacy));
+    assert.equal(validateDocumentPlan(legacy, f.batch.manifestPath, f.root).cvSelection.variant, cv.variant);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('owner CV overrides record the automatic choice and bind, validate, and display the selected variant', async () => {
+  const f = fixture();
+  try {
+    const options = { manifestPath: f.batch.manifestPath, candidateId: f.candidateId, root: f.root, now: new Date('2030-01-02T12:00:00Z') };
+    const automatic = createDocumentPlan(options);
+    const plan = createDocumentPlan({ ...options, cvOverride: { variant: 'ai_ml', reason: '  Emphasize the approved ML work.  ' } });
+    assert.equal(plan.cv.variant, 'ai_ml');
+    assert.equal(plan.cv.decision, 'owner_override');
+    assert.equal(plan.cv.override.reason, 'Emphasize the approved ML work.');
+    assert.deepEqual(plan.cv.override.automatic, { variant: automatic.cv.variant, decision: automatic.cv.decision, path: automatic.cv.path });
+    assert.deepEqual(plan.cv.scores, automatic.cv.scores);
+    assert.deepEqual(hashFile(plan.cv.path), { sha256: plan.cv.sha256, size: plan.cv.size });
+    assert.notEqual(plan.planHash, automatic.planHash);
+    assert.equal(validateDocumentPlan(plan, f.batch.manifestPath, f.root).cvSelection.variant, 'ai_ml');
+    const prepared = await prepareAndBindDocuments({ ...options, plan, confirmPlanHash: plan.planHash });
+    assert.equal(prepared.records.cv.sourceCvVariant, 'ai_ml');
+    const loaded = loadBatchState(f.batch.manifestPath, { root: f.root });
+    assert.match(formatPreflight(loaded.manifest, loaded.state), /CV: Alex Example AI ML CV\.pdf \(sha256:[a-f0-9]{64}\) \[variant: ai_ml\]/);
+    const noVariantState = structuredClone(loaded.state);
+    delete noVariantState.candidates[0].artifacts.cv.sourceCvVariant;
+    assert.doesNotMatch(formatPreflight(loaded.manifest, noVariantState), /\[variant:/);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('override integrity and deterministic replay reject tampering and invalid records', () => {
+  const f = fixture();
+  try {
+    const options = { manifestPath: f.batch.manifestPath, candidateId: f.candidateId, root: f.root };
+    const plan = createDocumentPlan({ ...options, cvOverride: { variant: 'ai_ml', reason: 'Owner reviewed the role.' } });
+    for (const change of [
+      (copy) => { copy.cv.override.reason = 'Changed reason.'; },
+      (copy) => { copy.cv.variant = 'master'; },
+      (copy) => { copy.cv.override.automatic.variant = 'master'; },
+    ]) {
+      const copy = structuredClone(plan);
+      change(copy);
+      assert.throws(() => validateDocumentPlan(copy, f.batch.manifestPath, f.root), /integrity mismatch/);
+    }
+    for (const change of [
+      (copy) => { copy.cv.override.automatic = { error: 'Invented automatic failure' }; },
+      (copy) => { copy.cv.variant = 'master'; },
+      (copy) => { copy.cv.variant = 'unapproved'; },
+      (copy) => { delete copy.cv.override; },
+      (copy) => { copy.cv.override.reason = ''; },
+    ]) {
+      const copy = structuredClone(plan);
+      change(copy);
+      assert.throws(() => validateDocumentPlan(rehashPlan(copy), f.batch.manifestPath, f.root), /Selected CV changed|CV override|approved CV variant/);
+    }
+    for (const variant of ['unknown', 'non_tech', '__proto__', 'toString']) {
+      assert.throws(() => createDocumentPlan({ ...options, cvOverride: { variant, reason: 'Reviewed.' } }), /approved CV variant/);
+    }
+    for (const reason of ['', '  ', 'x'.repeat(501), 'two\nlines', 'two\rlines', 'two\u2028lines']) {
+      assert.throws(() => createDocumentPlan({ ...options, cvOverride: { variant: 'master', reason } }), /CV override reason/);
+    }
+    writeFileSync(plan.cv.path, '%PDF-1.4 changed approved file');
+    assert.throws(() => validateDocumentPlan(plan, f.batch.manifestPath, f.root), /Selected CV changed/);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('an override records an ambiguous automatic role family and replays review-required cover generation', () => {
+  const f = fixture({
+    title: 'Operations Specialist', legacyEvidence: true,
+    jdDescription: 'Acme seeks an Operations Specialist to coordinate customer requests, review routine records, arrange meetings, communicate clearly with colleagues, and support daily office responsibilities.',
+  });
+  try {
+    const options = { manifestPath: f.batch.manifestPath, candidateId: f.candidateId, root: f.root };
+    assert.throws(() => createDocumentPlan(options), /CV role family is ambiguous/);
+    const plan = createDocumentPlan({ ...options, cvOverride: { variant: 'master', reason: 'Use the approved general CV for this role.' } });
+    assert.deepEqual(plan.cv.scores, {});
+    assert.match(plan.cv.override.automatic.error, /CV role family is ambiguous/);
+    assert.equal(plan.documentState, 'review_required');
+    assert.equal(validateDocumentPlan(plan, f.batch.manifestPath, f.root).cvSelection.variant, 'master');
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('document CLI requires both override flags, previews the override, and prepares the confirmed plan', () => {
+  const script = fileURLToPath(new URL('../application-documents.mjs', import.meta.url));
+  const run = (...args) => spawnSync(process.execPath, [script, ...args], { encoding: 'utf8' });
+  for (const flags of [['--cv-variant', 'master'], ['--cv-reason', 'Reviewed.']]) {
+    const result = run('plan', ...flags);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /--cv-variant and --cv-reason must be supplied together/);
+  }
+  const f = fixture();
+  try {
+    const common = ['--root', f.root, '--manifest', f.batch.manifestPath, '--candidate-id', f.candidateId];
+    const result = run('plan', ...common, '--cv-variant', 'ai_ml', '--cv-reason', 'Owner reviewed the ML emphasis.');
+    assert.equal(result.status, 0, result.stderr);
+    const preview = JSON.parse(result.stdout);
+    assert.equal(preview.cv, 'Alex Example AI ML CV.pdf');
+    assert.equal(preview.cvVariant, 'ai_ml');
+    assert.equal(preview.cvDecision, 'owner_override');
+    assert.equal(preview.cvReason, 'Owner reviewed the ML emphasis.');
+    assert.equal(preview.cvAutomatic.variant, 'data_engineering');
+    const rejected = run('prepare', ...common, '--plan', preview.plan, '--confirm-plan', 'sha256:' + '0'.repeat(64));
+    assert.equal(rejected.status, 1);
+    const prepared = run('prepare', ...common, '--plan', preview.plan, '--confirm-plan', preview.planHash);
+    assert.equal(prepared.status, 0, prepared.stderr);
+    assert.equal(loadBatchState(f.batch.manifestPath, { root: f.root }).state.candidates[0].artifacts.cv.sourceCvVariant, 'ai_ml');
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
 
 test('cover-letter date uses the candidate timezone across a UTC date boundary', () => {
   assert.equal(candidateLocalDate(

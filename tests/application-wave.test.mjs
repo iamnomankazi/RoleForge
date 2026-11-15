@@ -16,9 +16,9 @@ import { createDraftManifest } from '../cv-claims.mjs';
 import { createApplicationBatch, loadBatchState } from '../application-batch.mjs';
 import { createDocumentPlan } from '../application-documents.mjs';
 import { approveCoverLetterV2, runCoverLetterV2 } from '../cover-letter-v2.mjs';
-import { sha256Canonical } from '../application-integrity.mjs';
+import { hashFile, sha256Canonical } from '../application-integrity.mjs';
 import { writeImmutableScanRun } from '../scan-candidate-contract.mjs';
-import { approveWave, reviewWave } from '../application-wave.mjs';
+import { approveWave, parseApplicationWaveArgs, reviewWave } from '../application-wave.mjs';
 
 const descriptions = [
   'Acme is seeking a Data Engineer to build Python and SQL ETL pipelines, PostgreSQL data models, validation, analytics, reporting, and maintain reliable services with Git on Linux in a collaborative engineering team.',
@@ -36,7 +36,7 @@ function write(root, path, value) {
   return target;
 }
 
-function fixture() {
+function fixture({ rows = candidates } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'career-ops-wave-'));
   write(root, 'config/profile.yml', `candidate:\n  full_name: Alex Example\n  email: alex.example@example.test\n  phone: "+1 202-555-0142"\n  location: Example City, Finland\n  linkedin: https://linkedin.test/alex-example\n  github: https://github.test/alex-example\nlocation:\n  country: Finland\n  city: Example City\ncurrent_status:\n  summary: Graduate student at Example University\n  availability:\n    start: Available immediately\ncompensation:\n  target_range: EUR 50000-55000/year\neducation_details:\n  expected_graduation_date: 31/12/2030\nnarrative:\n  banned_phrases: [excited to leverage, cutting-edge, passionate]\napplication_form:\n  narrative_evidence:\n    - id: fictional-cv-projects\n      topics: [data_engineering, analytics, python_sql, ai_ml, software_backend, motivation_fit]\n      provenance:\n        - sourceType: cv\n          locator: lines:2\ncv:\n  approved_system:\n    master_pdf: output/cv-approved/Alex Example Master CV.pdf\n    role_pdfs:\n      data_engineering: output/cv-approved/Alex Example Data Engineering CV.pdf\n      ai_ml: output/cv-approved/Alex Example AI ML CV.pdf\n      software_backend: output/cv-approved/Alex Example Software Backend CV.pdf\n`);
   const cvText = '## Projects\nIn the fictional Warehouse project, I used Python and SQL for data validation.';
@@ -53,7 +53,7 @@ function fixture() {
     root,
     runId: 'wave-run',
     sourceArchitecture: 'test',
-    inputs: [{ name: 'fixture', rows: candidates }],
+    inputs: [{ name: 'fixture', rows }],
   });
   const batches = scan.candidates.map((candidate, index) => createApplicationBatch({
     root,
@@ -91,9 +91,8 @@ function draft(company, role, jdText) {
 
 async function makeCheckedLetter(f, index, {
   jdText = descriptions[index], preapprove = false, signature = 'Synthetic Candidate',
+  company = candidates[index].company, role = candidates[index].title,
 } = {}) {
-  const company = candidates[index].company;
-  const role = candidates[index].title;
   const letterDraft = { ...draft(company, role, jdText), signature };
   const result = await runCoverLetterV2(letterDraft, {
     jdText,
@@ -159,6 +158,14 @@ test('review writes the full review and a stable canonical wave hash', async () 
     const second = await reviewWave({ waveId: 'stable-wave-copy', items: entries(f) }, { root: f.root, liveness: livenessStub() });
     assert.equal(first.waveHash, sha256Canonical(first.items));
     assert.equal(first.waveHash, second.waveHash);
+    const legacyKeys = [
+      'batchId', 'manifestPath', 'manifestScopeHash', 'candidateId', 'company', 'title', 'listingUrl',
+      'checkPath', 'checkSidecarSha256', 'textPath', 'pdfPath', 'draftHash', 'jdHash', 'textHash',
+      'pdfHash', 'cvFilename', 'cvSha256', 'liveness', 'problems',
+    ];
+    const legacyItems = first.items.map((item) => Object.fromEntries(legacyKeys.map((key) => [key, item[key]])));
+    assert.equal(JSON.stringify(first.items), JSON.stringify(legacyItems));
+    assert.equal(first.waveHash, sha256Canonical(legacyItems));
     assert.equal(calls.length, 2);
     const review = readFileSync(first.reviewPath, 'utf8');
     assert.ok(review.includes(readFileSync(firstCheck.replace(/\.check\.json$/, '.txt'), 'utf8')));
@@ -173,6 +180,151 @@ test('review writes the full review and a stable canonical wave hash', async () 
     });
     assert.equal(expired.items[0].liveness.result, 'expired');
     assert.ok(expired.items[0].problems.some((problem) => /expired/.test(problem)));
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('wave CLI attaches paired overrides only to selected batches and preserves legacy arguments', () => {
+  const args = ['review', '--wave-id', 'override-wave', '--item', 'one=one.check.json', '--item', 'two=two.check.json'];
+  assert.deepEqual(parseApplicationWaveArgs([...args]), {
+    command: 'review', waveId: 'override-wave', items: [{ batchId: 'one', checkPath: 'one.check.json' }, { batchId: 'two', checkPath: 'two.check.json' }],
+  });
+  const parsed = parseApplicationWaveArgs([...args,
+    '--cv-override', 'one=master', '--cv-reason', 'one=  Owner prefers the general CV.  ',
+    '--cv-reason', 'two=Emphasize ML = reviewed.', '--cv-override', 'two=ai_ml',
+  ]);
+  assert.deepEqual(parsed.items.map((item) => item.cvOverride), [
+    { variant: 'master', reason: 'Owner prefers the general CV.' },
+    { variant: 'ai_ml', reason: 'Emphasize ML = reviewed.' },
+  ]);
+  for (const flags of [
+    ['--cv-override', 'missing=master', '--cv-reason', 'missing=Reviewed.'],
+    ['--cv-override', 'one=master'],
+    ['--cv-reason', 'one=Reviewed.'],
+    ['--cv-override', 'one=master', '--cv-override', 'one=ai_ml', '--cv-reason', 'one=Reviewed.'],
+    ['--cv-override', 'one=master', '--cv-reason', 'one=Reviewed.', '--cv-reason', 'one=Again.'],
+    ['--cv-override', 'one=master', '--cv-reason', 'one=  '],
+    ['--cv-override', 'one=master', '--cv-reason', 'one=two\nlines'],
+    ['--cv-override', 'one=master', '--cv-reason', `one=${'x'.repeat(501)}`],
+  ]) {
+    assert.throws(() => parseApplicationWaveArgs([...args, ...flags]), /--item|supplied together|Duplicate|CV override reason/);
+  }
+});
+
+test('an owner override changes the reviewed CV and hash, binds the reason, and approves the overriding plan', async () => {
+  const f = fixture();
+  try {
+    await makeCheckedLetter(f, 0);
+    const legacy = await reviewWave({ waveId: 'default-cv-wave', items: entries(f, [0]) }, { root: f.root, liveness: livenessStub() });
+    const cvOverride = { variant: 'ai_ml', reason: 'Owner reviewed the ML emphasis.' };
+    const reviewItems = entries(f, [0]).map((item) => ({ ...item, cvOverride }));
+    const wave = await reviewWave({ waveId: 'owner-cv-wave', items: reviewItems }, { root: f.root, liveness: livenessStub() });
+    const item = wave.items[0];
+    assert.deepEqual(item.problems, []);
+    assert.deepEqual(item.cvOverride, cvOverride);
+    assert.equal(item.cvFilename, 'Alex Example AI ML CV.pdf');
+    assert.equal(item.cvSha256, hashFile(join(f.root, 'output', 'cv-approved', item.cvFilename)).sha256);
+    assert.equal(item.cvAutomatic.variant, 'data_engineering');
+    assert.notEqual(wave.waveHash, legacy.waveHash);
+    assert.match(readFileSync(wave.reviewPath, 'utf8'), /CV: Alex Example AI ML CV\.pdf \(owner override: ai_ml; reason: Owner reviewed the ML emphasis\.; automatic: data_engineering\)/);
+    const changedReason = await reviewWave({ waveId: 'reason-cv-wave', items: reviewItems.map((entry) => ({
+      ...entry, cvOverride: { ...cvOverride, reason: 'A different owner reason.' },
+    })) }, { root: f.root, liveness: livenessStub() });
+    assert.notEqual(wave.waveHash, changedReason.waveHash);
+    const result = await approveWave({ waveId: wave.waveId, confirm: wave.waveHash }, { root: f.root });
+    assert.equal(result.items[0].outcome, 'prepared', result.items[0].error);
+    const plan = JSON.parse(readFileSync(join(dirname(f.batches[0].manifestPath), 'documents', f.candidateIds[0], 'plan.json'), 'utf8'));
+    assert.equal(plan.cv.variant, 'ai_ml');
+    assert.equal(plan.cv.decision, 'owner_override');
+    assert.equal(plan.cv.override.reason, cvOverride.reason);
+    assert.deepEqual(plan.cv.override.automatic, item.cvAutomatic);
+    assert.equal(loadBatchState(f.batches[0].manifestPath, { root: f.root }).state.candidates[0].artifacts.cv.sourceCvVariant, 'ai_ml');
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('override review refuses unapproved variants and approval rechecks the overriding CV bytes', async () => {
+  const f = fixture();
+  try {
+    await makeCheckedLetter(f, 0);
+    const reviewItems = (variant) => entries(f, [0]).map((item) => ({ ...item, cvOverride: { variant, reason: 'Owner reviewed this CV.' } }));
+    const unknown = await reviewWave({ waveId: 'unknown-cv-wave', items: reviewItems('unknown') }, { root: f.root, liveness: livenessStub() });
+    assert.ok(unknown.items[0].problems.some((problem) => /approved CV variant/.test(problem)));
+    const wave = await reviewWave({ waveId: 'changed-cv-wave', items: reviewItems('master') }, { root: f.root, liveness: livenessStub() });
+    writeFileSync(join(f.root, 'output', 'cv-approved', wave.items[0].cvFilename), '%PDF-1.4 changed');
+    const result = await approveWave({ waveId: wave.waveId, confirm: wave.waveHash }, { root: f.root });
+    assert.equal(result.items[0].outcome, 'failed');
+    assert.match(result.items[0].error, /Selected approved CV changed since review/);
+    assertNothingBound(f);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('approval recomputes the automatic choice recorded for an override', async () => {
+  const f = fixture();
+  try {
+    await makeCheckedLetter(f, 0);
+    const wave = await reviewWave({ waveId: 'automatic-change-wave', items: entries(f, [0]).map((item) => ({
+      ...item, cvOverride: { variant: 'master', reason: 'Owner reviewed the general CV.' },
+    })) }, { root: f.root, liveness: livenessStub() });
+    const profilePath = join(f.root, 'config', 'profile.yml');
+    const oldPath = 'output/cv-approved/Alex Example Data Engineering CV.pdf';
+    const newPath = 'output/cv-approved/Alex Example Other Data CV.pdf';
+    write(f.root, newPath, readFileSync(join(f.root, oldPath)));
+    writeFileSync(profilePath, readFileSync(profilePath, 'utf8').replace(oldPath, newPath));
+    const result = await approveWave({ waveId: wave.waveId, confirm: wave.waveHash }, { root: f.root });
+    assert.equal(result.items[0].outcome, 'failed');
+    assert.match(result.items[0].error, /Automatic CV selection changed since review/);
+    assertNothingBound(f);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('wave review displays an ambiguous automatic selection error and approves the owner choice', async () => {
+  const role = 'Operations Specialist';
+  const jdText = 'Acme seeks an Operations Specialist to coordinate customer requests, review routine records, arrange meetings, communicate clearly with colleagues, and support daily office responsibilities.';
+  const f = fixture({ rows: [{ ...candidates[0], title: role, description: jdText }] });
+  try {
+    await makeCheckedLetter(f, 0, { role, jdText });
+    const wave = await reviewWave({ waveId: 'ambiguous-override-wave', items: entries(f, [0]).map((item) => ({
+      ...item, cvOverride: { variant: 'master', reason: 'Owner reviewed the general CV.' },
+    })) }, { root: f.root, liveness: livenessStub() });
+    assert.deepEqual(wave.items[0].problems, []);
+    assert.match(wave.items[0].cvAutomatic.error, /CV role family is ambiguous/);
+    assert.match(readFileSync(wave.reviewPath, 'utf8'), /automatic: CV role family is ambiguous/);
+    const result = await approveWave({ waveId: wave.waveId, confirm: wave.waveHash }, { root: f.root });
+    assert.equal(result.items[0].outcome, 'prepared', result.items[0].error);
+    assert.equal(loadBatchState(f.batches[0].manifestPath, { root: f.root }).state.candidates[0].artifacts.cv.sourceCvVariant, 'master');
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('approval rejects a plan that changes the reviewed CV, reason, or override decision', async () => {
+  const f = fixture();
+  try {
+    await makeCheckedLetter(f, 0);
+    const cvOverride = { variant: 'data_engineering', reason: 'Owner explicitly reviewed this CV.' };
+    const cases = [
+      { name: 'cv', override: { ...cvOverride, variant: 'master' }, error: /not the reviewed CV/ },
+      { name: 'reason', override: { ...cvOverride, reason: 'Changed after owner review.' }, error: /override does not match/ },
+      { name: 'decision', override: null, error: /override does not match/ },
+    ];
+    for (const entry of cases) {
+      const wave = await reviewWave({ waveId: `plan-override-${entry.name}`, items: entries(f, [0]).map((item) => ({ ...item, cvOverride })) },
+        { root: f.root, liveness: livenessStub() });
+      const result = await approveWave({ waveId: wave.waveId, confirm: wave.waveHash }, {
+        root: f.root,
+        createPlan: (options) => createDocumentPlan({ ...options, cvOverride: entry.override }),
+      });
+      assert.equal(result.items[0].outcome, 'failed', entry.name);
+      assert.match(result.items[0].error, entry.error);
+      assertNothingBound(f);
+    }
   } finally {
     rmSync(f.root, { recursive: true, force: true });
   }

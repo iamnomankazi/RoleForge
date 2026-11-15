@@ -1485,7 +1485,7 @@ export function formatPreflight(manifest, state = null) {
     lines.push(`   Candidate ID: ${candidate.candidate_id}${candidate.identityStatus === 'legacy_derived' ? ' (derived legacy identity)' : ''}`);
     lines.push(`   Listing URL: ${candidate.listingUrl}`);
     lines.push(`   Apply URL: ${candidate.applyUrl || '(same as listing / unknown)'}`);
-    lines.push(`   CV: ${candidate.artifacts.cv ? `${candidate.artifacts.cv.intendedFilename} (${candidate.artifacts.cv.sha256})` : '(not bound)'}`);
+    lines.push(`   CV: ${candidate.artifacts.cv ? `${candidate.artifacts.cv.intendedFilename} (${candidate.artifacts.cv.sha256})${candidate.artifacts.cv.sourceCvVariant ? ` [variant: ${candidate.artifacts.cv.sourceCvVariant}]` : ''}` : '(not bound)'}`);
     lines.push(`   Cover letter: ${candidate.artifacts.coverLetter ? `${candidate.artifacts.coverLetter.intendedFilename} (${candidate.artifacts.coverLetter.sha256})` : '(none)'}`);
     lines.push(`   Cover letter text: ${candidate.artifacts.coverLetterText ? `${candidate.artifacts.coverLetterText.intendedFilename} (${candidate.artifacts.coverLetterText.sha256})` : '(none)'}`);
     lines.push(`   Combined document: ${candidate.artifacts.combinedDocument ? `${candidate.artifacts.combinedDocument.intendedFilename} (${candidate.artifacts.combinedDocument.sha256})` : '(none)'}`);
