@@ -142,7 +142,7 @@ function fakeAttemptBrowser(fixture, snapshotOverrides = {}) {
     waitForLoadState: async () => {},
     waitForTimeout: async (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     evaluate: async (fn, args) => {
-      if (String(fn).includes('document.documentElement?.innerHTML.length')) return currentUrl === 'about:blank';
+      if (String(fn).includes('document.body?.childElementCount')) return currentUrl === 'about:blank';
       if (args?.gateOnly || String(fn).includes('__careerOpsEntryControlCounter')) return snapshot;
       if (String(fn).includes('document.body?.innerText')) return snapshot.bodyText;
       return [];
@@ -304,6 +304,8 @@ test('pre-open transient classification is limited to transport, liveness, and l
       [`${stage} option type error`, { message: 'browserType.launch: headless: expected boolean, got string' }, stage, null],
       [`${stage} invalid argument code`, { code: 'ERR_INVALID_ARG_TYPE', message: 'browserType.launch: Failed to launch' }, stage, null],
       [`${stage} unexpected error`, { message: 'Fictional process failed to start' }, stage, null],
+      [`${stage} missing host dependencies`, { message: 'browserType.launchPersistentContext: Host system is missing dependencies to run browsers.' }, stage, null],
+      [`${stage} browser not installed`, { message: "browserType.launch: Executable doesn't exist at /fictional/chrome" }, stage, null],
     ]),
     ['unexpected error', { message: 'Unexpected fictional error' }, 'liveness', null],
     ['identity mismatch', { message: 'Candidate identity mismatch' }, 'liveness', null],
@@ -410,6 +412,7 @@ test('a transient failure after a candidate page loads cannot record a pre-open 
 test('shared blank documents and candidate popups bound pre-open retries', async (t) => {
   const cases = [
     ['empty shared document', 'about:blank', '', '', 'api', false],
+    ['untouched blank skeleton', 'about:blank', '<head></head><body></body>', '', 'api', false],
     ['shared HTML without navigation', 'about:blank', '<main>Fictional form</main>', '', 'api', true],
     ['shared body text', 'about:blank', '', 'Fictional form', 'api', true],
     ['unreadable shared document', 'about:blank', '', '', 'evaluate_error', true],
@@ -436,7 +439,10 @@ test('shared blank documents and candidate popups bound pre-open retries', async
           if (kind === 'evaluate_error') throw new Error('Fictional document access failed');
           if (kind === 'evaluate_popup') fake.context.emit('page', {});
           return runInNewContext(`(${fn})()`, {
-            document: { documentElement: { innerHTML: html }, body: { innerText: text } },
+            document: {
+              head: { childElementCount: 0 },
+              body: { innerText: text, childElementCount: /<(?![/]?(?:head|body)\b)[a-z]/i.test(html) ? 1 : 0 },
+            },
           });
         };
         if (kind === 'owned_popup') {

@@ -251,3 +251,49 @@ test('groups bridging distinct candidate IDs are skipped, not merged', () => {
     fx.cleanup();
   }
 });
+
+test('a report whose Machine Summary names another candidate blocks the merge', () => {
+  const headerId = id('f');
+  const otherId = id('9');
+  const fx = fixture([
+    trackerRow({ num: 31, role: 'Fictional Analyst', status: 'Applied', report: '[31](../reports/031-example.md)' }),
+    trackerRow({ num: 32, role: 'Fictional Analyst', report: '[32](../reports/032-example.md)' }),
+  ]);
+  try {
+    const reports = join(fx.root, 'reports');
+    mkdirSync(reports, { recursive: true });
+    const summary = (cid) => ['company: Example Oy', 'role: Fictional Analyst', 'location_country: Finland', 'fit_score: 4.1',
+      'liveness: confirmed', 'liveness_date: 2026-11-10', 'blockers: []', 'flags: []', `candidate_id: ${cid}`].join('\n');
+    const report = (cid) => `**Candidate ID:** ${headerId}\n\n## Machine Summary\n\n\`\`\`yaml\n${summary(cid)}\n\`\`\`\n`;
+    writeFileSync(join(reports, '031-example.md'), report(headerId));
+    writeFileSync(join(reports, '032-example.md'), report(otherId));
+    const before = readFileSync(fx.trackerPath, 'utf8');
+    const result = run(fx, ['--by-candidate-id']);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Skipped #31, #32: report_id_mismatch|Skipped #32, #31: report_id_mismatch/);
+    assert.equal(readFileSync(fx.trackerPath, 'utf8'), before);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('merge keeps the removed row PDF evidence', () => {
+  const candidate = id('c');
+  const fx = fixture([
+    `| 41 | 2026-10-01 | Example Oy | Fictional Role | 4/5 | Applied | - | [41](../reports/041-example.md) | Canonical candidate ID: ${candidate} |`,
+    `| 42 | 2026-10-01 | Example Oy | Fictional Role | 4/5 | Evaluated | output/fictional-cv.pdf | [42](../reports/042-example.md) | Canonical candidate ID: ${candidate} |`,
+    `| 43 | 2026-10-01 | Acme GmbH | Other Role | 4/5 | Applied | output/keeper.pdf | - | Canonical candidate ID: ${id('7')} |`,
+    `| 44 | 2026-10-01 | Acme GmbH | Other Role | 4/5 | Evaluated | output/other.pdf | - | Canonical candidate ID: ${id('7')} |`,
+  ]);
+  try {
+    const result = run(fx, ['--by-candidate-id']);
+    assert.equal(result.status, 0, result.stderr);
+    const content = readFileSync(fx.trackerPath, 'utf8');
+    assert.match(content, /^\| 41 \|.*\| Applied \| output\/fictional-cv\.pdf \|/m);
+    assert.match(content, /^\| 43 \|.*\| Applied \| output\/keeper\.pdf \|.*Merged #44 PDF output\/other\.pdf/m);
+    assert.equal(content.includes('| 42 |'), false);
+    assert.equal(content.includes('| 44 |'), false);
+  } finally {
+    fx.cleanup();
+  }
+});

@@ -1894,6 +1894,8 @@ function transientPreOpenErrorClass(error, stage) {
     const launchClass = stage === 'context_launch' ? 'context_launch' : 'browser_launch';
     const spawnFailure = codes.some((code) => ['ENOENT', 'EACCES'].includes(code))
       && (/^spawn\b/i.test(error?.syscall || error?.cause?.syscall || '') || /\bspawn(?:Sync)?\b/i.test(message));
+    // A missing browser installation or host dependency is permanent, not a retry case.
+    if (/\bmissing dependencies\b|\bExecutable doesn't exist\b|\bplaywright install\b|\bis not installed\b/i.test(message)) return null;
     if (timeout || spawnFailure
         || /\bbrowserType\.launch(?:PersistentContext)?:|\bfailed to launch\b|\bbrowser(?: process)? launch (?:failed|failure)\b|\bTarget page, context or browser has been closed\b/i.test(message)) return launchClass;
     return null;
@@ -1930,7 +1932,9 @@ async function observeCandidatePageLoad(page, attempt, { inspectDocument = false
   context?.on?.('page', onPage);
   if (inspectDocument && !attempt.pageLoaded) {
     try {
-      const empty = await page.evaluate(() => !(document.documentElement?.innerHTML.length || document.body?.innerText?.trim().length));
+      // An untouched about:blank still has an empty <head></head><body></body> skeleton.
+      const empty = await page.evaluate(() => !(document.head?.childElementCount
+        || document.body?.childElementCount || document.body?.innerText?.trim().length));
       if (empty !== true) attempt.pageLoaded = true;
     } catch {
       attempt.pageLoaded = true;

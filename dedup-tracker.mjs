@@ -194,7 +194,7 @@ function runCandidateIdDedup(entries, lines, colmap) {
       skipped.push({ rows: numbers, reason: 'no unambiguous candidate ID on this group' });
       continue;
     }
-    const blockedFlags = group.flags.filter((flag) => ['mixed_status', 'conflict', 'unknown_status'].includes(flag));
+    const blockedFlags = group.flags.filter((flag) => ['mixed_status', 'conflict', 'unknown_status', 'report_id_mismatch'].includes(flag));
     if (blockedFlags.length) {
       skipped.push({ rows: numbers, reason: blockedFlags.join(', ') });
       continue;
@@ -263,7 +263,18 @@ function runCandidateIdDedup(entries, lines, colmap) {
     const reportNotes = removed
       .filter((row) => row.report && !['-', '—', 'â€”'].includes(row.report.trim().toLowerCase()))
       .map((row) => `Merged #${row.num} ${row.report}`);
-    parts[colmap.notes] = unionEvidence(mergedNotes, ...reportNotes);
+    // Keep artifact evidence (PDF/CV link) of removed rows: fill an empty keeper
+    // cell, otherwise record it in Notes next to the merged report link.
+    const isEmptyCell = (value) => !value || ['-', '—', '❌', 'â€”'].includes(String(value).trim());
+    const pdfNotes = [];
+    if (colmap.pdf != null) {
+      for (const row of removed) {
+        if (isEmptyCell(row.pdf) || row.pdf === parts[colmap.pdf]) continue;
+        if (isEmptyCell(parts[colmap.pdf])) parts[colmap.pdf] = row.pdf;
+        else pdfNotes.push(`Merged #${row.num} PDF ${row.pdf}`);
+      }
+    }
+    parts[colmap.notes] = unionEvidence(mergedNotes, ...reportNotes, ...pdfNotes);
     lines[keeper.lineIdx] = rebuildRow(parts);
     for (const row of removed) linesToRemove.add(row.lineIdx);
   }
