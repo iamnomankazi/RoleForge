@@ -32,18 +32,20 @@ function escapeRegex(value) {
 function usage() {
   return [
     'Usage: node filter-replay.mjs <raw-rows.jsonl[.gz]> [options]',
+    '       node filter-replay.mjs --title-sample <title-rejected.json> [options]',
     '',
     'Options:',
     '  --portals <path>  Portals YAML (default: portals.yml in the repo root)',
     '  --limit <n>       Process at most n rows after country selection',
     '  --country <code>  Process one country (two-letter ISO code)',
+    '  --title-sample <path>  Replay a scan title-rejection diagnostic against the title filter only',
     '  --out <dir>       Output directory (default: output/filter-replay/<timestamp>)',
     '  --help            Show this help',
   ].join('\n');
 }
 
 function parseArgs(args) {
-  const options = { portals: path.join(ROOT, 'portals.yml'), limit: null, country: null, out: null, input: null };
+  const options = { portals: path.join(ROOT, 'portals.yml'), limit: null, country: null, out: null, input: null, titleSample: null };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === '--help' || arg === '-h') return { help: true };
@@ -54,13 +56,14 @@ function parseArgs(args) {
     }
 
     const [flag, inlineValue] = arg.split(/=(.*)/s, 2);
-    if (!['--portals', '--limit', '--country', '--out'].includes(flag)) {
+    if (!['--portals', '--limit', '--country', '--out', '--title-sample'].includes(flag)) {
       throw new Error(`Unknown option: ${flag}`);
     }
     const value = inlineValue ?? args[++index];
     if (value == null || value === '' || value.startsWith('--')) throw new Error(`${flag} requires a value`);
     if (flag === '--portals') options.portals = path.resolve(value);
     else if (flag === '--out') options.out = path.resolve(value);
+    else if (flag === '--title-sample') options.titleSample = path.resolve(value);
     else if (flag === '--country') {
       if (!/^[a-z]{2}$/i.test(value)) throw new Error('--country requires a two-letter country code');
       options.country = value.toLowerCase();
@@ -70,8 +73,9 @@ function parseArgs(args) {
       options.limit = limit;
     }
   }
-  if (!options.input) throw new Error('A raw rows JSONL input path is required');
-  options.input = path.resolve(options.input);
+  if (options.input && options.titleSample) throw new Error('Provide raw rows or --title-sample, not both');
+  if (!options.input && !options.titleSample) throw new Error('A raw rows JSONL input path or --title-sample is required');
+  if (options.input) options.input = path.resolve(options.input);
   return options;
 }
 
@@ -174,8 +178,69 @@ async function writeLine(stream, value) {
   if (!stream.write(`${JSON.stringify(value)}\n`)) await once(stream, 'drain');
 }
 
+async function replayTitleSample(options, config) {
+  const diagnostic = JSON.parse(await readFile(options.titleSample, 'utf8'));
+  if (diagnostic?.schema !== 'roleforge.title-rejected/1' || !Array.isArray(diagnostic.sample)) {
+    throw new Error('--title-sample must be a roleforge.title-rejected/1 diagnostic with a sample array');
+  }
+  const titleFilter = buildTitleFilter(config.title_filter);
+  const candidates = options.limit == null ? diagnostic.sample : diagnostic.sample.slice(0, options.limit);
+  const groups = new Map();
+  const passedWithoutPositiveKeyword = [];
+  const passed = [];
+  let rejectedCount = 0;
+
+  for (const row of candidates) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) continue;
+    const title = typeof row.title === 'string' ? row.title : '';
+    if (!titleFilter(title)) {
+      rejectedCount += 1;
+      continue;
+    }
+    const keywords = matchedTitleKeywords(title, config.title_filter);
+    const result = { ...row, matched_positive_keywords: keywords };
+    passed.push(result);
+    if (keywords.length === 0) {
+      passedWithoutPositiveKeyword.push(result);
+      continue;
+    }
+    for (const keyword of keywords) {
+      const group = groups.get(keyword) || [];
+      group.push(result);
+      groups.set(keyword, group);
+    }
+  }
+
+  const summary = {
+    schema: 'roleforge.title-filter-replay/1',
+    input: options.titleSample,
+    portals: options.portals,
+    sampled_count: candidates.length,
+    considered_count: passed.length + rejectedCount,
+    passed_count: passed.length,
+    rejected_count: rejectedCount,
+    counts_by_positive_keyword: Object.fromEntries([...groups]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([keyword, rows]) => [keyword, rows.length])),
+    passed_without_positive_keyword_count: passedWithoutPositiveKeyword.length,
+  };
+  const outputDirectory = options.out || makeOutputDirectory();
+  mkdirSync(outputDirectory, { recursive: true });
+  const outputPath = path.join(outputDirectory, 'title-sample-replay.json');
+  const output = {
+    ...summary,
+    groups_by_positive_keyword: [...groups]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([keyword, rows]) => ({ keyword, count: rows.length, sample: rows })),
+    passed_without_positive_keyword: passedWithoutPositiveKeyword,
+  };
+  await writeFile(outputPath, `${JSON.stringify(output, null, 2)}\n`, 'utf8');
+  return { outputDirectory, outputPath, summary, elapsedMs: 0 };
+}
+
 async function replay(options) {
   const config = yaml.load(await readFile(options.portals, 'utf8')) || {};
+  if (options.titleSample) return replayTitleSample(options, config);
   const titleFilter = buildTitleFilter(config.title_filter);
   const locationFilter = buildLocationFilter(config.location_filter);
   const contentFilter = buildContentFilter(config.content_filter, {
@@ -349,7 +414,7 @@ async function main() {
     const result = await replay(options);
     console.log(`Filter replay completed in ${(result.elapsedMs / 1000).toFixed(2)}s`);
     console.log(`Output: ${result.outputDirectory}`);
-    console.log(JSON.stringify(result.summary.overall));
+    console.log(JSON.stringify(result.summary.overall || result.summary));
   } catch (error) {
     console.error(`Filter replay failed: ${error.message}`);
     process.exitCode = 1;

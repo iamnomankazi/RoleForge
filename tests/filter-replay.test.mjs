@@ -109,3 +109,44 @@ test('filter replay supports help and rejects unknown flags', () => {
   assert.equal(unknown.status, 2);
   assert.match(unknown.stderr, /Unknown option: --wat/);
 });
+
+test('filter replay rechecks title rejection samples against current positive keywords', () => {
+  const temp = mkdtempSync(path.join(tmpdir(), 'filter-title-sample-'));
+  try {
+    const sample = path.join(temp, 'title-rejected.json');
+    const portals = path.join(temp, 'portals.yml');
+    const out = path.join(temp, 'out');
+    writeFileSync(sample, JSON.stringify({
+      schema: 'roleforge.title-rejected/1',
+      run_id: 'scan-synthetic',
+      created_at: '2026-01-01T00:00:00.000Z',
+      cap_per_source: 200,
+      counts_by_source: { example: 3 },
+      sample: [
+        { title: 'Junior AI-Engineer', company: 'Example Oy', location: 'Helsinki', source: 'example' },
+        { title: 'Software/Engineer', company: 'Sample GmbH', location: 'Berlin', source: 'example' },
+        { title: 'Senior AI Engineer', company: 'Fictional Labs', location: 'Remote', source: 'example' },
+      ],
+    }, null, 2));
+    writeFileSync(portals, [
+      'title_filter:',
+      '  positive: ["AI Engineer", "Software Engineer"]',
+      '  negative: ["Senior"]',
+      '',
+    ].join('\n'));
+
+    execFileSync(process.execPath, [SCRIPT, '--title-sample', sample, '--portals', portals, '--out', out], { cwd: ROOT });
+    const replay = JSON.parse(readFileSync(path.join(out, 'title-sample-replay.json'), 'utf8'));
+    assert.equal(replay.sampled_count, 3);
+    assert.equal(replay.passed_count, 2);
+    assert.equal(replay.rejected_count, 1);
+    assert.deepEqual(replay.counts_by_positive_keyword, {
+      'AI Engineer': 1,
+      'Software Engineer': 1,
+    });
+    assert.deepEqual(replay.groups_by_positive_keyword.map(group => group.keyword), ['AI Engineer', 'Software Engineer']);
+    assert.deepEqual(replay.groups_by_positive_keyword.map(group => group.sample[0].title), ['Junior AI-Engineer', 'Software/Engineer']);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});

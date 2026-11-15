@@ -117,3 +117,40 @@ test('single-token keywords also match their plural', () => {
   assert.equal(compileKeyword('api')('rapid capital growth'), false);
   assert.equal(compileKeyword('lead')('Leadership program'), false);
 });
+
+test('title separator normalization also applies to by-title content rule lookup', () => {
+  const titleFilter = { positive: ['AI Engineer'] };
+  assert.deepEqual(matchedTitleKeywords('Junior AI-Engineer', titleFilter), ['AI Engineer']);
+  const content = buildContentFilter({
+    by_title_keyword: {
+      'AI-Engineer': { positive: ['transformer'] },
+    },
+  });
+  assert.equal(content('Uses transformer models', matchedTitleKeywords('Junior AI-Engineer', titleFilter)), true);
+  assert.equal(content('Uses database systems', matchedTitleKeywords('Junior AI-Engineer', titleFilter)), false);
+});
+
+test('title combination keywords require every part in any order', () => {
+  const filter = buildTitleFilter({ positive: ['AI + Engineer'] });
+  assert.equal(filter('Junior AI-Engineer'), true);
+  assert.equal(filter('Engineer for Applied AI'), true);
+  assert.equal(filter('Junior AI Scientist'), false);
+  assert.deepEqual(matchedTitleKeywords('Engineer for Applied AI', { positive: ['AI + Engineer'] }), ['AI + Engineer']);
+
+  const wildcard = buildTitleFilter({ positive: ['ai + engineer*'] });
+  assert.equal(wildcard('Engineer II, Applied AI'), true);
+  assert.equal(wildcard('AI Scientist'), false);
+
+  const negative = buildTitleFilter({ positive: ['Engineer'], negative: ['Lead + Software'] });
+  assert.equal(negative('Lead-Software Engineer'), false);
+  assert.equal(negative('Software Engineer'), true);
+  assert.equal(buildTitleFilter({ positive: [' + Engineer'] })('Unrelated Title'), true);
+  assert.equal(buildTitleFilter({ positive: ['Engineer'], negative: ['Lead + '] })('Lead Engineer'), true);
+  assert.equal(buildTitleFilter({ positive: ['C++'] })('C++ Developer'), true);
+});
+
+test('content descriptions keep existing hyphen matching semantics', () => {
+  const requiresPhrase = buildContentFilter({ positive: ['state of the art'] });
+  assert.equal(requiresPhrase('State-of-the-art machine learning'), false);
+  assert.equal(requiresPhrase('State of the art machine learning'), true);
+});

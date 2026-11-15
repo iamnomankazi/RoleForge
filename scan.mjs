@@ -91,6 +91,7 @@ function resolveProvidersDir() {
 }
 
 const CONCURRENCY = 10;
+const TITLE_REJECTED_SAMPLE_CAP_PER_SOURCE = 200;
 
 // Provider loading + routing live in providers/_registry.mjs so the portal
 // health check (verify-portals.mjs) can reuse the exact same layer without
@@ -106,6 +107,15 @@ const FILTER_WORD_CHAR = String.raw`[\p{L}\p{N}\p{M}_]`;
 
 function normalizeFilterText(value) {
   return String(value ?? '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+}
+
+// Title matching treats common punctuation separators as word spacing. Keep
+// this separate from normalizeFilterText so description matching is unchanged.
+function normalizeTitleFilterText(value) {
+  return normalizeFilterText(value)
+    .replace(/[-\u2010-\u2015\u2212/,]/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
 }
 
 function escapeFilterRegex(value) {
@@ -141,14 +151,14 @@ export function buildTitleFilter(titleFilter) {
   // non-string entry in the YAML) must not crash the scan via k.toLowerCase().
   const normalize = (arr) => (Array.isArray(arr) ? arr : [])
     .filter(k => typeof k === 'string')
-    .map(k => k.trim())
-    .filter(k => k.length > 0)
-    .map(compileKeyword);
+    .filter(k => k.trim().length > 0)
+    .map(compileTitleKeyword)
+    .filter(Boolean);
   const positive = normalize(titleFilter?.positive);
   const negative = normalize(titleFilter?.negative);
 
   return (title) => {
-    const lower = normalizeFilterText(title || '');
+    const lower = normalizeTitleFilterText(title || '');
     const hasPositive = positive.length === 0 || positive.some(m => m(lower));
     const hasNegative = negative.some(m => m(lower));
     return hasPositive && !hasNegative;
@@ -161,11 +171,25 @@ export function buildTitleFilter(titleFilter) {
 // every keyword (compileKeyword()) on every single job.
 const compiledPositiveCache = new WeakMap();
 
+function compileTitleKeyword(value) {
+  const raw = String(value ?? '');
+  const isCombination = /\s\+\s/u.test(raw);
+  const keyword = normalizeTitleFilterText(raw);
+  if (!keyword) return null;
+  const parts = isCombination
+    ? raw.split(/\s+\+\s+/u).map(normalizeTitleFilterText)
+    : [keyword];
+  if (parts.some(part => !part.trim())) return null;
+  const matchers = parts.map(part => compileKeyword(part.trim()));
+  return (title) => matchers.every(match => match(title));
+}
+
 function compiledPositiveMatchers(positiveList) {
   if (compiledPositiveCache.has(positiveList)) return compiledPositiveCache.get(positiveList);
   const compiled = positiveList
     .filter(k => typeof k === 'string' && k.trim().length > 0)
-    .map(k => ({ raw: k, match: compileKeyword(k.trim().toLowerCase()) }));
+    .map(k => ({ raw: k, match: compileTitleKeyword(k) }))
+    .filter(({ match }) => Boolean(match));
   compiledPositiveCache.set(positiveList, compiled);
   return compiled;
 }
@@ -175,7 +199,7 @@ function compiledPositiveMatchers(positiveList) {
 // overrides to only the categories that opted into a stricter content check.
 export function matchedTitleKeywords(title, titleFilter) {
   const raw = Array.isArray(titleFilter?.positive) ? titleFilter.positive : [];
-  const lower = normalizeFilterText(title || '');
+  const lower = normalizeTitleFilterText(title || '');
   return compiledPositiveMatchers(raw)
     .filter(({ match }) => match(lower))
     .map(({ raw: kw }) => kw);
@@ -584,7 +608,7 @@ export function buildContentFilter(contentFilter, { experiencePolicy = null } = 
   if (contentFilter.by_title_keyword && typeof contentFilter.by_title_keyword === 'object' && !Array.isArray(contentFilter.by_title_keyword)) {
     for (const [kw, rule] of Object.entries(contentFilter.by_title_keyword)) {
       if (typeof kw !== 'string' || !kw.trim()) continue;
-      byTitleKeyword.set(normalizeFilterText(kw.trim()), {
+      byTitleKeyword.set(normalizeTitleFilterText(kw.trim()), {
         positive: normalizeKeywordList(rule?.positive).map(compileKeyword),
         negative: normalizeKeywordList(rule?.negative)
           .filter(keyword => !(preserveNumericExperience && isNumericExperienceKeyword(keyword)))
@@ -599,7 +623,7 @@ export function buildContentFilter(contentFilter, { experiencePolicy = null } = 
 
     const overrides = matchedKeywords
       .filter(k => typeof k === 'string')
-      .map(k => byTitleKeyword.get(normalizeFilterText(k.trim())))
+      .map(k => byTitleKeyword.get(normalizeTitleFilterText(k.trim())))
       .filter(Boolean);
 
     if (overrides.length > 0) {
@@ -1353,6 +1377,58 @@ export function persistStandardScanRun({
   });
 }
 
+export function writeTitleRejectedDiagnostic({
+  root = resolveScanRoot(),
+  runId,
+  createdAt = new Date().toISOString(),
+  countsBySource = {},
+  sample = [],
+  warn = console.warn,
+}) {
+  const diagnosticPath = path.join(root, 'output', 'scan-diagnostics', runId, 'title-rejected.json');
+  try {
+    mkdirSync(path.dirname(diagnosticPath), { recursive: true });
+    writeFileSync(diagnosticPath, `${JSON.stringify({
+      schema: 'roleforge.title-rejected/1',
+      run_id: runId,
+      created_at: createdAt,
+      cap_per_source: TITLE_REJECTED_SAMPLE_CAP_PER_SOURCE,
+      counts_by_source: countsBySource,
+      sample,
+    }, null, 2)}\n`, 'utf-8');
+    return diagnosticPath;
+  } catch (error) {
+    warn(`Warning: could not write title rejection diagnostic ${diagnosticPath}: ${error.message}`);
+    return null;
+  }
+}
+
+export function createTitleRejectedCollector(capPerSource = TITLE_REJECTED_SAMPLE_CAP_PER_SOURCE) {
+  const countsBySource = new Map();
+  const sampledBySource = new Map();
+  const sample = [];
+  return {
+    record(job, source) {
+      countsBySource.set(source, (countsBySource.get(source) || 0) + 1);
+      const sampledCount = sampledBySource.get(source) || 0;
+      if (sampledCount >= capPerSource) return;
+      sampledBySource.set(source, sampledCount + 1);
+      sample.push({
+        title: job.title ?? null,
+        company: job.company ?? null,
+        location: job.location ?? null,
+        source,
+      });
+    },
+    counts() {
+      return Object.fromEntries([...countsBySource].sort(([left], [right]) => left.localeCompare(right)));
+    },
+    sample() {
+      return [...sample];
+    },
+  };
+}
+
 // ── Parallel fetch with concurrency limit ───────────────────────────
 
 async function parallelFetch(tasks, limit) {
@@ -1665,6 +1741,7 @@ async function main() {
   let totalFilteredSalary = 0;
   let totalFilteredContent = 0;
   let totalDupes = 0;
+  const titleRejected = createTitleRejectedCollector();
   const newOffers = [];
   const newOffersByUrl = new Map();
   const newOffersByCompanyRole = new Map();
@@ -1758,7 +1835,10 @@ async function main() {
 
         const relevance = evaluateScanRelevance(job);
         if (!relevance.eligible) {
-          if (relevance.reason === 'title') totalFilteredTitle++;
+          if (relevance.reason === 'title') {
+            totalFilteredTitle++;
+            titleRejected.record(job, sourceName);
+          }
           else if (relevance.reason === 'posting_age') totalFilteredPostingAge++;
           else if (relevance.reason === 'tier') totalFilteredTier++;
           else if (relevance.reason === 'location') totalFilteredLocation++;
@@ -2108,6 +2188,18 @@ async function main() {
       filteredLocation: totalFilteredLocation, filteredSalary: totalFilteredSalary,
       filteredContent: totalFilteredContent, filteredCooldown: totalFilteredCooldown,
       dupes: totalDupes, newAdded: verifiedOffers.length, errors: errors.length,
+    });
+  }
+
+  // The relevance evaluator returns at the title gate, so later gates are not
+  // evaluated for these rows. The sample therefore means "rejected at title
+  // stage" and does not claim the rows would pass location, salary, or content.
+  if (!dryRun && successfulTargets > 0) {
+    writeTitleRejectedDiagnostic({
+      root: resolveScanRoot(),
+      runId,
+      countsBySource: titleRejected.counts(),
+      sample: titleRejected.sample(),
     });
   }
 
