@@ -1871,25 +1871,47 @@ async function finishHumanHandoff(page, contract, gate, stage, options, environm
 }
 
 function transientPreOpenErrorClass(error, stage) {
-  const message = inline(`${error?.name || ''} ${error?.code || ''} ${error?.message || ''} ${error?.cause?.code || ''} ${error?.cause?.message || ''}`);
-  if (stage === 'browser_launch') return 'browser_launch';
-  if (stage === 'context_launch') return 'context_launch';
-  if (/\b(?:ENOTFOUND|EAI_AGAIN|ERR_NAME_NOT_RESOLVED|ERR_DNS_[A-Z0-9_]+)\b/i.test(message)) return 'dns';
-  if (/\b(?:ETIMEDOUT|ERR_TIMED_OUT)\b/i.test(message)) return 'timeout';
-  if (/\b(?:ECONNREFUSED|ECONNRESET|ERR_CONNECTION_[A-Z0-9_]+|connection refused|connection reset(?: by peer)?)\b/i.test(message)) return 'connection';
-  if (/\b(?:ERR_SSL_[A-Z0-9_]+|ERR_CERT_[A-Z0-9_]+|ERR_TLS_[A-Z0-9_]+|CERT_HAS_EXPIRED|DEPTH_ZERO_SELF_SIGNED_CERT|SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_VERIFY_LEAF_SIGNATURE)\b/i.test(message)
-      || /\b(?:TLS|SSL) (?:(?:handshake|certificate) )?(?:failed|failure|error)\b/i.test(message)) return 'tls';
-  if (['liveness', 'navigation'].includes(stage)
-      && (error?.name === 'TimeoutError' || /\b(?:timeout|timed out)\b/i.test(message))) return 'timeout';
-  if (/\bbrowserType\.launch(?:PersistentContext)?:|\bfailed to launch (?:the )?browser|\bbrowser(?: process)? launch (?:failed|failure)\b/i.test(message)) return 'browser_launch';
-  if (/\bbrowser\.newContext:|\bcontext (?:launch|creation) (?:failed|failure)\b/i.test(message)) return 'context_launch';
+  if (!['liveness', 'navigation', 'browser_launch', 'context_launch', 'profile_launch'].includes(stage)) return null;
+  const message = inline(`${error?.message || ''} ${error?.cause?.message || ''}`.replace(/https?:\/\/\S+/gi, ''));
+  const codes = [error?.code, error?.cause?.code, ...message.matchAll(/\b(?:net::)?(ERR_[A-Z0-9_]+|E[A-Z0-9_]+)\b/g)]
+    .map((code) => typeof code === 'string' ? code.replace(/^net::/, '') : code?.[1]).filter(Boolean);
+  if ([error?.name, error?.cause?.name].some((name) => ['TypeError', 'ReferenceError', 'SyntaxError'].includes(name))
+      || codes.some((code) => /^(?:ERR_MODULE_NOT_FOUND|MODULE_NOT_FOUND|ERR_INVALID_\w+|ERR_UNKNOWN_\w+)$/.test(code))
+      || /\b(?:invalid|unknown|unsupported) (?:\w+ )?(?:options?|arguments?|configuration)\b|\b(?:options?|arguments?)\b.*\b(?:expected|must be)\b|\bexpected (?:boolean|number|string|object|array)\b/i.test(message)) return null;
+  const networkClass = (code) => {
+    if (/^(?:ENOTFOUND|EAI_AGAIN|ERR_NAME_NOT_RESOLVED|ERR_NAME_RESOLUTION_FAILED|ERR_DNS_[A-Z0-9_]+)$/.test(code)) return 'dns';
+    if (/^(?:ETIMEDOUT|ESOCKETTIMEDOUT|ERR_TIMED_OUT|ERR_CONNECTION_TIMED_OUT)$/.test(code)) return 'timeout';
+    if (/^(?:ECONNREFUSED|ECONNRESET|ECONNABORTED|ENETUNREACH|EHOSTUNREACH|EPIPE|ERR_CONNECTION_(?:REFUSED|RESET|CLOSED|ABORTED|FAILED)|ERR_ADDRESS_UNREACHABLE|ERR_INTERNET_DISCONNECTED|ERR_NETWORK_CHANGED|ERR_PROXY_CONNECTION_FAILED)$/.test(code)) return 'connection';
+    if (/^(?:ERR_SSL_[A-Z0-9_]+|ERR_CERT_[A-Z0-9_]+|ERR_TLS_[A-Z0-9_]+|CERT_HAS_EXPIRED|DEPTH_ZERO_SELF_SIGNED_CERT|SELF_SIGNED_CERT_IN_CHAIN|UNABLE_TO_VERIFY_LEAF_SIGNATURE)$/.test(code)) return 'tls';
+    return null;
+  };
+  // A browser rejection must win over incidental timeout wording or names.
+  if (codes.some((code) => code.startsWith('ERR_') && !networkClass(code))) return null;
+  const timeout = error?.name === 'TimeoutError' || error?.cause?.name === 'TimeoutError'
+    || codes.some((code) => networkClass(code) === 'timeout')
+    || /(?:^|[:\s])Timeout \d+ms exceeded\b|\btimed out\b/i.test(message);
+  if (['browser_launch', 'context_launch', 'profile_launch'].includes(stage)) {
+    const launchClass = stage === 'context_launch' ? 'context_launch' : 'browser_launch';
+    const spawnFailure = codes.some((code) => ['ENOENT', 'EACCES'].includes(code))
+      && (/^spawn\b/i.test(error?.syscall || error?.cause?.syscall || '') || /\bspawn(?:Sync)?\b/i.test(message));
+    if (timeout || spawnFailure
+        || /\bbrowserType\.launch(?:PersistentContext)?:|\bfailed to launch\b|\bbrowser(?: process)? launch (?:failed|failure)\b|\bTarget page, context or browser has been closed\b/i.test(message)) return launchClass;
+    return null;
+  }
+  for (const code of codes) {
+    const errorClass = networkClass(code);
+    if (errorClass) return errorClass;
+  }
+  if (timeout) return 'timeout';
+  if (/\bconnection (?:refused|reset(?: by peer)?)\b/i.test(message)) return 'connection';
+  if (/\b(?:TLS|SSL) (?:(?:handshake|certificate) )?(?:failed|failure|error)\b/i.test(message)) return 'tls';
   return null;
 }
 
-function observeCandidatePageLoad(page, attempt) {
+async function observeCandidatePageLoad(page, attempt, { inspectDocument = false, context = page.context?.() } = {}) {
   const markLoaded = () => {
     try {
-      if (/^https?:\/\//i.test(page.url())) attempt.pageLoaded = true;
+      if (page.url() !== 'about:blank') attempt.pageLoaded = true;
     } catch {
       // An unreadable page cannot prove that no candidate page has loaded.
       attempt.pageLoaded = true;
@@ -1898,15 +1920,27 @@ function observeCandidatePageLoad(page, attempt) {
   const onNavigation = (frame) => {
     if (frame === page.mainFrame()) markLoaded();
   };
+  const onDocumentLoaded = () => { attempt.pageLoaded = true; };
+  const onPage = () => { attempt.pageLoaded = true; };
   // Existing shared pages and committed main-frame navigations both rule out
   // a pre-open retry, even if a later DOM/liveness operation times out.
   markLoaded();
-  page.on?.('domcontentloaded', markLoaded);
+  page.on?.('domcontentloaded', onDocumentLoaded);
   page.on?.('framenavigated', onNavigation);
+  context?.on?.('page', onPage);
+  if (inspectDocument && !attempt.pageLoaded) {
+    try {
+      const empty = await page.evaluate(() => !(document.documentElement?.innerHTML.length || document.body?.innerText?.trim().length));
+      if (empty !== true) attempt.pageLoaded = true;
+    } catch {
+      attempt.pageLoaded = true;
+    }
+  }
   return () => {
     try {
-      page.off?.('domcontentloaded', markLoaded);
+      page.off?.('domcontentloaded', onDocumentLoaded);
       page.off?.('framenavigated', onNavigation);
+      context?.off?.('page', onPage);
     } catch {
       // Observation cleanup must not replace the execution error or lock release.
     }
@@ -1927,7 +1961,8 @@ export async function executeCandidate(options, { root = ROOT, dependencies = {}
   let stopObservingSharedPageLoad;
   try {
     if (dependencies.browserSession?.page) {
-      stopObservingSharedPageLoad = observeCandidatePageLoad(dependencies.browserSession.page, attempt);
+      stopObservingSharedPageLoad = await observeCandidatePageLoad(dependencies.browserSession.page, attempt,
+        { inspectDocument: true, context: dependencies.browserSession.context });
     }
     return await executeCandidateLocked(options, { root, executionLock, dependencies, attempt });
   } catch (error) {
@@ -1957,16 +1992,19 @@ export async function executeCandidate(options, { root = ROOT, dependencies = {}
           root,
         );
       } else if (options.resumePreparation && attempt.initialState === 'blocked'
+          && !attempt.resumeAuditAttempted
           && contract.candidateState.state === 'blocked'
           && contract.candidateState.history.length === attempt.initialHistoryLength) {
         // API/profile/launch failures can precede the resume's browser try/catch.
+        attempt.resumeAuditAttempted = true;
         transition(
           contract.manifestPath, contract.candidate.candidate_id, 'blocked', contract.candidate.listingUrl,
           `Preparation resume stopped safely: ${inline(error.message).slice(0, 350)}`,
           'blocked', executionLock.token, null, null, root,
         );
       }
-    } catch {
+    } catch (auditFailure) {
+      try { error.auditFailure ??= auditFailure; } catch { /* The original error may be immutable. */ }
       // Preserve the original failure. If authority or CAS validation failed,
       // no secondary state write is safe.
     }
@@ -1980,16 +2018,19 @@ export async function executeCandidate(options, { root = ROOT, dependencies = {}
 async function createOwnedBrowserSession(options, root, dependencies, contract, attempt = {}) {
   let session;
   if (dependencies.openBrowserProfile) {
+    attempt.stage = 'profile_launch';
     session = await dependencies.openBrowserProfile({
       root,
       headless: options.headless,
       contextOptions: LIVENESS_CONTEXT_OPTIONS,
     });
   } else if (options.ephemeralBrowser || dependencies.launchBrowser) {
+    attempt.stage = 'browser_dependency';
+    const chromium = dependencies.launchBrowser ? null : (await import('playwright')).chromium;
     attempt.stage = 'browser_launch';
     const browser = dependencies.launchBrowser
       ? await dependencies.launchBrowser(options)
-      : await (await import('playwright')).chromium.launch({ headless: options.headless });
+      : await chromium.launch({ headless: options.headless });
     attempt.stage = 'context_launch';
     const context = dependencies.createContext
       ? await dependencies.createContext(browser, contract)
@@ -2002,10 +2043,14 @@ async function createOwnedBrowserSession(options, root, dependencies, contract, 
       },
     };
   } else {
+    attempt.stage = 'browser_dependency';
+    const chromium = (await import('playwright')).chromium;
+    attempt.stage = 'profile_launch';
     session = await openPersistentBrowserProfile({
       root,
       headless: options.headless,
       contextOptions: LIVENESS_CONTEXT_OPTIONS,
+      chromium,
     });
   }
   attempt.stage = 'browser_setup';
@@ -2063,7 +2108,7 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
   attempt.initialHistoryLength = contract.candidateState.history.length;
 
   if (options.resumeLogin) return executePreparationResume(options, contract, { root, executionLock, dependencies });
-  if (options.resumePreparation) return executePreparationResume(options, contract, { root, executionLock, dependencies });
+  if (options.resumePreparation) return executePreparationResume(options, contract, { root, executionLock, dependencies, attempt });
 
   const listingUrl = contract.candidate.listingUrl;
   const recordTransition = (manifestPath, _legacySelector, ...args) => transition(
@@ -2098,7 +2143,7 @@ async function executeCandidateLocked(options, { root, executionLock, dependenci
 
   try {
     const listingPage = sharedSession?.page || await context.newPage();
-    stopObservingPageLoad = observeCandidatePageLoad(listingPage, attempt);
+    if (!sharedSession) stopObservingPageLoad = await observeCandidatePageLoad(listingPage, attempt, { context });
     if (dependencies.onCandidatePage) await dependencies.onCandidatePage(listingPage, contract);
     attempt.stage = 'liveness';
     const browserLiveness = await (dependencies.checkUrlLiveness || checkUrlLiveness)(listingPage, listingUrl);
@@ -2373,7 +2418,7 @@ async function prepareResumedForm(page, contract, root, executionLock, options =
   }
 }
 
-async function executePreparationResume(options, contract, { root, executionLock, dependencies }) {
+async function executePreparationResume(options, contract, { root, executionLock, dependencies, attempt = {} }) {
   const listingUrl = contract.candidate.listingUrl;
   const fromState = contract.candidateState.state;
   const api = await (dependencies.checkLivenessViaApi || checkLivenessViaApi)(listingUrl);
@@ -2549,14 +2594,19 @@ async function executePreparationResume(options, contract, { root, executionLock
         && (sharedSession.page.isClosed() || !browser.isConnected())) {
       return { ...candidateResult(contract, contract.candidateState), resumeSkipped: 'page_closed' };
     }
-    const current = loadExecutionContract(contract.manifestPath, contract.candidate.candidate_id, { root, requireCoverLetter: true }).candidateState.state;
-    if (['actual_form_reached', 'review_required', 'blocked'].includes(current)) {
-      const state = transition(
-        contract.manifestPath, contract.candidate.candidate_id, 'blocked', listingUrl,
-        `Preparation resume stopped safely: ${inline(error.message).slice(0, 350)}`,
-        current, executionLock.token, null, null, root,
-      );
-      return { batchId: contract.manifest.batchId, candidate: listingUrl, state: state.state };
+    attempt.resumeAuditAttempted = true;
+    try {
+      const current = loadExecutionContract(contract.manifestPath, contract.candidate.candidate_id, { root, requireCoverLetter: true }).candidateState.state;
+      if (['actual_form_reached', 'review_required', 'blocked'].includes(current)) {
+        const state = transition(
+          contract.manifestPath, contract.candidate.candidate_id, 'blocked', listingUrl,
+          `Preparation resume stopped safely: ${inline(error.message).slice(0, 350)}`,
+          current, executionLock.token, null, null, root,
+        );
+        return { batchId: contract.manifest.batchId, candidate: listingUrl, state: state.state };
+      }
+    } catch (auditFailure) {
+      try { error.auditFailure ??= auditFailure; } catch { /* The original error may be immutable. */ }
     }
     throw error;
   } finally {

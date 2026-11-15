@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
 import {
   acquireBatchExecutionLock,
   bindCandidateArtifact,
@@ -139,12 +142,13 @@ function fakeAttemptBrowser(fixture, snapshotOverrides = {}) {
     waitForLoadState: async () => {},
     waitForTimeout: async (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     evaluate: async (fn, args) => {
+      if (String(fn).includes('document.documentElement?.innerHTML.length')) return currentUrl === 'about:blank';
       if (args?.gateOnly || String(fn).includes('__careerOpsEntryControlCounter')) return snapshot;
       if (String(fn).includes('document.body?.innerText')) return snapshot.bodyText;
       return [];
     },
   });
-  const context = { newPage: async () => page };
+  const context = Object.assign(new EventEmitter(), { newPage: async () => page });
   const browser = { isConnected: () => connected, close: async () => { connected = false; } };
   return {
     browser, context, page,
@@ -255,6 +259,13 @@ test('pre-open transient classification is limited to transport, liveness, and l
     ['DNS code', { code: 'ENOTFOUND' }, 'liveness', 'dns'],
     ['DNS navigation', { message: 'page.goto: net::ERR_NAME_NOT_RESOLVED' }, 'navigation', 'dns'],
     ['connection refused', { code: 'ECONNREFUSED' }, 'liveness', 'connection'],
+    ...['ENETUNREACH', 'EHOSTUNREACH', 'EPIPE', 'ERR_ADDRESS_UNREACHABLE',
+      'ERR_INTERNET_DISCONNECTED', 'ERR_NETWORK_CHANGED', 'ERR_PROXY_CONNECTION_FAILED']
+      .map((code) => [code, { code }, 'liveness', 'connection']),
+    ['name resolution code', { code: 'ERR_NAME_RESOLUTION_FAILED' }, 'liveness', 'dns'],
+    ['name resolution navigation', { message: 'net::ERR_NAME_RESOLUTION_FAILED' }, 'navigation', 'dns'],
+    ...['ERR_ADDRESS_UNREACHABLE', 'ERR_INTERNET_DISCONNECTED', 'ERR_NETWORK_CHANGED', 'ERR_PROXY_CONNECTION_FAILED']
+      .map((code) => [`navigation ${code}`, { message: `page.goto: net::${code}` }, 'navigation', 'connection']),
     ['connection reset cause', { cause: { code: 'ECONNRESET' } }, 'liveness', 'connection'],
     ['browser connection reset', { message: 'net::ERR_CONNECTION_RESET' }, 'navigation', 'connection'],
     ['connection refused message', { message: 'Connection refused' }, 'navigation', 'connection'],
@@ -264,9 +275,36 @@ test('pre-open transient classification is limited to transport, liveness, and l
     ['SSL navigation', { message: 'net::ERR_SSL_PROTOCOL_ERROR' }, 'navigation', 'tls'],
     ['TLS handshake message', { message: 'TLS handshake failed' }, 'liveness', 'tls'],
     ['certificate navigation', { message: 'net::ERR_CERT_AUTHORITY_INVALID' }, 'navigation', 'tls'],
-    ['browser launch', { message: 'Fictional process failed to start' }, 'browser', 'browser_launch'],
-    ['context launch', { message: 'Fictional context failed to start' }, 'context', 'context_launch'],
+    ['browser launch', { message: 'browserType.launch: Failed to launch the browser process!' }, 'browser', 'browser_launch'],
+    ['context launch', { message: 'browser.newContext: Target page, context or browser has been closed' }, 'context', 'context_launch'],
     ['profile browser launch', { message: 'browserType.launchPersistentContext: Failed to launch the browser process!' }, 'profile', 'browser_launch'],
+    ['browser spawn missing executable', { message: 'spawn fictional-browser ENOENT', code: 'ENOENT' }, 'browser', 'browser_launch'],
+    ['browser spawn denied', { message: 'spawn fictional-browser EACCES', code: 'EACCES' }, 'browser', 'browser_launch'],
+    ['structured spawn failure', { code: 'ENOENT', syscall: 'spawn fictional-browser' }, 'browser', 'browser_launch'],
+    ['missing launch configuration file', { code: 'ENOENT', message: 'Missing fictional configuration file' }, 'browser', null],
+    ['unreadable launch configuration file', { code: 'EACCES', syscall: 'open', message: 'Cannot read fictional configuration file' }, 'browser', null],
+    ['launch timeout', { name: 'TimeoutError' }, 'browser', 'browser_launch'],
+    ['context timeout', { message: 'browser.newContext: Timeout 30000ms exceeded' }, 'context', 'context_launch'],
+    ['bare timeout word', { message: 'Unexpected timeout setting' }, 'navigation', null],
+    ['timeout in URL only', { message: 'page.goto: Navigation failed at https://jobs.example.test/timeout-engineer-101' }, 'navigation', null],
+    ['blocked timeout URL', { message: 'page.goto: net::ERR_BLOCKED_BY_ADMINISTRATOR at https://jobs.example.test/timeout-engineer-101' }, 'navigation', null],
+    ['blocked timeout name', { name: 'TimeoutError', message: 'page.goto: net::ERR_BLOCKED_BY_ADMINISTRATOR; timed out' }, 'navigation', null],
+    ['blocked with transient cause', { message: 'net::ERR_ACCESS_DENIED', cause: { code: 'ETIMEDOUT' } }, 'navigation', null],
+    ['blocked structured code', { name: 'TimeoutError', code: 'ERR_BLOCKED_BY_ADMINISTRATOR' }, 'navigation', null],
+    ['blocked structured net code', { name: 'TimeoutError', code: 'net::ERR_BLOCKED_BY_ADMINISTRATOR' }, 'navigation', null],
+    ['non-network code in URL', { message: 'net::ERR_CONNECTION_RESET at https://jobs.example.test/net::ERR_BLOCKED_BY_ADMINISTRATOR' }, 'navigation', 'connection'],
+    ['anchored timeout', { message: 'page.goto: Timeout 30000ms exceeded at https://jobs.example.test/engineer-101' }, 'navigation', 'timeout'],
+    ...['browser', 'context', 'profile'].flatMap((stage) => [
+      [`${stage} missing dependency`, { code: 'ERR_MODULE_NOT_FOUND', message: "Cannot find package 'playwright'" }, stage, null],
+      [`${stage} import failure`, { message: 'Failed to import playwright' }, stage, null],
+      ...['TypeError', 'ReferenceError', 'SyntaxError'].map((name) => [
+        `${stage} ${name}`, { name, message: 'browserType.launch: Failed to launch due to fictional program bug' }, stage, null,
+      ]),
+      [`${stage} invalid options`, { message: 'browserType.launch: Invalid options' }, stage, null],
+      [`${stage} option type error`, { message: 'browserType.launch: headless: expected boolean, got string' }, stage, null],
+      [`${stage} invalid argument code`, { code: 'ERR_INVALID_ARG_TYPE', message: 'browserType.launch: Failed to launch' }, stage, null],
+      [`${stage} unexpected error`, { message: 'Fictional process failed to start' }, stage, null],
+    ]),
     ['unexpected error', { message: 'Unexpected fictional error' }, 'liveness', null],
     ['identity mismatch', { message: 'Candidate identity mismatch' }, 'liveness', null],
     ['unknown transport error', { message: 'Fictional transport failure' }, 'liveness', null],
@@ -363,6 +401,113 @@ test('a transient failure after a candidate page loads cannot record a pre-open 
         assert.equal(candidate.state, 'blocked');
         assert.equal(candidate.history.some((entry) => entry.from === 'not_opened' && entry.to === 'not_opened'), false);
       } finally {
+        rmSync(fixture.root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test('shared blank documents and candidate popups bound pre-open retries', async (t) => {
+  const cases = [
+    ['empty shared document', 'about:blank', '', '', 'api', false],
+    ['shared HTML without navigation', 'about:blank', '<main>Fictional form</main>', '', 'api', true],
+    ['shared body text', 'about:blank', '', 'Fictional form', 'api', true],
+    ['unreadable shared document', 'about:blank', '', '', 'evaluate_error', true],
+    ['shared data URL', 'data:text/html,Fictional', '', '', 'api', true],
+    ['shared file URL', 'file:///fictional-form.html', '', '', 'api', true],
+    ['shared blank fragment', 'about:blank#fictional', '', '', 'api', true],
+    ['unreadable shared URL', null, '', '', 'api', true],
+    ['empty shared URL', '', '', '', 'api', true],
+    ['popup during shared API request', 'about:blank', '', '', 'api_popup', true],
+    ['popup during shared document check', 'about:blank', '', '', 'evaluate_popup', true],
+    ['popup during owned navigation', 'about:blank', '', '', 'owned_popup', true],
+  ];
+  for (const [name, url, html, text, kind, loaded] of cases) {
+    await t.test(name, async () => {
+      const fixture = makeAttemptFixture();
+      try {
+        const fake = fakeAttemptBrowser(fixture);
+        const failure = Object.assign(new Error('Fictional request timed out'), { name: 'TimeoutError' });
+        fake.page.url = () => {
+          if (url === null) throw new Error('Fictional URL access failed');
+          return url;
+        };
+        fake.page.evaluate = async (fn) => {
+          if (kind === 'evaluate_error') throw new Error('Fictional document access failed');
+          if (kind === 'evaluate_popup') fake.context.emit('page', {});
+          return runInNewContext(`(${fn})()`, {
+            document: { documentElement: { innerHTML: html }, body: { innerText: text } },
+          });
+        };
+        if (kind === 'owned_popup') {
+          fake.dependencies.checkUrlLiveness = async () => {
+            fake.context.emit('page', {});
+            throw failure;
+          };
+        } else {
+          fake.dependencies.browserSession = { browser: fake.browser, context: fake.context, page: fake.page };
+          fake.dependencies.checkLivenessViaApi = async () => {
+            if (kind === 'api_popup') fake.context.emit('page', {});
+            throw failure;
+          };
+        }
+        await assert.rejects(executeCandidate(fixture.options, {
+          root: fixture.root, dependencies: fake.dependencies,
+        }), (error) => error === failure);
+        const candidate = loadBatchState(fixture.created.manifestPath, { root: fixture.root }).state.candidates[0];
+        assert.equal(candidate.state, loaded ? 'blocked' : 'not_opened');
+        assert.equal(candidate.history.length, 2);
+        assert.equal(fake.context.listenerCount('page'), 0);
+        assert.equal(fake.page.listenerCount('domcontentloaded'), 0);
+        assert.equal(fake.page.listenerCount('framenavigated'), 0);
+      } finally {
+        rmSync(fixture.root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test('blocked resume audit failures preserve the original error and are attempted once', async (t) => {
+  for (const kind of ['API_failure', 'launch_failure', 'navigation_failure', 'shared_navigation_failure']) {
+    await t.test(kind, async () => {
+      const fixture = makeAttemptFixture();
+      const rename = fs.renameSync;
+      try {
+        blockAttemptFixture(fixture);
+        const before = loadBatchState(fixture.created.manifestPath, { root: fixture.root }).state;
+        const fake = fakeAttemptBrowser(fixture);
+        const failure = new Error('Original fictional resume failure');
+        const auditFailure = new Error('Fictional audit persistence failure');
+        let auditWrites = 0;
+        const fail = async () => {
+          fs.renameSync = (source, destination) => {
+            if (destination === fixture.created.statePath) {
+              auditWrites += 1;
+              throw auditFailure;
+            }
+            return rename(source, destination);
+          };
+          syncBuiltinESMExports();
+          throw failure;
+        };
+        if (kind === 'API_failure') fake.dependencies.checkLivenessViaApi = fail;
+        else if (kind === 'launch_failure') fake.dependencies.launchBrowser = fail;
+        else fake.dependencies.checkUrlLiveness = fail;
+        if (kind === 'shared_navigation_failure') {
+          fake.dependencies.browserSession = { browser: fake.browser, context: fake.context, page: fake.page };
+        }
+        await assert.rejects(executeCandidate({ ...fixture.options, resumePreparation: true }, {
+          root: fixture.root, dependencies: fake.dependencies,
+        }), (error) => {
+          assert.equal(error, failure);
+          assert.equal(error.auditFailure, auditFailure);
+          return true;
+        });
+        assert.equal(auditWrites, 1);
+        assert.deepEqual(loadBatchState(fixture.created.manifestPath, { root: fixture.root }).state, before);
+      } finally {
+        fs.renameSync = rename;
+        syncBuiltinESMExports();
         rmSync(fixture.root, { recursive: true, force: true });
       }
     });
