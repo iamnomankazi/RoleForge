@@ -11,6 +11,7 @@ import { fileURLToPath } from 'url';
 import yaml from 'js-yaml';
 import { discoverPlugins, pluginRoots, pluginStatus } from './plugins/_engine.mjs';
 import { resolveExtractorMode } from './browser-extract.mjs';
+import { checkGraduationConsistency } from './profile-fact-check.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -316,6 +317,31 @@ function checkPlugins(root) {
   return fixes.length ? { warn: true, label, fix: fixes } : { pass: true, label };
 }
 
+function graduationConsistencyWarnings(root) {
+  const profilePath = join(root, 'config', 'profile.yml');
+  if (!existsSync(profilePath)) return [];
+  let profile;
+  try { profile = yaml.load(readFileSync(profilePath, 'utf8').replace(/^\uFEFF/, '')) || {}; }
+  catch { return []; }
+  const files = [];
+  for (const path of ['cv.md', 'modes/_profile.md']) {
+    const filePath = join(root, ...path.split('/'));
+    if (!existsSync(filePath)) continue;
+    try { files.push({ path, text: readFileSync(filePath, 'utf8') }); } catch { /* missing or unreadable user files are skipped */ }
+  }
+  const { profileDate, mismatches } = checkGraduationConsistency({ profile, files });
+  if (!profileDate) return [];
+  const profileValue = profile?.graduation_date
+    ?? profile?.education_details?.expected_graduation_date
+    ?? profile?.expected_graduation_date;
+  const displayedProfileDate = profileValue instanceof Date
+    ? profileValue.toISOString().slice(0, 10)
+    : String(profileValue ?? `${String(profileDate.month).padStart(2, '0')}/${profileDate.year}`).trim();
+  return mismatches.map(({ path, line, raw }) => (
+    `Graduation date in ${path} line ${line} (${raw}) differs from config/profile.yml (${displayedProfileDate})`
+  ));
+}
+
 async function main() {
   console.log('\ncareer-ops doctor');
   console.log('================\n');
@@ -333,6 +359,7 @@ async function main() {
     checkAutoDir('output'),
     checkAutoDir('reports'),
     checkPlugins(projectRoot),
+    ...graduationConsistencyWarnings(projectRoot).map((label) => ({ warn: true, label })),
   ];
 
   // Network-bound ATS slug probe — only under --strict.
@@ -380,6 +407,9 @@ async function main() {
 // a deterministic mechanism the agent runs (instead of re-deriving it from prose),
 // and `--target <dir>` lets the test suite point it at a simulated virgin env.
 function onboardingState(root) {
+  // Capture the user's existing files before onboarding may copy a template into
+  // modes/_profile.md; absent files are intentionally skipped by this check.
+  const factWarnings = graduationConsistencyWarnings(root);
   const autoCopied = [];
   const templates = [
     { target: 'modes/_profile.md', template: 'modes/_profile.template.md' },
@@ -403,7 +433,7 @@ function onboardingState(root) {
     .map(({ path }) => path);
   const extractorCheck = checkScanExtractor(root);
   const mcpCheck = checkPlaywrightMcp(root);
-  const warnings = [extractorCheck, mcpCheck].filter((check) => check.warn).map((check) => check.label);
+  const warnings = [...[extractorCheck, mcpCheck].filter((check) => check.warn).map((check) => check.label), ...factWarnings];
   let plugins = [];
   try {
     const cfg = readPluginConfigSync(root);
