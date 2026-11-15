@@ -10,8 +10,9 @@ import {
   loadRunCandidates, loadTrackerRows, roleDuplicateKey, rowIdentity,
 } from './tracker-identity.mjs';
 import { resolveTrackerPath } from './tracker-utils.mjs';
+import { detectColumns } from './tracker-parse.mjs';
 import { canonicalListingUrl, isCandidateId } from './candidate-identity.mjs';
-import { loadPrescreenProfile, prescreenJob } from './prescreen.mjs';
+import { prescreenJob } from './prescreen.mjs';
 import { normalizeExperiencePolicy } from './experience-policy.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -415,7 +416,7 @@ function assertOutputSafe(outPath, runDirs, livenessDirs, root) {
   const protectedDirs = [
     ...runDirs.map((dir) => [canonicalPath(dir), `an input run directory`]),
     ...livenessDirs.map((dir) => [canonicalPath(dir), `an input liveness directory`]),
-    ...['output/scan-runs', 'reports', 'data', 'output/application-batches', 'config']
+    ...['output/scan-runs', 'reports', 'data', 'output/application-batches', 'output/identity-corrections', 'config']
       .map((part) => [canonicalPath(join(resolve(root), part)), part]),
   ];
   for (const [directory, label] of protectedDirs) {
@@ -445,6 +446,49 @@ const BENIGN_REPORT_WARNINGS = [
 const BENIGN_MAPPING_WARNINGS = [
   /^Ignoring enrichment\.json in .+: manifest metadata\.tool is not enrich-run$/,
 ];
+
+function assertProfileShape(profile) {
+  const mapping = (value) => value !== null && typeof value === 'object'
+    && Object.getPrototypeOf(value) === Object.prototype;
+  if (!mapping(profile) || Object.keys(profile).length === 0) {
+    throw new Error('Expected a non-empty plain profile mapping');
+  }
+  const field = (path, valid, expected) => {
+    const parts = path.split('.');
+    let value = profile;
+    for (const [index, part] of parts.entries()) {
+      if (!Object.hasOwn(value, part)) return;
+      value = value[part];
+      if (index < parts.length - 1 && !mapping(value)) {
+        throw new Error(`Profile ${parts.slice(0, index + 1).join('.')} must be a mapping`);
+      }
+    }
+    if (!valid(value)) throw new Error(`Profile ${path} must be ${expected}`);
+  };
+  const text = (value) => typeof value === 'string';
+  const texts = (value) => Array.isArray(value) && value.every(text);
+  const answer = (value) => typeof value === 'boolean' || text(value);
+  const languages = (value) => mapping(value) && Object.values(value).every((level) => text(level)
+    || mapping(level) && ['cefr', 'level'].every((key) => !Object.hasOwn(level, key) || text(level[key])));
+  for (const path of ['graduation_date', 'expected_graduation_date', 'education_details.expected_graduation_date']) {
+    field(path, text, 'a date string');
+  }
+  for (const path of ['languages', 'language.additional_proficiencies']) {
+    field(path, languages, 'a mapping of language names to strings or level mappings');
+  }
+  for (const path of ['authorized_countries', 'citizenship_countries']) field(path, texts, 'an array of strings');
+  for (const path of ['home_country', 'residence_country', 'location.country', 'candidate.citizenship']) {
+    field(path, text, 'a string');
+  }
+  for (const path of ['outside_home_authorized', 'sponsorship_outside_home']) field(path, answer, 'a boolean or string');
+  for (const path of ['work_authorization', 'application_form.work_authorization', 'application_answers.work_authorization']) {
+    field(path, mapping, 'a mapping');
+    field(`${path}.home_country`, text, 'a string');
+    for (const key of ['finland_authorized', 'outside_finland_local_authorized', 'outside_finland_sponsorship']) {
+      field(`${path}.${key}`, answer, 'a boolean or string');
+    }
+  }
+}
 
 function loadExperiencePolicy(root) {
   const configuredPath = process.env.CAREER_OPS_PORTALS
@@ -573,6 +617,12 @@ export function buildEvalQueue({ runDirs = [], livenessDirs = [], root = SCRIPT_
   if (trackerExists) {
     tracker = loadTrackerRows(trackerPath);
     assertNoUnexpectedWarnings('Could not safely load tracker identity evidence', tracker.warnings);
+    if (tracker.rows.length === 0) {
+      const content = readFileSync(trackerPath, 'utf8');
+      if (content.trim() && !detectColumns(content.split(/\r?\n/))) {
+        throw new Error(`Could not safely load tracker identity evidence: no recognizable tracker table in ${trackerPath}`);
+      }
+    }
     warnings.push(...tracker.warnings);
   }
   const reportIndex = reportsExist ? loadReportIndex(reportsDir) : new Map();
@@ -598,7 +648,9 @@ export function buildEvalQueue({ runDirs = [], livenessDirs = [], root = SCRIPT_
   try {
     const profileBytes = readFileSync(chosenProfilePath);
     profileHash = sha256(profileBytes);
-    profile = loadPrescreenProfile(chosenProfilePath);
+    profile = yaml.load(profileBytes.toString('utf8').replace(/^\uFEFF/, ''));
+    assertProfileShape(profile);
+    // prescreenJob normalizes this same parsed object with prescreen.mjs's normalizer.
   } catch (error) {
     throw new Error(`Could not load required prescreen profile ${chosenProfilePath}: ${error.message}`);
   }

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -126,6 +126,31 @@ test('identity, report, and tracker source warnings that could hide evidence fai
   assert.throws(() => queue(trackerFixture, [trackerRun]), /Could not safely load tracker identity evidence:[\s\S]*Could not read tracker/);
 });
 
+test('non-empty trackers without parsed rows or a recognizable header fail closed', (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const run = putRun(f, 'tracker-structure', [candidate(cid('5'))]);
+  for (const content of ['# Applications\nTracker content was lost.\n',
+    '| Item | Value |\n|---|---|\n| Example | Text |\n',
+    '| # | Date | Company | Role |\n|---|---|---|---|\n']) {
+    put(join(f.root, 'applications.md'), content);
+    assert.throws(() => queue(f, [run]), /Could not safely load tracker identity evidence: no recognizable tracker table/);
+  }
+});
+
+test('empty trackers and valid tracker tables with zero data rows are allowed', (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const id = cid('6'); const run = putRun(f, 'empty-tracker', [candidate(id)]);
+  for (const content of ['', ' \n',
+    '| # | Date | Company | Role | Score | Status | PDF | Report | Notes |\n|---|---|---|---|---|---|---|---|---|\n',
+    '| num | Empresa | Puesto | Status | Score |\n|---|---|---|---|---|\n']) {
+    put(join(f.root, 'applications.md'), content);
+    assert.deepEqual(queue(f, [run]).include.map((entry) => entry.candidate_id), [id]);
+  }
+  // Existing legacy rows remain recognizable even without a header.
+  put(join(f.root, 'applications.md'), trackerRow(id));
+  assert.equal(queue(f, [run]).exclude[0].reason, 'already_tracked');
+});
+
 test('weak URL and company-role matches remain included with possible duplicate evidence; ambiguous IDs do not exclude', (t) => {
   const f = fixture(); t.after(f.cleanup);
   const trackedId = cid('f'); const urlId = cid('0'); const textId = cid('1'); const ambiguousId = cid('2');
@@ -248,6 +273,63 @@ test('missing, malformed, and explicit missing profiles are errors', (t) => {
   assert.throws(() => queue(f, [run], { profilePath: explicitProfile }), /Could not load required prescreen profile/);
   put(explicitProfile, 'languages: [\n');
   assert.throws(() => queue(f, [run], { profilePath: explicitProfile }), /Could not load required prescreen profile/);
+});
+
+test('invalid profile shapes cannot bypass a graduation blocker', (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const run = putRun(f, 'profile-shape', [candidate(cid('c'), {
+    description: `Applicants must graduate between June 2025 and June 2026. ${description}`,
+  })]);
+  const profilePath = join(f.root, 'config', 'profile.yml');
+  put(profilePath, "graduation_date: '2026-12-31'\n");
+  const result = queue(f, [run]);
+  assert.equal(result.exclude[0].reason, 'prescreen_blocked');
+  assert.equal(result.exclude[0].detail.blockers[0].code, 'graduation_window');
+  for (const content of ['[]', 'true', '42', '', 'null', '{}', 'profile text', '2026-12-31']) {
+    put(profilePath, content);
+    assert.throws(() => queue(f, [run]), /Could not load required prescreen profile.*non-empty plain profile mapping/);
+  }
+});
+
+test('wrong types in prescreen profile fields fail before normalization', (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const run = putRun(f, 'profile-field-types', [candidate(cid('d'))]);
+  const invalidProfiles = [
+    { graduation_date: [] }, { expected_graduation_date: 2026 },
+    { education_details: { expected_graduation_date: true } }, { education_details: [] },
+    { languages: 'German C1' }, { languages: [] }, { languages: { german: false } },
+    { languages: { german: { cefr: [] } } }, { languages: { german: { level: 42 } } },
+    { language: { additional_proficiencies: [] } }, { language: 'German' },
+    { work_authorization: [] }, { work_authorization: { finland_authorized: [] } },
+    { application_form: { work_authorization: true } },
+    { application_answers: { work_authorization: { outside_finland_local_authorized: {} } } },
+    { application_form: [] }, { outside_home_authorized: [] }, { sponsorship_outside_home: {} },
+    { authorized_countries: 'Finland' }, { authorized_countries: [true] },
+    { citizenship_countries: {} }, { home_country: [] }, { residence_country: false },
+    { location: { country: [] } }, { candidate: { citizenship: true } }, { languages: null },
+  ];
+  for (const profile of invalidProfiles) {
+    putJson(join(f.root, 'config', 'profile.yml'), profile);
+    assert.throws(() => queue(f, [run]), /Could not load required prescreen profile.*Profile .* must be/,
+      JSON.stringify(profile));
+  }
+});
+
+test('validated raw YAML retains nested profile normalization and the original byte hash', (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const id = cid('e');
+  const run = putRun(f, 'nested-profile', [candidate(id, {
+    description: `German C1 is required. Applicants must graduate between June 2025 and June 2026. ${description}`,
+  })]);
+  const profile = '\uFEFFeducation_details:\n  expected_graduation_date: "30/06/2026"\n'
+    + 'language:\n  additional_proficiencies:\n    german:\n      cefr: C1\n'
+    + 'application_form:\n  work_authorization:\n    home_country: Finland\n    finland_authorized: "Yes"\n';
+  put(join(f.root, 'config', 'profile.yml'), profile);
+  const result = queue(f, [run]);
+  assert.deepEqual(result.include.map((entry) => entry.candidate_id), [id]);
+  assert.equal(result.inputs.profile_sha256, hash(profile));
+  assert.equal(result.include[0].prescreen.graduation_window.eligible, true);
+  assert.equal(result.include[0].prescreen.work_authorization.status, 'authorized');
 });
 
 test('fresh liveness requires exact ID and a timestamp strictly newer than the run', (t) => {
@@ -412,6 +494,7 @@ test('--out refuses existing targets and every protected input or project eviden
     ['reports', join(f.root, 'reports')],
     ['data', join(f.root, 'data')],
     ['application-batches', join(f.root, 'output', 'application-batches')],
+    ['identity-corrections', join(f.root, 'output', 'identity-corrections')],
     ['config', join(f.root, 'config')],
   ];
   for (const [label, directory] of protectedDirs) mkdirSync(directory, { recursive: true });
@@ -430,6 +513,19 @@ test('--out refuses existing targets and every protected input or project eviden
   assert.equal(existingResult.status, 2);
   assert.match(existingResult.stderr, /destination already exists/);
   assert.equal(readFileSync(existing, 'utf8'), 'keep this file');
+});
+
+test('--out protects identity corrections through canonical directory aliases', (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const run = putRun(f, 'correction-output-alias', [candidate(cid('f'))]);
+  const corrections = join(f.root, 'output', 'identity-corrections');
+  const alias = join(f.root, 'corrections-alias');
+  symlinkSync(corrections, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const out = join(alias, 'nested', 'queue.json');
+  const result = spawnSync(process.execPath, [SCRIPT, '--root', f.root, '--run', run, '--out', out], { encoding: 'utf8' });
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, /Refusing --out inside output\/identity-corrections/);
+  assert.equal(existsSync(join(corrections, 'nested')), false);
 });
 
 test('--out relative paths resolve from the current working directory', (t) => {
