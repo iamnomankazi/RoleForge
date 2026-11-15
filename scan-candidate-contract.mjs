@@ -565,6 +565,19 @@ export function buildImmutableScanRun({
 }
 
 export function writeImmutableScanRun({ root = process.cwd(), outRoot = 'output/scan-runs', ...options }) {
+  const extraFiles = options.extraFiles;
+  if (extraFiles != null && (typeof extraFiles !== 'object' || Array.isArray(extraFiles))) {
+    throw new TypeError('extraFiles must be an object of filename to string content');
+  }
+  const extraNames = extraFiles == null ? [] : Object.keys(extraFiles);
+  const reservedNames = new Set([
+    'candidates.json', 'candidates.tsv', 'review.csv', 'review.md', 'manifest.json',
+  ]);
+  for (const name of extraNames) {
+    if (!/^[a-z0-9][a-z0-9.-]*\.json$/.test(name) || reservedNames.has(name)) {
+      throw new Error(`Invalid extra scan run filename: ${name}`);
+    }
+  }
   const built = buildImmutableScanRun({ root, ...options });
   const parent = resolve(root, outRoot);
   mkdirSync(parent, { recursive: true });
@@ -578,6 +591,11 @@ export function writeImmutableScanRun({ root = process.cwd(), outRoot = 'output/
     writeFileSync(join(staging, 'review.csv'), buildReviewCsv(built.candidates), { flag: 'wx' });
     writeFileSync(join(staging, 'review.md'), buildReviewMarkdown(built.candidates, built.manifest), { flag: 'wx' });
     writeFileSync(join(staging, 'manifest.json'), `${JSON.stringify(built.manifest, null, 2)}\n`, { flag: 'wx' });
+    for (const name of extraNames) {
+      const content = extraFiles[name];
+      if (typeof content !== 'string') throw new TypeError(`Extra scan run file ${name} must have string content`);
+      writeFileSync(join(staging, name), content, { flag: 'wx' });
+    }
     renameSync(staging, runDir);
   } catch (error) {
     rmSync(staging, { recursive: true, force: true });
