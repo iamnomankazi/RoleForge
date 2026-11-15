@@ -550,14 +550,14 @@ function loadApplicationBatches(root) {
 
 function applicationBatchMatch(candidateId, batches, strongIds) {
   const ids = new Set([candidateId, ...strongIds(candidateId)]);
-  const matches = new Map();
-  for (const id of ids) {
-    for (const batch of batches.get(id) ?? []) matches.set(batch.batch_id, batch);
-  }
-  if (!matches.size) return null;
-  const entries = [...matches.values()].sort((a, b) => a.batch_id.localeCompare(b.batch_id));
+  // Every matched manifest row counts: one batch can list the ID twice or list strongly equivalent IDs,
+  // and an abandoned row must never hide an active row of the same batch.
+  const entries = [];
+  for (const id of ids) entries.push(...(batches.get(id) ?? []));
+  if (!entries.length) return null;
+  entries.sort((a, b) => a.batch_id.localeCompare(b.batch_id) || String(a.state).localeCompare(String(b.state)));
   return { active: entries.some((entry) => !entry.abandoned),
-    batch_ids: entries.map((entry) => entry.batch_id),
+    batch_ids: [...new Set(entries.map((entry) => entry.batch_id))],
     candidate_states: entries.map(({ batch_id, state }) => ({ batch_id, state })) };
 }
 

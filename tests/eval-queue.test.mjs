@@ -623,3 +623,25 @@ test('abandoned-only application batches do not exclude; active, missing, malfor
       [{ reason: 'abandoned_application_batch', batch_ids: [batchId] }]);
   }
 });
+
+test('an abandoned row never hides an active row of the same batch (repeated or strongly equivalent IDs, both orders)', (t) => {
+  for (const order of [['form_prepared', 'abandoned'], ['abandoned', 'form_prepared']]) {
+    const repeated = fixture(); t.after(repeated.cleanup);
+    const id = cid('4');
+    putBatch(repeated, 'repeat-batch', [id, id], { states: order });
+    const repeatedResult = queue(repeated, [putRun(repeated, 'repeat-run', [candidate(id)])]);
+    assert.equal(repeatedResult.exclude[0]?.reason, 'in_application_batch', order.join('>'));
+    assert.deepEqual(repeatedResult.exclude[0].detail.batch_ids, ['repeat-batch']);
+    assert.equal(repeatedResult.exclude[0].detail.candidate_states.length, 2);
+
+    const equivalent = fixture(); t.after(equivalent.cleanup);
+    const current = cid('5'); const source = cid('6');
+    putBatch(equivalent, 'equivalent-batch', [current, source], { states: order });
+    const enrichment = JSON.stringify([{ source_candidate_id: source, candidate_id: current }]);
+    const run = putRun(equivalent, 'equivalent-run', [candidate(current)], { enriched: true, enrichment });
+    const equivalentResult = queue(equivalent, [run]);
+    assert.equal(equivalentResult.exclude[0]?.reason, 'in_application_batch', order.join('>'));
+    assert.deepEqual(equivalentResult.exclude[0].detail.batch_ids, ['equivalent-batch']);
+    assert.equal(equivalentResult.exclude[0].detail.candidate_states.length, 2);
+  }
+});
