@@ -62,7 +62,7 @@ export const EXECUTION_STATES = Object.freeze([
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/;
 const TRANSITIONS = Object.freeze({
-  not_opened: new Set(['listing_verified', 'login_required', 'blocked', 'closed', 'abandoned']),
+  not_opened: new Set(['not_opened', 'listing_verified', 'login_required', 'blocked', 'closed', 'abandoned']),
   listing_verified: new Set(['actual_form_reached', 'review_required', 'login_required', 'human_action_required', 'blocked', 'closed', 'abandoned']),
   actual_form_reached: new Set(['form_inspected', 'form_prepared', 'review_required', 'login_required', 'human_action_required', 'blocked', 'closed', 'abandoned']),
   form_inspected: new Set(['fields_filled', 'review_required', 'login_required', 'blocked', 'closed', 'abandoned']),
@@ -72,7 +72,7 @@ const TRANSITIONS = Object.freeze({
   login_required: new Set(['listing_verified', 'actual_form_reached', 'review_required', 'human_action_required', 'blocked', 'closed', 'abandoned']),
   human_action_required: new Set(['actual_form_reached', 'login_required', 'blocked', 'review_required', 'abandoned']),
   form_prepared: new Set(['closed', 'abandoned']),
-  blocked: new Set(['actual_form_reached', 'review_required', 'login_required', 'human_action_required', 'closed', 'abandoned']),
+  blocked: new Set(['blocked', 'actual_form_reached', 'review_required', 'login_required', 'human_action_required', 'closed', 'abandoned']),
   closed: new Set(),
   abandoned: new Set(),
 });

@@ -472,6 +472,65 @@ test('state schema carries IDs and rejects invalid transitions and Applied statu
   assert.equal(state.candidates[0].history.at(-1).to, 'listing_verified');
 }));
 
+test('retry self-transitions enforce lock ownership and CAS and validate on reload', () => {
+  const root = mkdtempSync(join(tmpdir(), 'application-retry-state-'));
+  try {
+    const candidate = row('Example Oy', 'Backend Engineer', 'https://jobs.example.test/backend-101');
+    writeRun(root, RUN_ID, [candidate]);
+    const cv = join(root, 'output', 'Jane Example CV.pdf');
+    writeFileSync(cv, 'Fictional CV');
+    const created = createApplicationBatch({
+      root, sourceRunId: RUN_ID, batchId: 'retry-self-transitions', selectedCandidateIds: [candidate.candidate_id],
+    });
+    bindCandidateArtifact(created.manifestPath, candidate.candidate_id, { root, artifactType: 'cv', filePath: cv });
+    confirmPreflight(created.manifestPath, created.manifest.batchId, { root });
+    const before = loadBatchState(created.manifestPath, { root }).state;
+    const details = { attempt: 'pre_open', errorClass: 'timeout' };
+    const options = {
+      root, currentUrl: candidate.url, reason: 'Transient failure before opening: Fictional navigation timeout',
+      expectedFrom: 'not_opened', details,
+    };
+    assert.throws(() => transitionCandidateState(created.manifestPath, candidate.candidate_id, 'not_opened', options),
+      /only be recorded by the locked canonical browser executor/);
+    const lock = acquireBatchExecutionLock(created.manifestPath, { root, candidateId: candidate.candidate_id });
+    try {
+      assert.throws(() => transitionCandidateState(created.manifestPath, candidate.candidate_id, 'not_opened', {
+        ...options, expectedFrom: 'blocked', lockToken: lock.token,
+      }), /State changed concurrently: expected blocked, found not_opened/);
+      assert.throws(() => transitionCandidateState(created.manifestPath, candidate.candidate_id, 'not_opened', {
+        ...options, lockToken: 'wrong-lock-token',
+      }), /lock/i);
+      assert.deepEqual(loadBatchState(created.manifestPath, { root }).state, before);
+      transitionCandidateState(created.manifestPath, candidate.candidate_id, 'not_opened', {
+        ...options, lockToken: lock.token,
+      });
+      transitionCandidateState(created.manifestPath, candidate.candidate_id, 'blocked', {
+        root, currentUrl: candidate.url, reason: 'Fictional identity mismatch',
+        expectedFrom: 'not_opened', lockToken: lock.token,
+      });
+      transitionCandidateState(created.manifestPath, candidate.candidate_id, 'blocked', {
+        root, currentUrl: candidate.url, reason: 'Fictional resume identity mismatch',
+        expectedFrom: 'blocked', lockToken: lock.token,
+      });
+    } finally {
+      lock.release();
+    }
+    const after = loadBatchState(created.manifestPath, { root }).state;
+    assert.equal(after.schemaVersion, before.schemaVersion);
+    assert.equal(after.revision, before.revision + 3);
+    const stored = after.candidates[0];
+    assert.deepEqual(stored.history.map(({ from, to }) => [from, to]), [
+      [null, 'not_opened'], ['not_opened', 'not_opened'], ['not_opened', 'blocked'], ['blocked', 'blocked'],
+    ]);
+    assert.deepEqual(stored.history[1].details, details);
+    assert.equal(stored.updatedAt, stored.history.at(-1).timestamp);
+    assert.equal(after.updatedAt, stored.updatedAt);
+    assert.equal(loadExecutionContract(created.manifestPath, candidate.candidate_id, { root }).candidateState.state, 'blocked');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('positively identified entry interaction failures may route to review_required', () => withFixture((fixture) => {
   const fromListing = createOne(fixture, 'entry-review-from-listing');
   const listingCandidate = bindCvAndConfirm(fixture, fromListing);

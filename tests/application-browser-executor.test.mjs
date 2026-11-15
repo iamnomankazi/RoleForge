@@ -1,15 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { EventEmitter } from 'node:events';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  acquireBatchExecutionLock,
   bindCandidateArtifact,
   confirmPreflight,
   createApplicationBatch,
   loadBatchState,
   loadExecutionContract,
+  loadPreparationContract,
+  transitionCandidateState,
 } from '../application-batch.mjs';
 import { deriveCandidateId } from '../candidate-identity.mjs';
 import {
@@ -44,13 +48,14 @@ test('job-identifying query parameters compare before URL sanitization', () => {
   assert.equal(requisitionIdentity('https://fixture.test/apply?lever-origin=111'), '');
 });
 
-function makeFixture() {
+function makeFixture(candidateOverrides = {}) {
   const root = mkdtempSync(join(tmpdir(), 'career-ops-application-executor-'));
   const runDir = join(root, 'output', 'scan-runs', RUN_ID);
   mkdirSync(runDir, { recursive: true });
   const candidate = {
     company: 'Wolt', title: 'Backend Engineer', url: SELECTED, source: 'Greenhouse',
     recommendedCvVariant: 'software_backend', run_id: RUN_ID,
+    ...candidateOverrides,
   };
   candidate.candidate_id = deriveCandidateId(candidate);
   writeFileSync(join(runDir, 'manifest.json'), `${JSON.stringify({ runId: RUN_ID, run_id: RUN_ID, candidates: 1 }, null, 2)}\n`);
@@ -86,6 +91,321 @@ function createConfirmed(fixture, batchId = 'confirmed-batch', options = {}) {
   confirmPreflight(created.manifestPath, batchId, { root: fixture.root });
   return created;
 }
+
+function makeAttemptFixture() {
+  const fixture = makeFixture({
+    company: 'Example Oy', url: 'https://jobs.example.test/backend-101', source: 'fixture-provider',
+  });
+  const created = createConfirmed(fixture, 'execution-attempts');
+  for (const [artifactType, filename] of [
+    ['cover_letter', 'Jane Example Cover Letter.pdf'],
+    ['cover_letter_text', 'Jane Example Cover Letter.txt'],
+  ]) {
+    const filePath = join(fixture.root, 'output', 'documents', filename);
+    writeFileSync(filePath, 'Fictional application document');
+    bindCandidateArtifact(created.manifestPath, fixture.candidate.candidate_id, {
+      root: fixture.root, artifactType, filePath,
+    });
+  }
+  confirmPreflight(created.manifestPath, created.manifest.batchId, { root: fixture.root });
+  const options = {
+    manifest: created.manifestPath, candidateId: fixture.candidate.candidate_id,
+    headless: true, keepOpen: false, prepareForm: false,
+  };
+  return { ...fixture, created, options };
+}
+
+function fakeAttemptBrowser(fixture, snapshotOverrides = {}) {
+  let currentUrl = 'about:blank';
+  let connected = true;
+  const snapshot = {
+    documentTitle: 'Example Oy Backend Engineer', headings: ['Example Oy Backend Engineer'],
+    bodyText: 'Example Oy Backend Engineer application', formCount: 1,
+    fields: [{ type: 'email', text: 'Email', visible: true }, { type: 'file', text: 'Resume', visible: true }],
+    controls: [], applicationFormId: 'fictional-form', ...snapshotOverrides,
+  };
+  const frame = {};
+  const page = Object.assign(new EventEmitter(), {
+    url: () => currentUrl,
+    mainFrame: () => frame,
+    context: () => context,
+    isClosed: () => false,
+    goto: async (url) => {
+      currentUrl = url;
+      page.emit('framenavigated', frame);
+      page.emit('domcontentloaded');
+      return { status: () => 200 };
+    },
+    waitForLoadState: async () => {},
+    waitForTimeout: async (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    evaluate: async (fn, args) => {
+      if (args?.gateOnly || String(fn).includes('__careerOpsEntryControlCounter')) return snapshot;
+      if (String(fn).includes('document.body?.innerText')) return snapshot.bodyText;
+      return [];
+    },
+  });
+  const context = { newPage: async () => page };
+  const browser = { isConnected: () => connected, close: async () => { connected = false; } };
+  return {
+    browser, context, page,
+    dependencies: {
+      checkLivenessViaApi: async () => ({ result: 'active', reason: 'Fictional posting is live' }),
+      launchBrowser: async () => browser,
+      createContext: async () => context,
+      checkUrlLiveness: async (target, url) => {
+        assert.equal(url, fixture.candidate.url);
+        await target.goto(url);
+        return { result: 'active', reason: 'Fictional listing loaded' };
+      },
+    },
+  };
+}
+
+function blockAttemptFixture(fixture) {
+  const lock = acquireBatchExecutionLock(fixture.created.manifestPath, {
+    root: fixture.root, candidateId: fixture.options.candidateId,
+  });
+  try {
+    transitionCandidateState(fixture.created.manifestPath, fixture.options.candidateId, 'blocked', {
+      root: fixture.root, currentUrl: fixture.candidate.url, reason: 'Initial fictional blocker',
+      expectedFrom: 'not_opened', lockToken: lock.token,
+    });
+  } finally {
+    lock.release();
+  }
+}
+
+test('a transient pre-open liveness timeout records a retryable attempt', async () => {
+  const fixture = makeAttemptFixture();
+  try {
+    const before = loadBatchState(fixture.created.manifestPath, { root: fixture.root }).state;
+    const failure = Object.assign(new Error('Liveness request timed out'), { name: 'TimeoutError' });
+    await assert.rejects(executeCandidate(fixture.options, {
+      root: fixture.root,
+      dependencies: { checkLivenessViaApi: async () => { throw failure; } },
+    }), (error) => error === failure);
+    const after = loadBatchState(fixture.created.manifestPath, { root: fixture.root }).state;
+    const candidate = after.candidates[0];
+    assert.equal(candidate.state, 'not_opened');
+    assert.equal(after.revision, before.revision + 1);
+    assert.equal(candidate.history.length, before.candidates[0].history.length + 1);
+    assert.equal(candidate.history.at(-1).from, 'not_opened');
+    assert.equal(candidate.history.at(-1).to, 'not_opened');
+    assert.equal(candidate.history.at(-1).currentUrl, fixture.candidate.url);
+    assert.equal(candidate.history.at(-1).reason, 'Transient failure before opening: Liveness request timed out');
+    assert.deepEqual(candidate.history.at(-1).details, { attempt: 'pre_open', errorClass: 'timeout' });
+    assert.equal(loadPreparationContract(fixture.created.manifestPath, fixture.options.candidateId,
+      { root: fixture.root }).candidateState.state, 'not_opened');
+    bindCandidateArtifact(fixture.created.manifestPath, fixture.options.candidateId, {
+      root: fixture.root, artifactType: 'cv', filePath: fixture.cv, replace: true,
+    });
+    confirmPreflight(fixture.created.manifestPath, fixture.created.manifest.batchId, { root: fixture.root });
+    const fake = fakeAttemptBrowser(fixture);
+    const result = await executeCandidate(fixture.options, { root: fixture.root, dependencies: fake.dependencies });
+    assert.equal(result.state, 'actual_form_reached');
+    const retried = loadBatchState(fixture.created.manifestPath, { root: fixture.root }).state.candidates[0];
+    assert.deepEqual(retried.history.map((entry) => entry.to),
+      ['not_opened', 'not_opened', 'listing_verified', 'actual_form_reached']);
+    assert.equal(fake.page.listenerCount('domcontentloaded'), 0);
+    assert.equal(fake.page.listenerCount('framenavigated'), 0);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('a failed resume from blocked records another blocked history entry', async () => {
+  const fixture = makeAttemptFixture();
+  try {
+    blockAttemptFixture(fixture);
+    const before = loadBatchState(fixture.created.manifestPath, { root: fixture.root }).state;
+    const browser = { isConnected: () => true, close: async () => {} };
+    const page = { url: () => 'about:blank' };
+    const context = { newPage: async () => page };
+    let result;
+    let failure;
+    try {
+      result = await executeCandidate({ ...fixture.options, resumePreparation: true }, {
+        root: fixture.root,
+        dependencies: {
+          checkLivenessViaApi: async () => ({ result: 'active', reason: 'Fictional posting is live' }),
+          launchBrowser: async () => browser,
+          createContext: async () => context,
+          checkUrlLiveness: async () => { throw new Error('Fictional resume navigation failed'); },
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+    const after = loadBatchState(fixture.created.manifestPath, { root: fixture.root }).state;
+    assert.equal(after.candidates[0].history.length, before.candidates[0].history.length + 1,
+      `Resume must persist its result; thrown error: ${failure?.message || 'none'}`);
+    assert.equal(failure, undefined);
+    assert.equal(result.state, 'blocked');
+    assert.equal(after.revision, before.revision + 1);
+    assert.equal(after.candidates[0].history.at(-1).from, 'blocked');
+    assert.equal(after.candidates[0].history.at(-1).to, 'blocked');
+    assert.match(after.candidates[0].history.at(-1).reason, /Preparation resume stopped safely: Fictional resume navigation failed/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('pre-open transient classification is limited to transport, liveness, and launch failures', async (t) => {
+  const cases = [
+    ['DNS code', { code: 'ENOTFOUND' }, 'liveness', 'dns'],
+    ['DNS navigation', { message: 'page.goto: net::ERR_NAME_NOT_RESOLVED' }, 'navigation', 'dns'],
+    ['connection refused', { code: 'ECONNREFUSED' }, 'liveness', 'connection'],
+    ['connection reset cause', { cause: { code: 'ECONNRESET' } }, 'liveness', 'connection'],
+    ['browser connection reset', { message: 'net::ERR_CONNECTION_RESET' }, 'navigation', 'connection'],
+    ['connection refused message', { message: 'Connection refused' }, 'navigation', 'connection'],
+    ['transport timeout', { code: 'ETIMEDOUT' }, 'liveness', 'timeout'],
+    ['navigation timeout', { name: 'TimeoutError', message: 'page.goto: Timeout 30000ms exceeded' }, 'navigation', 'timeout'],
+    ['TLS code', { code: 'ERR_TLS_CERT_ALTNAME_INVALID' }, 'liveness', 'tls'],
+    ['SSL navigation', { message: 'net::ERR_SSL_PROTOCOL_ERROR' }, 'navigation', 'tls'],
+    ['TLS handshake message', { message: 'TLS handshake failed' }, 'liveness', 'tls'],
+    ['certificate navigation', { message: 'net::ERR_CERT_AUTHORITY_INVALID' }, 'navigation', 'tls'],
+    ['browser launch', { message: 'Fictional process failed to start' }, 'browser', 'browser_launch'],
+    ['context launch', { message: 'Fictional context failed to start' }, 'context', 'context_launch'],
+    ['profile browser launch', { message: 'browserType.launchPersistentContext: Failed to launch the browser process!' }, 'profile', 'browser_launch'],
+    ['unexpected error', { message: 'Unexpected fictional error' }, 'liveness', null],
+    ['identity mismatch', { message: 'Candidate identity mismatch' }, 'liveness', null],
+    ['unknown transport error', { message: 'Fictional transport failure' }, 'liveness', null],
+    ['unrelated timeout', { name: 'TimeoutError', message: 'Locator inspection timed out' }, 'inspection', null],
+    ['context configuration', { message: 'Unexpected context configuration failure' }, 'configuration', null],
+  ];
+  for (const [name, properties, stage, errorClass] of cases) {
+    await t.test(name, async () => {
+      const fixture = makeAttemptFixture();
+      try {
+        const failure = Object.assign(new Error('Fictional transport error'), properties);
+        const fake = fakeAttemptBrowser(fixture);
+        const fail = async () => { throw failure; };
+        if (stage === 'liveness') fake.dependencies.checkLivenessViaApi = fail;
+        if (stage === 'navigation') fake.dependencies.checkUrlLiveness = fail;
+        if (stage === 'browser') fake.dependencies.launchBrowser = fail;
+        if (stage === 'context') fake.dependencies.createContext = fail;
+        if (stage === 'profile') fake.dependencies.openBrowserProfile = fail;
+        if (stage === 'inspection') fake.dependencies.onCandidatePage = fail;
+        if (stage === 'configuration') fake.dependencies.configureContext = fail;
+        const before = loadBatchState(fixture.created.manifestPath, { root: fixture.root }).state;
+        await assert.rejects(executeCandidate(fixture.options, {
+          root: fixture.root, dependencies: fake.dependencies,
+        }), (error) => error === failure);
+        const after = loadBatchState(fixture.created.manifestPath, { root: fixture.root }).state;
+        const entry = after.candidates[0].history.at(-1);
+        assert.equal(after.revision, before.revision + 1);
+        assert.equal(after.candidates[0].history.length, before.candidates[0].history.length + 1);
+        assert.equal(entry.from, 'not_opened');
+        assert.equal(entry.to, errorClass ? 'not_opened' : 'blocked');
+        if (errorClass) assert.deepEqual(entry.details, { attempt: 'pre_open', errorClass });
+        else assert.match(entry.reason, /^Candidate execution stopped safely before opening:/);
+      } finally {
+        rmSync(fixture.root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test('the liveness helper navigation-error result is audited as a bounded retryable attempt', async () => {
+  const fixture = makeAttemptFixture();
+  try {
+    const fake = fakeAttemptBrowser(fixture);
+    const failure = Object.assign(new Error(`page.goto: Timeout 30000ms exceeded ${'x'.repeat(600)}`), { name: 'TimeoutError' });
+    fake.page.goto = async () => { throw failure; };
+    delete fake.dependencies.checkUrlLiveness;
+    await assert.rejects(executeCandidate(fixture.options, {
+      root: fixture.root, dependencies: fake.dependencies,
+    }), /navigation error: page.goto: Timeout/);
+    const candidate = loadBatchState(fixture.created.manifestPath, { root: fixture.root }).state.candidates[0];
+    assert.equal(candidate.state, 'not_opened');
+    assert.equal(candidate.history.length, 2);
+    assert.equal(candidate.reason.length, 500);
+    assert.deepEqual(candidate.history.at(-1).details, { attempt: 'pre_open', errorClass: 'timeout' });
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('a transient failure after a candidate page loads cannot record a pre-open retry', async (t) => {
+  for (const kind of ['domcontentloaded', 'committed_navigation', 'existing_shared_page', 'shared_API_failure', 'unobservable_page', 'after_listing_transition']) {
+    await t.test(kind, async () => {
+      const fixture = makeAttemptFixture();
+      try {
+        const fake = fakeAttemptBrowser(fixture);
+        const failure = Object.assign(new Error('page liveness timed out after opening'), { name: 'TimeoutError' });
+        if (['existing_shared_page', 'shared_API_failure'].includes(kind)) {
+          await fake.page.goto(fixture.candidate.url);
+          fake.dependencies.browserSession = { browser: fake.browser, context: fake.context, page: fake.page };
+        }
+        if (['domcontentloaded', 'committed_navigation'].includes(kind)) {
+          const suppressed = kind === 'domcontentloaded' ? 'framenavigated' : 'domcontentloaded';
+          const emit = fake.page.emit.bind(fake.page);
+          fake.page.emit = (event, ...args) => event === suppressed ? false : emit(event, ...args);
+        }
+        if (kind === 'unobservable_page') {
+          fake.page.url = () => { throw new Error('Fictional page URL is unavailable'); };
+          fake.dependencies.checkUrlLiveness = async () => { throw failure; };
+        }
+        if (kind === 'after_listing_transition') {
+          fake.dependencies.onCandidatePage = async () => {
+            const candidate = loadBatchState(fixture.created.manifestPath, { root: fixture.root }).state.candidates[0];
+            if (candidate.state === 'listing_verified') throw failure;
+          };
+        } else if (kind === 'shared_API_failure') {
+          fake.dependencies.checkLivenessViaApi = async () => { throw failure; };
+        } else if (kind !== 'unobservable_page') {
+          fake.dependencies.checkUrlLiveness = async (page, url) => { await page.goto(url); throw failure; };
+        }
+        await assert.rejects(executeCandidate(fixture.options, {
+          root: fixture.root, dependencies: fake.dependencies,
+        }), (error) => error === failure);
+        const candidate = loadBatchState(fixture.created.manifestPath, { root: fixture.root }).state.candidates[0];
+        assert.equal(candidate.state, 'blocked');
+        assert.equal(candidate.history.some((entry) => entry.from === 'not_opened' && entry.to === 'not_opened'), false);
+      } finally {
+        rmSync(fixture.root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test('failed blocked listing revalidation and pre-browser resume failures are persisted', async (t) => {
+  for (const kind of ['listing_revalidation', 'API_failure', 'launch_failure', 'shared_navigation_failure']) {
+    await t.test(kind, async () => {
+      const fixture = makeAttemptFixture();
+      try {
+        blockAttemptFixture(fixture);
+        const before = loadBatchState(fixture.created.manifestPath, { root: fixture.root }).state;
+        const fake = fakeAttemptBrowser(fixture, { headings: [], documentTitle: '', bodyText: 'Unrelated fictional posting' });
+        const failure = new Error('Fictional resume failure');
+        if (kind === 'API_failure') fake.dependencies.checkLivenessViaApi = async () => { throw failure; };
+        if (kind === 'launch_failure') fake.dependencies.launchBrowser = async () => { throw failure; };
+        if (kind === 'shared_navigation_failure') {
+          fake.dependencies.browserSession = { browser: fake.browser, context: fake.context, page: fake.page };
+          fake.dependencies.checkUrlLiveness = async () => { throw failure; };
+        }
+        const execution = executeCandidate({ ...fixture.options, resumePreparation: true }, {
+          root: fixture.root, dependencies: fake.dependencies,
+        });
+        if (['API_failure', 'launch_failure'].includes(kind)) {
+          await assert.rejects(execution, (error) => error === failure);
+        } else {
+          assert.equal((await execution).state, 'blocked');
+        }
+        const after = loadBatchState(fixture.created.manifestPath, { root: fixture.root }).state;
+        assert.equal(after.revision, before.revision + 1);
+        assert.equal(after.candidates[0].history.length, before.candidates[0].history.length + 1);
+        const entry = after.candidates[0].history.at(-1);
+        assert.equal(entry.from, 'blocked');
+        assert.equal(entry.to, 'blocked');
+        assert.match(entry.reason, kind === 'listing_revalidation'
+          ? /^Preparation resume listing revalidation failed:/ : /^Preparation resume stopped safely: Fictional resume failure/);
+      } finally {
+        rmSync(fixture.root, { recursive: true, force: true });
+      }
+    });
+  }
+});
 
 test('executor requires a manifest and never falls back to global queue', () => withFixture((fixture) => {
   assert.throws(
