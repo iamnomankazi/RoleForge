@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import yaml from 'js-yaml';
 import {
   companyDuplicateKey, groupTrackerRows, loadIdentityMappings, loadReportIndex,
   loadRunCandidates, loadTrackerRows, roleDuplicateKey, rowIdentity,
@@ -11,6 +12,7 @@ import {
 import { resolveTrackerPath } from './tracker-utils.mjs';
 import { canonicalListingUrl, isCandidateId } from './candidate-identity.mjs';
 import { loadPrescreenProfile, prescreenJob } from './prescreen.mjs';
+import { normalizeExperiencePolicy } from './experience-policy.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -65,6 +67,7 @@ function reportComponents(reportIndex) {
   }
   const componentByReport = new Map();
   const idsByReport = new Map();
+  const idsById = new Map();
   for (const [number, report] of reportIndex) {
     if (report?.candidateId) {
       if (!idsByReport.has(number)) idsByReport.set(number, new Set());
@@ -87,8 +90,9 @@ function reportComponents(reportIndex) {
       if (!idsByReport.has(item)) idsByReport.set(item, new Set());
       for (const id of ids) idsByReport.get(item).add(id);
     }
+    for (const id of ids) idsById.set(id, ids);
   }
-  return { componentByReport, idsByReport };
+  return { componentByReport, idsByReport, idsById };
 }
 
 function loadRuns(runDirs) {
@@ -123,10 +127,8 @@ function loadRuns(runDirs) {
       if (typeof manifest?.metadata?.enrichment_sha256 !== 'string' || actual !== manifest.metadata.enrichment_sha256) {
         throw new Error(`incomplete enriched run ${dir}: enrichment.json SHA-256 does not match manifest`);
       }
-      enrichment = { bytes, value: (() => {
-        try { return JSON.parse(bytes.toString('utf8')); }
-        catch { return null; }
-      })() };
+      try { enrichment = { bytes, value: JSON.parse(bytes.toString('utf8')) }; }
+      catch (error) { throw new Error(`incomplete enriched run ${dir}: could not parse enrichment.json: ${error.message}`); }
     }
     const runId = String(manifest.run_id ?? manifest.runId ?? basename(dir));
     const candidates = parsedCandidates.map((candidate, index) => {
@@ -222,61 +224,78 @@ function buildTrackedEvidence(groups, reportIndex, mappings) {
   return { trackedIds, evidenceById };
 }
 
-function strongIds(id, mappings, reportInfo) {
-  if (mappings.ambiguous.has(id)) return new Set();
-  const ids = new Set([id]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const current of [...ids]) {
-      for (const relatedId of mappings.equivalent.get(current) ?? []) {
-        if (!mappings.ambiguous.has(relatedId) && !ids.has(relatedId)) { ids.add(relatedId); changed = true; }
-      }
+function createStrongIdResolver(mappings, reportInfo) {
+  const cache = new Map();
+  return function strongIds(id) {
+    if (cache.has(id)) return cache.get(id);
+    if (mappings.ambiguous.has(id)) {
+      const empty = new Set();
+      cache.set(id, empty);
+      return empty;
     }
-    for (const reportIds of reportInfo.idsByReport.values()) {
-      if ([...reportIds].some((reportId) => ids.has(reportId))) {
-        for (const relatedId of reportIds) {
-          if (!mappings.ambiguous.has(relatedId) && !ids.has(relatedId)) { ids.add(relatedId); changed = true; }
+    const ids = new Set([id]);
+    const queue = [id];
+    while (queue.length) {
+      const current = queue.pop();
+      for (const relatedId of mappings.equivalent.get(current) ?? []) {
+        if (!mappings.ambiguous.has(relatedId) && !ids.has(relatedId)) {
+          ids.add(relatedId);
+          queue.push(relatedId);
+        }
+      }
+      for (const relatedId of reportInfo.idsById.get(current) ?? []) {
+        if (!mappings.ambiguous.has(relatedId) && !ids.has(relatedId)) {
+          ids.add(relatedId);
+          queue.push(relatedId);
         }
       }
     }
-  }
-  for (const member of [...ids]) {
-    if (mappings.ambiguous.has(member)) ids.delete(member);
-  }
-  return ids;
+    for (const member of ids) cache.set(member, ids);
+    return ids;
+  };
 }
 
-function trackedMatch(candidateId, tracked, mappings, reportInfo) {
-  const ids = strongIds(candidateId, mappings, reportInfo);
-  if (!ids.size) return null;
-  const matches = [...ids].filter((id) => tracked.trackedIds.has(id));
-  if (!matches.length) return null;
-  const rows = new Map();
-  const reports = new Set();
-  for (const id of matches) {
-    for (const evidence of tracked.evidenceById.get(id) ?? []) {
-      for (const row of evidence.tracker_rows ?? []) rows.set(`${row.num}\0${row.status}`, row);
-      for (const number of evidence.report_numbers ?? []) reports.add(number);
+function createTrackedMatcher(tracked, strongIds) {
+  const cache = new Map();
+  const weakCache = new Map();
+  function trackedMatch(candidateId) {
+    if (cache.has(candidateId)) return cache.get(candidateId);
+    const ids = strongIds(candidateId);
+    if (!ids.size) { cache.set(candidateId, null); return null; }
+    const matches = [...ids].filter((id) => tracked.trackedIds.has(id));
+    if (!matches.length) { cache.set(candidateId, null); return null; }
+    const rows = new Map();
+    const reports = new Set();
+    for (const id of matches) {
+      for (const evidence of tracked.evidenceById.get(id) ?? []) {
+        for (const row of evidence.tracker_rows ?? []) rows.set(`${row.num}\0${row.status}`, row);
+        for (const number of evidence.report_numbers ?? []) reports.add(number);
+      }
     }
+    const result = { matched_candidate_ids: matches,
+      tracker_rows: [...rows.values()].sort((a, b) => Number(a.num) - Number(b.num)),
+      report_numbers: [...reports].sort((a, b) => a - b) };
+    cache.set(candidateId, result);
+    return result;
   }
-  return { matched_candidate_ids: matches, tracker_rows: [...rows.values()].sort((a, b) => Number(a.num) - Number(b.num)),
-    report_numbers: [...reports].sort((a, b) => a - b) };
-}
-
-function weakTrackedMatch(candidateId, tracked, mappings, reportInfo) {
-  const strong = trackedMatch(candidateId, tracked, mappings, reportInfo);
-  if (strong) return strong;
-  const evidence = tracked.evidenceById.get(candidateId);
-  if (!evidence?.length) return null;
-  const rows = new Map(); const reports = new Set();
-  for (const item of evidence) {
-    for (const row of item.tracker_rows ?? []) rows.set(`${row.num}\0${row.status}`, row);
-    for (const number of item.report_numbers ?? []) reports.add(number);
+  function weakTrackedMatch(candidateId) {
+    if (weakCache.has(candidateId)) return weakCache.get(candidateId);
+    const strong = trackedMatch(candidateId);
+    if (strong) { weakCache.set(candidateId, strong); return strong; }
+    const evidence = tracked.evidenceById.get(candidateId);
+    if (!evidence?.length) { weakCache.set(candidateId, null); return null; }
+    const rows = new Map(); const reports = new Set();
+    for (const item of evidence) {
+      for (const row of item.tracker_rows ?? []) rows.set(`${row.num}\0${row.status}`, row);
+      for (const number of item.report_numbers ?? []) reports.add(number);
+    }
+    const result = { matched_candidate_ids: [candidateId],
+      tracker_rows: [...rows.values()].sort((a, b) => Number(a.num) - Number(b.num)),
+      report_numbers: [...reports].sort((a, b) => a - b) };
+    weakCache.set(candidateId, result);
+    return result;
   }
-  return { matched_candidate_ids: [candidateId],
-    tracker_rows: [...rows.values()].sort((a, b) => Number(a.num) - Number(b.num)),
-    report_numbers: [...reports].sort((a, b) => a - b) };
+  return { trackedMatch, weakTrackedMatch };
 }
 
 function discardedComponents(edges) {
@@ -312,67 +331,225 @@ function urlsFor(candidate) {
     .map(canonicalListingUrl).filter(Boolean));
 }
 
-function buildPossibleDuplicates(candidate, allRunCandidates, trackerRows, tracked, mappings, discarded, reportIndex, reportInfo) {
+function buildDuplicateIndexes(allRunCandidates, trackerRows) {
+  const recordsByUrl = new Map();
+  const urlsByCandidate = new Map();
+  const trackerRowsByKey = new Map();
+  for (const record of allRunCandidates) {
+    if (!record?.candidate_id) continue;
+    const urls = urlsFor(record);
+    urlsByCandidate.set(record, urls);
+    for (const url of urls) {
+      if (!recordsByUrl.has(url)) recordsByUrl.set(url, []);
+      recordsByUrl.get(url).push(record);
+    }
+  }
+  for (const row of trackerRows) {
+    const companyKey = companyDuplicateKey(row.company);
+    const roleKey = roleDuplicateKey(row.role);
+    if (!companyKey || !roleKey) continue;
+    const key = `${companyKey}\0${roleKey}`;
+    if (!trackerRowsByKey.has(key)) trackerRowsByKey.set(key, []);
+    trackerRowsByKey.get(key).push(row);
+  }
+  return { recordsByUrl, urlsByCandidate, trackerRowsByKey };
+}
+
+function buildPossibleDuplicates(candidate, indexes, tracked, mappings, strongIds, trackedMatch, weakTrackedMatch, discarded) {
   const results = [];
   const seen = new Set();
   const add = (value) => {
     const key = JSON.stringify(value);
     if (!seen.has(key)) { seen.add(key); results.push(value); }
   };
-  const candidateUrls = urlsFor(candidate);
+  const candidateUrls = indexes.urlsByCandidate.get(candidate) ?? urlsFor(candidate);
+  const urlMatches = new Map();
   if (candidateUrls.size) {
-    for (const record of allRunCandidates) {
-      if (!record?.candidate_id || record.candidate_id === candidate.candidate_id) continue;
-      const matchingTracked = weakTrackedMatch(record.candidate_id, tracked, mappings, reportInfo);
+    for (const url of candidateUrls) {
+      for (const record of indexes.recordsByUrl.get(url) ?? []) {
+        if (!record?.candidate_id || record.candidate_id === candidate.candidate_id) continue;
+        if (!urlMatches.has(record.candidate_id)) urlMatches.set(record.candidate_id, { record, urls: new Set() });
+        urlMatches.get(record.candidate_id).urls.add(url);
+      }
+    }
+    for (const [candidateId, match] of urlMatches) {
+      const matchingTracked = weakTrackedMatch(candidateId);
       if (!matchingTracked) continue;
-      const matchingUrls = [...urlsFor(record)].filter((url) => candidateUrls.has(url));
-      if (!matchingUrls.length) continue;
-      add({ reason: 'shared_url_alias', urls: matchingUrls, candidate_id: record.candidate_id,
+      add({ reason: 'shared_url_alias', urls: [...match.urls].sort(), candidate_id: candidateId,
         tracker_rows: matchingTracked.tracker_rows, report_numbers: matchingTracked.report_numbers });
     }
   }
   const companyKey = companyDuplicateKey(candidate.company);
   const roleKey = roleDuplicateKey(candidate.title ?? candidate.role);
   if (companyKey && roleKey) {
-    for (const row of trackerRows) {
-      const rowCompanyKey = companyDuplicateKey(row.company);
-      const rowRoleKey = roleDuplicateKey(row.role);
-      if (companyKey === rowCompanyKey && roleKey === rowRoleKey) {
-        add({ reason: 'company_role_match', tracker_rows: [{ num: row.num, status: row.status }] });
-      }
+    const rows = indexes.trackerRowsByKey.get(`${companyKey}\0${roleKey}`) ?? [];
+    if (rows.length) {
+      add({ reason: 'company_role_match', tracker_rows: rows.map((row) => ({ num: row.num, status: row.status })) });
     }
   }
-  const candidateComponent = discarded.componentById.get(candidate.candidate_id);
-  if (candidateComponent) {
-    const trackedComponentIds = [...candidateComponent].filter((id) => tracked.trackedIds.has(id)
-      || mappings.ambiguous.has(id) && tracked.evidenceById.has(id));
-    if (trackedComponentIds.length) {
-      const relevantEdges = (discarded.edgesById.get(candidate.candidate_id) ?? [])
-        .filter((edge) => candidateComponent.has(edge.old) && candidateComponent.has(edge.new));
-      add({ reason: 'discarded_mapping', candidate_ids: trackedComponentIds,
+  const candidateIds = new Set([candidate.candidate_id, ...strongIds(candidate.candidate_id)]);
+  const candidateComponents = new Set([...candidateIds].map((id) => discarded.componentById.get(id)).filter(Boolean));
+  if (candidateComponents.size) {
+    const componentIds = new Set([...candidateComponents].flatMap((component) => [...component]));
+    const trackedComponentIds = new Set();
+    for (const id of componentIds) {
+      const match = trackedMatch(id);
+      if (match) for (const matchId of match.matched_candidate_ids) trackedComponentIds.add(matchId);
+      else if (mappings.ambiguous.has(id) && tracked.evidenceById.has(id)) trackedComponentIds.add(id);
+    }
+    if (trackedComponentIds.size) {
+      const relevantEdges = [...componentIds].flatMap((id) => discarded.edgesById.get(id) ?? []);
+      add({ reason: 'discarded_mapping', candidate_ids: [...trackedComponentIds].sort(),
         edge_reasons: [...new Set(relevantEdges.map((edge) => edge.reason))].sort() });
     }
   }
-  if (mappings.ambiguous.has(candidate.candidate_id) && tracked.evidenceById.has(candidate.candidate_id)) {
+  if (mappings.ambiguous.has(candidate.candidate_id)) {
     add({ reason: 'ambiguous_id', candidate_id: candidate.candidate_id,
-      evidence: tracked.evidenceById.get(candidate.candidate_id) });
+      evidence: tracked.evidenceById.get(candidate.candidate_id) ?? [] });
   }
   return results;
 }
 
-function assertOutputSafe(outPath, runs, root) {
+function assertOutputSafe(outPath, runDirs, livenessDirs, root) {
   const canonicalOut = canonicalPath(outPath);
-  const scanRuns = canonicalPath(join(resolve(root), 'output', 'scan-runs'));
-  if (runs.some((run) => inside(canonicalOut, canonicalPath(run.dir)))) {
-    throw new Error(`Refusing --out inside an input run directory: ${outPath}`);
+  const protectedDirs = [
+    ...runDirs.map((dir) => [canonicalPath(dir), `an input run directory`]),
+    ...livenessDirs.map((dir) => [canonicalPath(dir), `an input liveness directory`]),
+    ...['output/scan-runs', 'reports', 'data', 'output/application-batches', 'config']
+      .map((part) => [canonicalPath(join(resolve(root), part)), part]),
+  ];
+  for (const [directory, label] of protectedDirs) {
+    if (inside(canonicalOut, directory)) throw new Error(`Refusing --out inside ${label}: ${outPath}`);
   }
-  if (inside(canonicalOut, scanRuns)) throw new Error(`Refusing --out inside output/scan-runs: ${outPath}`);
+}
+
+function assertRunDirsInRoot(runDirs, root) {
+  const scanRuns = canonicalPath(join(resolve(root), 'output', 'scan-runs'));
+  for (const dir of runDirs) {
+    if (!inside(canonicalPath(dir), scanRuns) || canonicalPath(dir) === scanRuns) {
+      throw new Error(`Refusing --run outside <root>/output/scan-runs: ${dir}`);
+    }
+  }
+}
+
+function assertNoUnexpectedWarnings(label, messages, allowed = []) {
+  const fatal = messages.filter((message) => !allowed.some((pattern) => pattern.test(message)));
+  if (fatal.length) throw new Error(`${label}:\n${fatal.map((message) => `- ${message}`).join('\n')}`);
+}
+
+const BENIGN_REPORT_WARNINGS = [
+  /^Report .+ has no Machine Summary$/,
+  /^Report .+ has an invalid Machine Summary:/,
+  /^Report .+ has an invalid assessment:/,
+];
+const BENIGN_MAPPING_WARNINGS = [
+  /^Ignoring enrichment\.json in .+: manifest metadata\.tool is not enrich-run$/,
+];
+
+function loadExperiencePolicy(root) {
+  const configuredPath = process.env.CAREER_OPS_PORTALS
+    ? resolve(process.env.CAREER_OPS_PORTALS) : join(root, 'portals.yml');
+  if (!existsSync(configuredPath)) return null;
+  let config;
+  try { config = yaml.load(readFileSync(configuredPath, 'utf8').replace(/^\uFEFF/, '')); }
+  catch (error) { throw new Error(`Could not load scan configuration ${configuredPath}: ${error.message}`); }
+  const normalizedConfig = config && typeof config === 'object' ? config : {};
+  return normalizeExperiencePolicy(normalizedConfig.experience_policy);
+}
+
+function loadApplicationBatches(root) {
+  const batchesDir = join(root, 'output', 'application-batches');
+  if (!existsSync(batchesDir)) return new Map();
+  let entries;
+  try { entries = readdirSync(batchesDir, { withFileTypes: true }); }
+  catch (error) { throw new Error(`Could not read application-batches directory ${batchesDir}: ${error.message}`); }
+  const byCandidateId = new Map();
+  for (const entry of entries) {
+    // Dot-prefixed directories (claim locks, staging) are internal, never batches.
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+    const batchId = entry.name;
+    const manifestPath = join(batchesDir, batchId, 'manifest.json');
+    if (!existsSync(manifestPath)) throw new Error(`Malformed application batch ${batchId}: manifest.json is missing`);
+    const manifest = readJsonFile(manifestPath, 'application-batch manifest').value;
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest) || !Array.isArray(manifest.candidates)
+        || manifest.candidates.length === 0
+        || manifest.batchId != null && (typeof manifest.batchId !== 'string' || manifest.batchId !== batchId)) {
+      throw new Error(`Malformed application-batch manifest ${manifestPath}: expected candidates array`);
+    }
+    const statePath = join(batchesDir, batchId, 'state.json');
+    let state = null;
+    try { state = JSON.parse(readFileSync(statePath, 'utf8')); } catch {}
+    for (const [index, row] of manifest.candidates.entries()) {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) {
+        throw new Error(`Malformed application-batch manifest ${manifestPath}: candidate ${index + 1} must be an object`);
+      }
+      const candidateId = row.candidate_id;
+      if (candidateId == null || candidateId === '') continue;
+      if (typeof candidateId !== 'string' || !isCandidateId(candidateId)) {
+        throw new Error(`Malformed application-batch manifest ${manifestPath}: candidate ${index + 1} has invalid candidate_id`);
+      }
+      if (!byCandidateId.has(candidateId)) byCandidateId.set(candidateId, []);
+      byCandidateId.get(candidateId).push({ batch_id: manifest.batchId ?? batchId,
+        state: state?.candidates?.[index]?.state ?? null });
+    }
+  }
+  return byCandidateId;
+}
+
+function applicationBatchMatch(candidateId, batches, strongIds) {
+  const ids = new Set([candidateId, ...strongIds(candidateId)]);
+  const matches = new Map();
+  for (const id of ids) {
+    for (const batch of batches.get(id) ?? []) matches.set(batch.batch_id, batch);
+  }
+  if (!matches.size) return null;
+  const entries = [...matches.values()].sort((a, b) => a.batch_id.localeCompare(b.batch_id));
+  return { batch_ids: entries.map((entry) => entry.batch_id),
+    candidate_states: entries.map(({ batch_id, state }) => ({ batch_id, state })) };
+}
+
+function addQueuedDuplicateEvidence(queued) {
+  const byUrl = new Map();
+  const byCompanyRole = new Map();
+  const pairEvidence = new Map();
+  const addPair = (left, right, reason, details = {}) => {
+    if (left === right) return;
+    const a = Math.min(left.index, right.index); const b = Math.max(left.index, right.index);
+    const pairKey = `${a}:${b}`;
+    if (!pairEvidence.has(pairKey)) pairEvidence.set(pairKey, { left, right, reasons: new Map() });
+    const pair = pairEvidence.get(pairKey);
+    if (!pair.reasons.has(reason)) pair.reasons.set(reason, []);
+    pair.reasons.get(reason).push(details);
+  };
+  for (const item of queued) {
+    const urls = item.urls;
+    for (const url of urls) {
+      for (const other of byUrl.get(url) ?? []) addPair(item, other, 'shared_url_alias', { url });
+      if (!byUrl.has(url)) byUrl.set(url, []);
+      byUrl.get(url).push(item);
+    }
+    const companyKey = companyDuplicateKey(item.candidate.company);
+    const roleKey = roleDuplicateKey(item.candidate.title ?? item.candidate.role);
+    if (!companyKey || !roleKey) continue;
+    const key = `${companyKey}\0${roleKey}`;
+    for (const other of byCompanyRole.get(key) ?? []) addPair(item, other, 'company_role_match');
+    if (!byCompanyRole.has(key)) byCompanyRole.set(key, []);
+    byCompanyRole.get(key).push(item);
+  }
+  for (const pair of pairEvidence.values()) {
+    for (const [reason, details] of pair.reasons) {
+      const urls = [...new Set(details.map((item) => item.url).filter(Boolean))].sort();
+      pair.left.entry.possible_duplicates.push({ reason, candidate_id: pair.right.candidate.candidate_id, ...(urls.length ? { urls } : {}) });
+      pair.right.entry.possible_duplicates.push({ reason, candidate_id: pair.left.candidate.candidate_id, ...(urls.length ? { urls } : {}) });
+    }
+  }
 }
 
 export function buildEvalQueue({ runDirs = [], livenessDirs = [], root = SCRIPT_DIR, profilePath, now = new Date() } = {}) {
   if (!Array.isArray(runDirs) || runDirs.length === 0) throw new Error('At least one --run directory is required');
   const absoluteRoot = resolve(root);
-  const runs = loadRuns(runDirs);
+  assertRunDirsInRoot(runDirs, absoluteRoot);
+  const runs = loadRuns(runDirs.map(canonicalPath));
   const warnings = [];
 
   const trackerPath = resolveTrackerPath(absoluteRoot);
@@ -395,48 +572,49 @@ export function buildEvalQueue({ runDirs = [], livenessDirs = [], root = SCRIPT_
   let tracker = { rows: [], warnings: [] };
   if (trackerExists) {
     tracker = loadTrackerRows(trackerPath);
-    if (tracker.warnings.some((message) => /Could not read tracker|Could not resolve tracker columns/.test(message))) {
-      throw new Error(tracker.warnings.join('; '));
-    }
+    assertNoUnexpectedWarnings('Could not safely load tracker identity evidence', tracker.warnings);
     warnings.push(...tracker.warnings);
   }
   const reportIndex = reportsExist ? loadReportIndex(reportsDir) : new Map();
-  if ((reportIndex.warnings ?? []).some((message) => message.startsWith('Could not parse report ')
-    || message.startsWith('Could not read reports directory '))) {
-    throw new Error(reportIndex.warnings.join('; '));
-  }
+  assertNoUnexpectedWarnings('Could not safely load report identity evidence', reportIndex.warnings ?? [], BENIGN_REPORT_WARNINGS);
   warnings.push(...(reportIndex.warnings ?? []));
   const scanRunsDir = join(absoluteRoot, 'output', 'scan-runs');
   const mappings = loadIdentityMappings({ scanRunsDir, correctionsDir: join(absoluteRoot, 'output', 'identity-corrections') });
+  assertNoUnexpectedWarnings('Could not safely load identity mappings', mappings.warnings, BENIGN_MAPPING_WARNINGS);
   warnings.push(...mappings.warnings);
   const runCandidates = loadRunCandidates(scanRunsDir);
+  assertNoUnexpectedWarnings('Could not safely load scan-run identity evidence', runCandidates.warnings);
   warnings.push(...runCandidates.warnings);
   const groups = groupTrackerRows(tracker.rows, reportIndex, mappings);
   const tracked = buildTrackedEvidence(groups, reportIndex, mappings);
   const reportInfo = reportComponents(reportIndex);
+  const strongIds = createStrongIdResolver(mappings, reportInfo);
+  const { trackedMatch, weakTrackedMatch } = createTrackedMatcher(tracked, strongIds);
+  const applicationBatches = loadApplicationBatches(absoluteRoot);
   const liveness = loadLivenessInputs(livenessDirs, warnings);
   const chosenProfilePath = profilePath == null ? join(absoluteRoot, 'config', 'profile.yml') : resolve(profilePath);
-  let profile = null;
-  let profileHash = null;
+  let profile;
+  let profileHash;
   try {
     const profileBytes = readFileSync(chosenProfilePath);
     profileHash = sha256(profileBytes);
     profile = loadPrescreenProfile(chosenProfilePath);
   } catch (error) {
-    warning(warnings, `Prescreen profile unavailable at ${chosenProfilePath}; prescreen blockers are disabled: ${error.message}`);
+    throw new Error(`Could not load required prescreen profile ${chosenProfilePath}: ${error.message}`);
   }
+  const experiencePolicy = loadExperiencePolicy(absoluteRoot);
 
   const allCandidates = runs.flatMap((run, runIndex) => run.candidates.map((candidate, candidateIndex) => ({
     run, runIndex, candidateIndex, candidate, liveness: effectiveLiveness(candidate, run, liveness.entries),
   })));
   const groupKeyFor = (item) => {
-    const strong = strongIds(item.candidate.candidate_id, mappings, reportInfo);
+    const strong = strongIds(item.candidate.candidate_id);
     if (!strong.size) return `ambiguous:${item.runIndex}:${item.candidateIndex}`;
     return [...strong].sort()[0];
   };
   const winners = new Map();
   for (const item of allCandidates) {
-    if (trackedMatch(item.candidate.candidate_id, tracked, mappings, reportInfo)) continue;
+    if (trackedMatch(item.candidate.candidate_id)) continue;
     const key = groupKeyFor(item);
     const current = winners.get(key);
     if (!current || item.run.created_ms > current.run.created_ms
@@ -448,67 +626,79 @@ export function buildEvalQueue({ runDirs = [], livenessDirs = [], root = SCRIPT_
       liveness: liveness.inputs, profile_sha256: profileHash },
     include: [], needs_liveness: [], exclude: [], counts: null, warnings };
   const allRunCandidates = [...runCandidates.values(), ...runs.flatMap((run) => run.candidates)];
+  const duplicateIndexes = buildDuplicateIndexes(allRunCandidates, tracker.rows);
+  const discarded = discardedComponents(mappings.discardedEdges);
+  const queued = [];
+  const excludeCandidate = (candidate, run, live, reason, detail) => output.exclude.push({
+    candidate_id: candidate.candidate_id, run_id: run.run_id, company: candidate.company ?? '',
+    title: candidate.title ?? candidate.role ?? '', reason, detail, liveness: live,
+  });
 
   for (const item of allCandidates) {
     const { run, candidate, liveness: live } = item;
-    const trackedEvidence = trackedMatch(candidate.candidate_id, tracked, mappings, reportInfo);
+    const trackedEvidence = trackedMatch(candidate.candidate_id);
     if (trackedEvidence) {
-      output.exclude.push({ candidate_id: candidate.candidate_id, run_id: run.run_id, company: candidate.company ?? '',
-        title: candidate.title ?? candidate.role ?? '', reason: 'already_tracked', detail: trackedEvidence });
+      excludeCandidate(candidate, run, live, 'already_tracked', trackedEvidence);
+      continue;
+    }
+    const batchEvidence = applicationBatchMatch(candidate.candidate_id, applicationBatches, strongIds);
+    if (batchEvidence) {
+      excludeCandidate(candidate, run, live, 'in_application_batch', batchEvidence);
       continue;
     }
     const winner = winners.get(groupKeyFor(item));
     if (winner !== item) {
-      output.exclude.push({ candidate_id: candidate.candidate_id, run_id: run.run_id, company: candidate.company ?? '',
-        title: candidate.title ?? candidate.role ?? '', reason: 'duplicate_in_queue', detail: {
-          kept_run_id: winner.run.run_id, kept_run_dir: winner.run.dir, kept_candidate_id: winner.candidate.candidate_id,
-        } });
+      excludeCandidate(candidate, run, live, 'duplicate_in_queue', {
+        kept_run_id: winner.run.run_id, kept_run_dir: winner.run.dir, kept_candidate_id: winner.candidate.candidate_id,
+      });
       continue;
     }
     if (live.status === 'expired') {
-      output.exclude.push({ candidate_id: candidate.candidate_id, run_id: run.run_id, company: candidate.company ?? '',
-        title: candidate.title ?? candidate.role ?? '', reason: 'liveness_expired', detail: live });
+      excludeCandidate(candidate, run, live, 'liveness_expired', live);
       continue;
     }
     const description = String(candidate.description ?? '');
     if (description.length < 120) {
-      output.exclude.push({ candidate_id: candidate.candidate_id, run_id: run.run_id, company: candidate.company ?? '',
-        title: candidate.title ?? candidate.role ?? '', reason: 'no_description', detail: {
-          description_chars: description.length, threshold: 120, recoverable: live.status !== 'active',
-        } });
+      excludeCandidate(candidate, run, live, 'no_description', {
+        description_chars: description.length, threshold: 120, recoverable: live.status !== 'active',
+      });
       continue;
     }
     if (candidate.location_eligibility === 'ineligible') {
-      output.exclude.push({ candidate_id: candidate.candidate_id, run_id: run.run_id, company: candidate.company ?? '',
-        title: candidate.title ?? candidate.role ?? '', reason: 'region', detail: {
-          location: candidate.location ?? null, location_eligibility: candidate.location_eligibility,
-          location_eligibility_code: candidate.location_eligibility_code ?? null,
-        } });
+      excludeCandidate(candidate, run, live, 'region', {
+        location: candidate.location ?? null, location_eligibility: candidate.location_eligibility,
+        location_eligibility_code: candidate.location_eligibility_code ?? null,
+      });
       continue;
     }
-    let prescreen = null;
-    if (profile) {
-      try {
-        prescreen = prescreenJob({ title: candidate.title ?? candidate.role ?? '', description,
-          location: candidate.location ?? '', country: candidate.country }, profile);
-      } catch (error) {
-        warning(warnings, `Could not prescreen ${candidate.candidate_id} from ${run.dir}: ${error.message}`);
-      }
+    let prescreen;
+    try {
+      prescreen = prescreenJob({ title: candidate.title ?? candidate.role ?? '', description,
+        location: candidate.location ?? '', country: candidate.country }, profile, { experiencePolicy });
+    } catch (error) {
+      throw new Error(`Could not prescreen ${candidate.candidate_id} from ${run.dir}: ${error.message}`);
     }
     if (prescreen?.blockers?.length) {
-      output.exclude.push({ candidate_id: candidate.candidate_id, run_id: run.run_id, company: candidate.company ?? '',
-        title: candidate.title ?? candidate.role ?? '', reason: 'prescreen_blocked', detail: { blockers: prescreen.blockers } });
+      excludeCandidate(candidate, run, live, 'prescreen_blocked', { blockers: prescreen.blockers });
       continue;
     }
-    const possibleDuplicates = buildPossibleDuplicates(candidate, allRunCandidates, tracker.rows, tracked, mappings,
-      discardedComponents(mappings.discardedEdges), reportIndex, reportInfo);
+    const possibleDuplicates = buildPossibleDuplicates(candidate, duplicateIndexes, tracked, mappings, strongIds,
+      trackedMatch, weakTrackedMatch, discarded);
     const queueRecord = { candidate_id: candidate.candidate_id, run_id: run.run_id, run_dir: run.dir,
       company: candidate.company ?? '', title: candidate.title ?? candidate.role ?? '', location: candidate.location ?? null,
       url: candidate.url ?? null, description_chars: description.length, description_sha256: sha256(Buffer.from(description, 'utf8')),
       prescreen, liveness: live, possible_duplicates: possibleDuplicates };
+    let queuedRecord = queueRecord;
     if (live.status === 'active') output.include.push(queueRecord);
-    else output.needs_liveness.push({ ...queueRecord, reason: 'No fresh active liveness evidence; confirm the listing before evaluation' });
+    else {
+      queuedRecord = { ...queueRecord, reason: 'No fresh active liveness evidence; confirm the listing before evaluation' };
+      output.needs_liveness.push(queuedRecord);
+    }
+    queued.push({ index: queued.length, candidate, entry: queuedRecord,
+      urls: duplicateIndexes.urlsByCandidate.get(candidate) ?? urlsFor(candidate) });
   }
+
+  addQueuedDuplicateEvidence(queued);
 
   const excludeByReason = {};
   for (const item of output.exclude) excludeByReason[item.reason] = (excludeByReason[item.reason] ?? 0) + 1;
@@ -528,7 +718,7 @@ function parseArgs(args) {
       else if (arg === '--liveness') options.livenessDirs.push(resolve(value));
       else if (arg === '--root') options.root = resolve(value);
       else if (arg === '--profile') options.profilePath = resolve(value);
-      else options.out = value;
+      else options.out = resolve(value);
     } else if (arg === '--json') options.json = true;
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -539,12 +729,14 @@ function parseArgs(args) {
 function main() {
   try {
     const options = parseArgs(process.argv.slice(2));
+    if (options.out) {
+      assertOutputSafe(options.out, options.runDirs, options.livenessDirs, options.root);
+      if (existsSync(options.out)) throw new Error(`Refusing --out because destination already exists: ${options.out}`);
+      if (!existsSync(dirname(options.out))) throw new Error(`Output parent directory does not exist: ${dirname(options.out)}`);
+    }
     const result = buildEvalQueue(options);
     if (options.out) {
-      const outPath = resolve(options.root, options.out);
-      assertOutputSafe(outPath, loadRuns(options.runDirs), options.root);
-      if (!existsSync(dirname(outPath))) throw new Error(`Output parent directory does not exist: ${dirname(outPath)}`);
-      writeFileSync(outPath, `${JSON.stringify(result, null, 2)}\n`, { encoding: 'utf8', flag: 'w' });
+      writeFileSync(options.out, `${JSON.stringify(result, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
     }
     if (options.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     else if (!options.out) {
