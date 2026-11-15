@@ -140,6 +140,7 @@ const SYSTEM_PATHS = [
   'shortlist.mjs',
   'tracker-identity.mjs',
   'worklist.mjs',
+  'enrich-run.mjs',
   'prescreen.mjs',
   'lib/operational-cli.mjs',
   'generate-pdf.mjs',
