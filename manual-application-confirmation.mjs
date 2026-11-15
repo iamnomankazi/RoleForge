@@ -112,9 +112,16 @@ function resolveTarget(rows, company, role) {
 
 function reportNumbers(value) {
   const numbers = new Set();
-  const text = String(value ?? '');
-  for (const match of text.matchAll(/\[(\d+)\]/g)) numbers.add(Number(match[1]));
-  for (const match of text.matchAll(/(?:^|[\\/])(\d{1,9})(?:[-_.]|$)/g)) numbers.add(Number(match[1]));
+  for (const match of String(value ?? '').matchAll(/\[([^\]]*)\]\(([^)]+)\)/g)) {
+    const label = /^\d+$/.test(match[1].trim()) ? Number(match[1].trim()) : null;
+    const target = match[2].trim().replace(/^<|>$/g, '');
+    const file = basename(target.split(/[?#]/)[0]);
+    const leading = file.match(/^(\d+)(?:[-_.]|$)/);
+    const number = leading && /\.md(?:[?#].*)?$/i.test(target) ? Number(leading[1]) : null;
+    // Conflicting labels and filenames must never select a row for mutation.
+    if (label != null && number != null && label !== number) return [];
+    if (label != null || number != null) numbers.add(label ?? number);
+  }
   return [...numbers];
 }
 
@@ -387,7 +394,10 @@ if (isMain) {
       console.log(`Identity siblings: ${siblings}${blocked}`);
     }
     if (options.json) console.log(JSON.stringify(result, null, 2));
-    else {
+    else if (result.identityConflict) {
+      const blockers = result.blockingSiblings.map((row) => `#${row.num} (${row.status})`).join(', ');
+      console.log(`Identity conflict: #${result.num} ${result.company} — ${result.role} remains ${result.newStatus}; confirmation blocked by sibling(s) ${blockers}`);
+    } else {
       const verb = result.created ? 'created and marked' : result.changed ? 'marked' : 'already recorded as';
       console.log(`✅ #${result.num} ${result.company} — ${result.role}: ${verb} Applied (${result.date})`);
     }

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import {
   MANUAL_SUBMISSION_SOURCE,
@@ -168,6 +170,63 @@ test('--row and --report select exact existing tracker rows', async () => {
   }
 });
 
+test('--report ignores numeric URL directories and selects the actual linked report', async () => {
+  const fx = fixture(
+    '| 7 | 2026-07-20 | Example Oy | Fictional Archive Role | N/A | Evaluated |  | [99](https://reports.example.test/12-archive/099-fictional.md) |  |\n'
+    + '| 8 | 2026-07-20 | Acme GmbH | Fictional Current Role | N/A | Evaluated |  | [12](reports/012-fictional.md) |  |\n',
+  );
+  try {
+    const result = await confirmManualApplication({ report: 12, userConfirmed: true }, { trackerPath: fx.trackerPath });
+    assert.equal(result.num, 8);
+    const [archive, current] = rowsAt(fx.trackerPath);
+    assert.equal(archive.status, 'Evaluated');
+    assert.equal(archive.notes, '');
+    assert.equal(current.status, 'Applied');
+    const byBasename = await confirmManualApplication({ report: 99, userConfirmed: true, dryRun: true }, { trackerPath: fx.trackerPath });
+    assert.equal(byBasename.num, 7);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('--report rejects conflicting link labels and basenames without writing', async () => {
+  const fx = fixture('| 7 | 2026-07-20 | Example Oy | Fictional Role | N/A | Evaluated |  | [12](reports/099-fictional.md) |  |\n');
+  try {
+    const before = readFileSync(fx.trackerPath, 'utf8');
+    for (const report of [12, 99]) {
+      await assert.rejects(
+        confirmManualApplication({ report, userConfirmed: true }, { trackerPath: fx.trackerPath }),
+        (error) => error instanceof ManualApplicationError && error.code === 'not-found',
+      );
+      assert.equal(readFileSync(fx.trackerPath, 'utf8'), before);
+    }
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('--report accepts either a numeric link label or the report basename alone', async () => {
+  for (const reportLink of [
+    '[12](https://reports.example.test/99-archive/fictional.md)',
+    '[Fictional report](https://reports.example.test/99-archive/012-fictional.md?version=99#99)',
+  ]) {
+    const fx = fixture(`| 7 | 2026-07-20 | Example Oy | Fictional Role | N/A | Evaluated |  | ${reportLink} |  |\n`);
+    try {
+      const before = readFileSync(fx.trackerPath, 'utf8');
+      await assert.rejects(
+        confirmManualApplication({ report: 99, userConfirmed: true }, { trackerPath: fx.trackerPath }),
+        (error) => error instanceof ManualApplicationError && error.code === 'not-found',
+      );
+      assert.equal(readFileSync(fx.trackerPath, 'utf8'), before);
+      const result = await confirmManualApplication({ report: 12, userConfirmed: true }, { trackerPath: fx.trackerPath });
+      assert.equal(result.num, 7);
+      assert.equal(rowsAt(fx.trackerPath)[0].status, 'Applied');
+    } finally {
+      fx.cleanup();
+    }
+  }
+});
+
 test('explicit selectors accept matching optional company and role and reject mismatches', async () => {
   const fx = fixture('| 8 | 2026-07-20 | Example Oy | Backend Engineer | N/A | Evaluated |  |  |  |\n');
   try {
@@ -218,6 +277,32 @@ test('an already Applied identity sibling makes confirmation idempotent and is l
     assert.equal(result.identityConflict, true);
     assert.deepEqual(result.blockingSiblings, [{ num: 10, status: 'Applied' }]);
     assert.deepEqual(result.siblings, [{ num: 10, status: 'Applied' }]);
+    assert.equal(readFileSync(fx.trackerPath, 'utf8'), before);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('CLI identity conflicts name every blocker and the target real status', () => {
+  const id = `cand_v1_${'5'.repeat(64)}`;
+  const fx = fixture(
+    `| 10 | 2026-07-20 | Example Oy | Original Fictional Role | N/A | Applied |  |  | Canonical candidate ID: ${id} |\n`
+    + `| 11 | 2026-07-21 | Example Oy | Renamed Fictional Role | N/A | Evaluated |  |  | Canonical candidate ID: ${id} |\n`
+    + `| 12 | 2026-07-22 | Example Oy | Third Fictional Role | N/A | Interview |  |  | Canonical candidate ID: ${id} |\n`,
+  );
+  try {
+    const before = readFileSync(fx.trackerPath, 'utf8');
+    const result = spawnSync(process.execPath, [
+      fileURLToPath(new URL('../manual-application-confirmation.mjs', import.meta.url)),
+      '--row', '11', '--user-confirmed',
+    ], {
+      cwd: join(fx.trackerPath, '..'),
+      encoding: 'utf8',
+      env: { ...process.env, CAREER_OPS_TRACKER: fx.trackerPath },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Identity conflict: #11 Example Oy .*Renamed Fictional Role remains Evaluated; confirmation blocked by sibling\(s\) #10 \(Applied\), #12 \(Interview\)/);
+    assert.doesNotMatch(result.stdout, /already recorded as Applied/);
     assert.equal(readFileSync(fx.trackerPath, 'utf8'), before);
   } finally {
     fx.cleanup();

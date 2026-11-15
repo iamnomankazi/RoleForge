@@ -12,11 +12,11 @@ const HEADER = [
   '|---|---|---|---|---|---|---|---|---|',
 ].join('\n');
 
-function fixture(rows) {
+function fixture(rows, { rootLevel = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'career-ops-dedup-candidate-id-'));
   const dataDir = join(root, 'data');
   mkdirSync(dataDir, { recursive: true });
-  const trackerPath = join(dataDir, 'applications.md');
+  const trackerPath = join(rootLevel ? root : dataDir, 'applications.md');
   writeFileSync(trackerPath, `${HEADER}\n${rows.join('\n')}\n`);
   return {
     root,
@@ -33,11 +33,11 @@ function id(letter) {
   return `cand_v1_${letter.repeat(64)}`;
 }
 
-function run(fx, args = []) {
+function run(fx, args = [], env = {}) {
   return spawnSync(process.execPath, [SCRIPT, ...args], {
     cwd: fx.root,
     encoding: 'utf8',
-    env: { ...process.env, CAREER_OPS_TRACKER: fx.trackerPath },
+    env: { ...process.env, CAREER_OPS_TRACKER: fx.trackerPath, CAREER_OPS_FOLLOWUPS: '', ...env },
   });
 }
 
@@ -151,6 +151,43 @@ test('follow-up table rows and pins referencing a removed row abort even in dry 
     assert.equal(existsSync(`${fx.trackerPath}.bak`), false);
   } finally {
     fx.cleanup();
+  }
+});
+
+test('root tracker dedup checks all follow-up locations before any writes', () => {
+  for (const location of ['beside', 'data', 'override']) {
+    for (const entry of [
+      '| 1 | 31 | 2026-10-02 | Example Oy | Fictional Role | email | - | fictional follow-up |',
+      '- next #31 2026-10-10 (set 2026-10-02)',
+    ]) {
+      const candidate = id('d');
+      const fx = fixture([
+        trackerRow({ num: 30, role: 'Original Fictional Role', status: 'Applied', notes: `Canonical candidate ID: ${candidate}` }),
+        trackerRow({ num: 31, role: 'Updated Fictional Role', notes: `Canonical candidate ID: ${candidate}` }),
+      ], { rootLevel: true });
+      try {
+        const override = join(fx.root, 'custom-follow-ups.md');
+        const followups = location === 'override' ? override
+          : join(fx.root, ...(location === 'data' ? ['data'] : []), 'follow-ups.md');
+        writeFileSync(followups, `${entry}\n`);
+        // An empty override must not hide references in either default location.
+        if (location !== 'override') writeFileSync(override, '# Fictional follow-ups\n');
+        const before = readFileSync(fx.trackerPath, 'utf8');
+        for (const args of [['--by-candidate-id'], ['--by-candidate-id', '--dry-run']]) {
+          const result = run(fx, args, { CAREER_OPS_FOLLOWUPS: override });
+          assert.equal(result.status, 1, `${location}: ${result.stdout}\n${result.stderr}`);
+          assert.match(result.stderr, /Follow-up entries reference rows selected for removal/);
+          assert.ok(result.stderr.includes(followups), result.stderr);
+          assert.match(result.stderr, /app #31/);
+          assert.match(result.stderr, /Aborting without writing/);
+          assert.equal(readFileSync(fx.trackerPath, 'utf8'), before);
+          assert.equal(readFileSync(followups, 'utf8'), `${entry}\n`);
+          assert.equal(existsSync(`${fx.trackerPath}.bak`), false);
+        }
+      } finally {
+        fx.cleanup();
+      }
+    }
   }
 });
 

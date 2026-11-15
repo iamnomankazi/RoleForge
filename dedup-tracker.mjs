@@ -12,7 +12,7 @@
 
 import './lib/operational-cli.mjs';
 import { readFileSync, copyFileSync, existsSync, mkdirSync } from 'fs';
-import { basename, join, dirname } from 'path';
+import { basename, join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { rebuildRow, trackerLockDirFor, acquireTrackerLock, writeFileAtomic, loadCanonicalStates, resolveCanonicalState } from './tracker-utils.mjs';
 import { resolveColumns, parseTrackerRow, normalizeVia } from './tracker-parse.mjs';
@@ -241,11 +241,16 @@ function runCandidateIdDedup(entries, lines, colmap) {
   if (!plans.length && !skipped.length) console.log('No candidate-ID duplicate groups found');
 
   const removedNumbers = new Set(plans.flatMap((plan) => plan.removed.map((row) => row.num)));
-  const followupsPath = join(dirname(APPS_FILE), 'follow-ups.md');
-  const references = followupReferences(followupsPath, removedNumbers);
+  const followupsPaths = new Set([
+    join(dirname(APPS_FILE), 'follow-ups.md'),
+    join(projectRoot, 'data', 'follow-ups.md'),
+    process.env.CAREER_OPS_FOLLOWUPS,
+  ].filter(Boolean).map((file) => resolve(file)));
+  const references = [...followupsPaths].flatMap((followupsPath) =>
+    followupReferences(followupsPath, removedNumbers).map((reference) => ({ ...reference, followupsPath })));
   if (references.length) {
-    console.error(`Follow-up entries reference rows selected for removal in ${followupsPath}:`);
-    for (const reference of references) console.error(`  line ${reference.line} (app #${reference.appNum}): ${reference.text}`);
+    console.error('Follow-up entries reference rows selected for removal:');
+    for (const reference of references) console.error(`  ${reference.followupsPath}: line ${reference.line} (app #${reference.appNum}): ${reference.text}`);
     console.error('Aborting without writing the tracker.');
     process.exitCode = 1;
     return;
