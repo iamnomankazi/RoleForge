@@ -27,8 +27,10 @@ function fakePage(snapshots, { finalUrl = WORKDAY_URL, status = 200 } = {}) {
     async evaluate(fn) {
       if (fn.toString().includes('document.body?.innerText')) {
         assert.equal(controlReads, 0, 'collect controls only after the body settles');
-        snapshot = snapshots[Math.min(bodyReads, snapshots.length - 1)];
+        const nextSnapshot = snapshots[Math.min(bodyReads, snapshots.length - 1)];
         bodyReads += 1;
+        if (nextSnapshot instanceof Error) throw nextSnapshot;
+        snapshot = nextSnapshot;
         return snapshot.bodyText;
       }
       assert.match(fn.toString(), /document\.querySelectorAll/);
@@ -160,4 +162,67 @@ test('rendered error text after Loading is classified after the bounded wait', a
   assert.equal(result.result, 'expired');
   assert.equal(result.code, 'expired_body');
   assert.deepEqual(page.waits, [2_000, 500, 500]);
+});
+
+for (const status of [404, 410]) {
+  test(`HTTP ${status} is classified before any render reads or waits`, async () => {
+    const page = fakePage([
+      { bodyText: "The page you are looking for doesn't exist." },
+      new Error('Execution context was destroyed'),
+    ], { status });
+
+    const result = await checkUrlLiveness(page, WORKDAY_URL);
+
+    assert.deepEqual(result, { result: 'expired', code: 'http_gone', reason: `HTTP ${status}` });
+    assert.deepEqual(page.waits, []);
+    assert.equal(page.bodyReads, 0);
+    assert.equal(page.controlReads, 0);
+  });
+}
+
+for (const startsLoading of [false, true]) {
+  test(`polling failure preserves the last successful body${startsLoading ? ' after Loading' : ''}`, async () => {
+    const bodyText = "The page you are looking for doesn't exist.";
+    const page = fakePage([
+      ...(startsLoading ? [{ bodyText: LOADING }] : []),
+      { bodyText },
+      new Error('Execution context was destroyed'),
+    ]);
+
+    const result = await checkUrlLiveness(page, WORKDAY_URL);
+
+    assert.deepEqual(result, classifyLiveness({ status: 200, finalUrl: WORKDAY_URL, bodyText }));
+    assert.equal(result.result, 'expired');
+    assert.equal(result.code, 'expired_body');
+    assert.deepEqual(page.waits, startsLoading ? [2_000, 500, 500] : [2_000, 500]);
+    assert.equal(page.bodyReads, startsLoading ? 3 : 2);
+    assert.equal(page.controlReads, 0);
+  });
+}
+
+test('polling failure with only Loading evidence remains uncertain', async () => {
+  const page = fakePage([
+    { bodyText: LOADING },
+    new Error('Execution context was destroyed'),
+  ]);
+
+  const result = await checkUrlLiveness(page, WORKDAY_URL);
+
+  assert.deepEqual(result, classifyLiveness({ status: 200, finalUrl: WORKDAY_URL, bodyText: LOADING }));
+  assert.equal(result.result, 'uncertain');
+  assert.equal(result.code, 'insufficient_content');
+});
+
+test('initial body read failure still returns navigation_error', async () => {
+  const page = fakePage([new Error('Execution context was destroyed')]);
+
+  const result = await checkUrlLiveness(page, WORKDAY_URL);
+
+  assert.deepEqual(result, {
+    result: 'uncertain',
+    code: 'navigation_error',
+    reason: 'navigation error: Execution context was destroyed',
+  });
+  assert.equal(page.bodyReads, 1);
+  assert.equal(page.controlReads, 0);
 });

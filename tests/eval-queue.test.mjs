@@ -498,6 +498,75 @@ test('country variants normalize own city and country tokens and use token simil
   assert.ok(result.exclude[0].detail.similarity < 1);
 });
 
+test('similar descriptions keep distinct same-country or unknown-country requisitions with weak evidence', (t) => {
+  const cases = [
+    [{ location: 'Helsinki, Finland' }, { location: 'Helsinki, Finland' }],
+    [{ country: ' fi ', location: 'Helsinki' }, { country: 'FINLAND', location: 'Espoo' }],
+    [{ location: 'Berlin, DE' }, { location: 'Germany' }],
+    [{ location: 'Remote' }, { location: 'Remote' }],
+    [{ location: 'Helsinki' }, { location: 'Berlin' }],
+    [{ location: 'Finland' }, { location: 'Unknown' }],
+    // Present country metadata takes precedence, even when it is unrecognized.
+    [{ country: 'ZZ', location: 'Finland' }, { location: 'Germany' }],
+    [{ country: 'FI', location: 'Germany' }, { location: 'Finland' }],
+  ];
+  const common = Array.from({ length: 200 }, (_, index) => `word${index}`).join(' ');
+  for (const [left, right] of cases) {
+    const f = fixture(); t.after(f.cleanup);
+    const ids = [cid('1'), cid('2')];
+    const run = putRun(f, 'separate-requisitions', [left, right].map((overrides, index) => candidate(ids[index], {
+      title: 'Software Engineer', description: `${common} Requisition ${1001 + index}`, ...overrides,
+    })));
+    const result = queue(f, [run]);
+    assert.deepEqual(result.include.map((entry) => entry.candidate_id), ids, JSON.stringify([left, right]));
+    assert.deepEqual(result.exclude, []);
+    for (const [index, entry] of result.include.entries()) {
+      assert.equal('variant_locations' in entry, false);
+      assert.ok(entry.possible_duplicates.some((evidence) => evidence.reason === 'company_role_match'
+        && evidence.candidate_id === ids[1 - index]));
+    }
+  }
+});
+
+test('Finland preference recognizes country metadata and location country codes', (t) => {
+  const cases = [
+    [{ location: 'Germany' }, { location: 'Helsinki', country: 'FI' }],
+    [{ location: 'Germany' }, { location: 'Helsinki', country: ' finland ' }],
+    [{ location: 'Berlin, DE' }, { location: 'Helsinki, fi' }],
+    [{ location: 'Germany' }, { location: 'FI' }],
+    // Country metadata overrides misleading location text for the preference too.
+    [{ location: 'Finland', country: 'DE' }, { location: 'Germany', country: 'FI' }],
+  ];
+  for (const [left, right] of cases) {
+    const f = fixture(); t.after(f.cleanup);
+    const german = cid('3'); const finnish = cid('4');
+    const run = putRun(f, 'metadata-preference', [candidate(german, {
+      description: variantDescription('Remote'), ...left,
+    }), candidate(finnish, { description: variantDescription('Remote'), ...right })]);
+    const result = queue(f, [run]);
+    assert.deepEqual(result.include.map((entry) => entry.candidate_id), [finnish], JSON.stringify([left, right]));
+    assert.deepEqual(result.include[0].variant_locations, [right.location, left.location]);
+    assert.equal(result.exclude[0].candidate_id, german);
+    assert.equal(result.exclude[0].detail.rule, 'country_variant');
+    assert.equal(result.exclude[0].detail.kept_candidate_id, finnish);
+  }
+});
+
+test('a country variant group cannot hide a second requisition from the same country', (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const ids = ['5', '6', '7'].map(cid);
+  const run = putRun(f, 'repeated-country', ['Finland', 'Germany', 'DE'].map((location, index) => candidate(ids[index], {
+    location, description: variantDescription('Remote'),
+  })));
+  const result = queue(f, [run]);
+  assert.deepEqual(result.include.map((entry) => entry.candidate_id), [ids[0], ids[2]]);
+  assert.deepEqual(result.include[0].variant_locations, ['Finland', 'Germany']);
+  assert.equal(result.exclude.length, 1);
+  assert.equal(result.exclude[0].candidate_id, ids[1]);
+  assert.ok(result.include[1].possible_duplicates.some((evidence) => evidence.reason === 'company_role_match'
+    && evidence.candidate_id === ids[0]));
+});
+
 test('country variants without Finland use newest run, then run index, then candidate order', (t) => {
   const f = fixture(); t.after(f.cleanup);
   const ids = ['7', '8', '9', 'a'].map(cid);

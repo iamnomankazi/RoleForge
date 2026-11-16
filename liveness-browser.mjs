@@ -142,6 +142,10 @@ export async function checkUrlLiveness(page, url, {
   try {
     const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAVIGATE_TIMEOUT_MS });
     const status = response?.status() ?? 0;
+    // Gone responses are definitive even if the page cannot render or be read.
+    if (status === 404 || status === 410) {
+      return classifyLiveness({ status });
+    }
 
     // Give SPAs (Ashby, Lever, Workday) time to hydrate. extraSettleMs adds slack
     // for the headed retry, where a JS anti-bot interstitial needs a moment to clear.
@@ -164,9 +168,15 @@ export async function checkUrlLiveness(page, url, {
       || (isClientRenderedAts && bodyText.trim().length < RENDER_MIN_CONTENT_CHARS)
     )) {
       const delayMs = Math.min(stepMs, maxMs - waitedMs);
-      await page.waitForTimeout(delayMs);
-      waitedMs += delayMs;
-      bodyText = await page.evaluate(() => document.body?.innerText ?? '');
+      try {
+        await page.waitForTimeout(delayMs);
+        waitedMs += delayMs;
+        bodyText = await page.evaluate(() => document.body?.innerText ?? '');
+      } catch {
+        // Polling is optional: retain the last successful body read even when
+        // the execution context is gone and controls can no longer be collected.
+        return classifyLiveness({ status, finalUrl: page.url(), bodyText });
+      }
     }
     const finalUrl = page.url();
     const applyControls = await page.evaluate(() => {

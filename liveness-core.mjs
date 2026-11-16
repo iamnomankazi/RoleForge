@@ -26,7 +26,9 @@ const HARD_EXPIRED_PATTERNS = [
 ];
 
 const PAGE_DOES_NOT_EXIST_PATTERN = /the page you are looking for does(?:n['’]t| not) exist/i;
-const WORKDAY_CHROME_PATTERNS = [/\bworkday\b/i];
+// Closure wording inside a conditional/process clause is not a closure notice.
+// Keep this local to the clause so a separate definitive notice still wins.
+const PROCESS_CLAUSE_PREFIX_PATTERN = /\b(?:kun|jos|mikäli|jälkeen|after|once|when|if|nach\s+ablauf)\b[^.!?;,\n]*$/i;
 
 const LISTING_PAGE_PATTERNS = [
   /\d+\s+jobs?\s+found/i,
@@ -57,7 +59,6 @@ const EXPIRED_URL_PATTERNS = [
 
 const APPLY_PATTERNS = [
   /\bapply\b/i,
-  /^hae$/i,
   /\bhae\s+(?:paikkaa|työpaikkaa|helposti|nyt)\b/i,
   /\bsiirry hakemaan\b/i,
   /\bansök\b/i,
@@ -84,22 +85,29 @@ function firstMatch(patterns, text = '') {
 }
 
 function hasApplyControl(controls = []) {
-  return controls.some((control) => APPLY_PATTERNS.some((pattern) => pattern.test(control)));
+  return controls.some((control) => {
+    // The browser joins text, aria-label, and title; equivalent sources repeat.
+    const label = control.trim().replace(/\s+/g, ' ').replace(/^(.+?)(?:\s+\1)+$/iu, '$1');
+    return APPLY_PATTERNS.some((pattern) => pattern.test(label));
+  });
+}
+
+function firstDefinitiveClosure(bodyText) {
+  return HARD_EXPIRED_PATTERNS.find((pattern) => {
+    for (const match of bodyText.matchAll(new RegExp(pattern.source, 'gi'))) {
+      if (!PROCESS_CLAUSE_PREFIX_PATTERN.test(bodyText.slice(0, match.index))) return true;
+    }
+    return false;
+  });
 }
 
 function isWorkdayHost(finalUrl) {
   try {
-    return /(?:^|\.)myworkdayjobs\.com$/i.test(new URL(finalUrl).hostname);
+    const hostname = new URL(finalUrl).hostname.replace(/\.$/, '');
+    return /(?:^|\.)(?:myworkdayjobs|myworkdaysite)\.com$/i.test(hostname);
   } catch {
     return false;
   }
-}
-
-function isOnlyPageNotFoundContent(bodyText) {
-  return bodyText
-    .replace(new RegExp(PAGE_DOES_NOT_EXIST_PATTERN.source, 'gi'), '')
-    .replace(/[\s.!?…]+/g, '')
-    .length === 0;
 }
 
 export function classifyLiveness({ status = 0, finalUrl = '', bodyText = '', applyControls = [] } = {}) {
@@ -135,10 +143,8 @@ export function classifyLiveness({ status = 0, finalUrl = '', bodyText = '', app
   }
 
   const pageDoesNotExist = PAGE_DOES_NOT_EXIST_PATTERN.test(bodyText)
-    && (isWorkdayHost(finalUrl)
-      || firstMatch(WORKDAY_CHROME_PATTERNS, bodyText)
-      || isOnlyPageNotFoundContent(bodyText));
-  const expiredBody = firstMatch(HARD_EXPIRED_PATTERNS, bodyText)
+    && isWorkdayHost(finalUrl);
+  const expiredBody = firstDefinitiveClosure(bodyText)
     || (pageDoesNotExist ? PAGE_DOES_NOT_EXIST_PATTERN : null);
   if (expiredBody) {
     return { result: 'expired', code: 'expired_body', reason: `pattern matched: ${expiredBody.source}` };

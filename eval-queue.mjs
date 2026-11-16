@@ -565,16 +565,30 @@ const variantWords = (value) => String(value ?? '').normalize('NFKC').toLowerCas
   .match(/[\p{L}\p{M}\p{N}]+/gu) ?? [];
 // EU/EEA countries, plus UK/US names and common aliases. Match whole names,
 // rather than removing individual words such as "united" from every posting.
-const VARIANT_COUNTRY_NAMES = [
-  'Austria', 'Belgium', 'Bulgaria', 'Croatia', 'Cyprus', 'Czechia', 'Czech Republic',
-  'Denmark', 'Estonia', 'Finland', 'France', 'Germany', 'Greece', 'Hungary', 'Ireland',
-  'Italy', 'Latvia', 'Lithuania', 'Luxembourg', 'Malta', 'Netherlands', 'Poland',
-  'Portugal', 'Romania', 'Slovakia', 'Slovenia', 'Spain', 'Sweden', 'Iceland',
-  'Liechtenstein', 'Norway', 'United Kingdom', 'Great Britain', 'Britain', 'UK', 'U.K.',
-  'United States of America', 'United States', 'USA', 'US', 'U.S.', 'remote',
-];
+const VARIANT_COUNTRIES = {
+  AT: ['Austria'], BE: ['Belgium'], BG: ['Bulgaria'], HR: ['Croatia'], CY: ['Cyprus'],
+  CZ: ['Czechia', 'Czech Republic'], DK: ['Denmark'], EE: ['Estonia'], FI: ['Finland'],
+  FR: ['France'], DE: ['Germany'], GR: ['Greece'], HU: ['Hungary'], IE: ['Ireland'],
+  IT: ['Italy'], LV: ['Latvia'], LT: ['Lithuania'], LU: ['Luxembourg'], MT: ['Malta'],
+  NL: ['Netherlands'], PL: ['Poland'], PT: ['Portugal'], RO: ['Romania'], SK: ['Slovakia'],
+  SI: ['Slovenia'], ES: ['Spain'], SE: ['Sweden'], IS: ['Iceland'], LI: ['Liechtenstein'],
+  NO: ['Norway'], GB: ['United Kingdom', 'Great Britain', 'Britain', 'UK', 'U.K.'],
+  US: ['United States of America', 'United States', 'USA', 'US', 'U.S.'],
+};
+const VARIANT_COUNTRY_NAMES = [...Object.values(VARIANT_COUNTRIES).flat(), 'remote'];
 const VARIANT_COUNTRY_PATTERN = new RegExp(`(^| )(?:${VARIANT_COUNTRY_NAMES
   .map((name) => variantWords(name).join(' ')).sort((a, b) => b.length - a.length).join('|')})(?= |$)`, 'g');
+const VARIANT_COUNTRY_MATCHERS = Object.entries(VARIANT_COUNTRIES).map(([code, names]) => [code,
+  new RegExp(`(?:^| )(?:${[code, ...names].map((name) => variantWords(name).join(' ')).join('|')})(?= |$)`),
+]);
+
+function countryVariantCountry(candidate) {
+  const country = String(candidate.country ?? '').trim();
+  const text = variantWords(country || candidate.location).join(' ');
+  const matches = VARIANT_COUNTRY_MATCHERS.filter(([, pattern]) => pattern.test(text));
+  // Missing, unrecognized or multi-country values cannot justify exclusion.
+  return matches.length === 1 ? matches[0][0] : null;
+}
 
 function countryVariantDescription(candidate) {
   const ownLocationWords = new Set(variantWords(`${candidate.location ?? ''} ${candidate.country ?? ''}`));
@@ -612,24 +626,30 @@ function chooseCountryVariants(strongWinners, prescreenFor) {
     if (items.length < 2) continue;
     const eligible = items.filter((item) => item.liveness.status !== 'expired'
       && item.candidate.location_eligibility !== 'ineligible' && !prescreenFor(item)?.blockers?.length);
-    const inFinland = (item) => variantWords(item.candidate.location).includes('finland');
+    const countries = new Map(eligible.map((item) => [item, countryVariantCountry(item.candidate)]));
+    const inFinland = (item) => countries.get(item) === 'FI';
     eligible.sort((a, b) => Number(inFinland(b)) - Number(inFinland(a))
       || b.run.created_ms - a.run.created_ms || a.runIndex - b.runIndex || a.candidateIndex - b.candidateIndex);
     const groups = [];
     for (const item of eligible) {
+      const country = countries.get(item);
+      if (!country) continue;
       // Compute shingles once; compare only with representatives sharing this key.
       const description = countryVariantDescription(item.candidate);
       let match;
       for (const group of groups) {
+        // A group may contain only one requisition per known country.
+        if (group.countries.has(country)) continue;
         const similarity = countryVariantSimilarity(description, group.description);
         if (similarity >= 0.95) { match = { group, similarity }; break; }
       }
       if (match) {
         const winner = match.group.winner;
         duplicates.set(item, { winner, similarity: match.similarity });
+        match.group.countries.add(country);
         if (!locations.has(winner)) locations.set(winner, [winner.candidate.location ?? null]);
         locations.get(winner).push(item.candidate.location ?? null);
-      } else groups.push({ winner: item, description });
+      } else groups.push({ winner: item, description, countries: new Set([country]) });
     }
   }
   return { duplicates, locations };
@@ -753,7 +773,8 @@ export function buildEvalQueue({ runDirs = [], livenessDirs = [], root = SCRIPT_
       const { candidate, run } = item;
       try {
         prescreens.set(item, prescreenJob({ title: candidate.title ?? candidate.role ?? '',
-          description: String(candidate.description ?? ''), location: candidate.location ?? '', country: candidate.country },
+          description: String(candidate.description ?? ''), location: candidate.location ?? '',
+          country: countryVariantCountry({ country: candidate.country }) ?? candidate.country },
         profile, { experiencePolicy }));
       } catch (error) {
         throw new Error(`Could not prescreen ${candidate.candidate_id} from ${run.dir}: ${error.message}`);
