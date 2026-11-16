@@ -8,13 +8,25 @@ const HARD_EXPIRED_PATTERNS = [
   /this (position|role|job) (is )?no longer/i,
   /this job (listing )?is closed/i,
   /job (listing )?not found/i,
-  /the page you are looking for doesn.t exist/i,
   /applications?\s+(?:(?:have|are|is)\s+)?closed/i,
   /closed on \d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i,
   /closed on (?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d{1,2}/i,
   /diese stelle (ist )?(nicht mehr|bereits) besetzt/i,
+  /haku tähän avoimeen työpaikkaan on päättynyt/i,
+  /haku on päättynyt/i,
+  /hakuaika on päättynyt/i,
+  /ilmoitus on vanhentunut/i,
+  /työpaikkailmoitus ei ole enää voimassa/i,
+  /ansökningstiden har gått ut/i,
+  /annonsen har gått ut/i,
+  /diese stelle ist nicht mehr verfügbar/i,
+  /die stellenanzeige ist abgelaufen/i,
+  /(?:die\s+)?bewerbungsfrist ist abgelaufen/i,
   /offre (expirée|n'est plus disponible)/i,
 ];
+
+const PAGE_DOES_NOT_EXIST_PATTERN = /the page you are looking for does(?:n['’]t| not) exist/i;
+const WORKDAY_CHROME_PATTERNS = [/\bworkday\b/i];
 
 const LISTING_PAGE_PATTERNS = [
   /\d+\s+jobs?\s+found/i,
@@ -45,6 +57,11 @@ const EXPIRED_URL_PATTERNS = [
 
 const APPLY_PATTERNS = [
   /\bapply\b/i,
+  /^hae$/i,
+  /\bhae\s+(?:paikkaa|työpaikkaa|helposti|nyt)\b/i,
+  /\bsiirry hakemaan\b/i,
+  /\bansök\b/i,
+  /\bsök jobbet\b/i,
   /\bsolicitar\b/i,
   /\bbewerben\b/i,
   /\bpostuler\b/i,
@@ -68,6 +85,21 @@ function firstMatch(patterns, text = '') {
 
 function hasApplyControl(controls = []) {
   return controls.some((control) => APPLY_PATTERNS.some((pattern) => pattern.test(control)));
+}
+
+function isWorkdayHost(finalUrl) {
+  try {
+    return /(?:^|\.)myworkdayjobs\.com$/i.test(new URL(finalUrl).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isOnlyPageNotFoundContent(bodyText) {
+  return bodyText
+    .replace(new RegExp(PAGE_DOES_NOT_EXIST_PATTERN.source, 'gi'), '')
+    .replace(/[\s.!?…]+/g, '')
+    .length === 0;
 }
 
 export function classifyLiveness({ status = 0, finalUrl = '', bodyText = '', applyControls = [] } = {}) {
@@ -102,7 +134,12 @@ export function classifyLiveness({ status = 0, finalUrl = '', bodyText = '', app
     return { result: 'expired', code: 'expired_url', reason: `redirect to ${finalUrl}` };
   }
 
-  const expiredBody = firstMatch(HARD_EXPIRED_PATTERNS, bodyText);
+  const pageDoesNotExist = PAGE_DOES_NOT_EXIST_PATTERN.test(bodyText)
+    && (isWorkdayHost(finalUrl)
+      || firstMatch(WORKDAY_CHROME_PATTERNS, bodyText)
+      || isOnlyPageNotFoundContent(bodyText));
+  const expiredBody = firstMatch(HARD_EXPIRED_PATTERNS, bodyText)
+    || (pageDoesNotExist ? PAGE_DOES_NOT_EXIST_PATTERN : null);
   if (expiredBody) {
     return { result: 'expired', code: 'expired_body', reason: `pattern matched: ${expiredBody.source}` };
   }
