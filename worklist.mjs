@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { loadCanonicalStates, resolveCanonicalState, resolveTrackerPath } from './tracker-utils.mjs';
 import {
   companyDuplicateKey, findCandidateRecord, groupTrackerRows, loadIdentityMappings, roleDuplicateKey,
-  loadReportIndex, loadRunCandidates, loadTrackerRows,
+  loadReportIndex, loadRunCandidates, loadTrackerRows, rowIdentity,
 } from './tracker-identity.mjs';
 
 const IN_PROGRESS_STATES = new Set(['not_opened', 'review_required', 'blocked', 'login_required', 'human_action_required']);
@@ -243,6 +243,33 @@ function groupHasClosedRow(group, states) {
   return group.rows.some((row) => CLOSED_STATUSES.has(resolveCanonicalState(row.status, states)));
 }
 
+// Rows that concern the current report's requisition: the report itself, a report linked to it by
+// Supersedes, or an equivalent candidate ID. Returns null when the current report carries no usable
+// candidate ID, so the caller falls back to whole-group status.
+function rowsForCurrentRequisition(group, currentReport, reportIndex, mappings) {
+  const id = currentReport?.candidateId;
+  if (!id || mappings?.ambiguous?.has(id)) return null;
+  const sameId = new Set([id, ...(mappings?.equivalent?.get(id) ?? [])]);
+  const linkedReports = new Set([currentReport.number]);
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const [number, report] of reportIndex) {
+      const edge = report.supersedes;
+      if (edge == null) continue;
+      if (linkedReports.has(number) !== linkedReports.has(edge)) {
+        linkedReports.add(number); linkedReports.add(edge); changed = true;
+      }
+    }
+  }
+  const rows = group.rows.filter((row) => {
+    const identity = rowIdentity(row, reportIndex, mappings);
+    return identity.reports.some((number) => linkedReports.has(number))
+      || [...identity.ids].some((rowId) => sameId.has(rowId)
+        || [...(mappings?.equivalent?.get(rowId) ?? [])].some((other) => sameId.has(other)));
+  });
+  return rows.length ? rows : null;
+}
+
 function serializeGroup(group) {
   return {
     rows: group.rows.map((row) => ({ num: row.num, date: row.date, company: row.company, role: row.role, status: row.status, report: row.report, reportLinks: row.reportLinks ?? [], notes: row.notes })),
@@ -298,9 +325,16 @@ export function buildWorklist({ root = process.cwd(), now = new Date() } = {}) {
       batch: associatedBatches[0] ? { id: associatedBatches[0].batch_id, state: associatedBatches[0].state } : null,
       possibleDuplicates: group.possibleDuplicates,
     };
-    const closed = groupHasClosedRow(group, states);
-    if (group.open && !closed && currentReport?.action === 'apply') openApply.push(base);
-    if (group.open && !closed && currentReport?.action === 'review') review.push(base);
+    // A row can hold an older, closed requisition next to a newer live one (one tracker row per
+    // company+role). Decide openness from the rows of the current report's requisition only.
+    const currentRows = rowsForCurrentRequisition(group, currentReport, reportIndex, mappings);
+    const groupOpen = group.open && !groupHasClosedRow(group, states);
+    const open = currentRows
+      ? currentRows.every((row) => resolveCanonicalState(row.status, states) === 'Evaluated')
+      : groupOpen;
+    if (open && !groupOpen) base.flags = [...new Set([...base.flags, 'closed_older_requisition'])];
+    if (open && currentReport?.action === 'apply') openApply.push(base);
+    if (open && currentReport?.action === 'review') review.push(base);
     if (group.status === 'Applied') {
       const appliedRows = group.rows.filter((row) => resolveCanonicalState(row.status, states) === 'Applied');
       const appliedDate = appliedRows.map((row) => dateValue(row.date)).filter(Boolean).sort().at(-1) ?? null;

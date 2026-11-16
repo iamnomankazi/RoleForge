@@ -247,3 +247,36 @@ test('CLI JSON prints structure, --out writes markdown, and default output write
   assert.equal(outRun.stdout, '');
   assert.ok(readFileSync(join(fixture.root, 'data', 'worklist.md'), 'utf8').startsWith('# Open worklist'));
 });
+
+test('a newer live requisition on a row is not hidden by closed rows of an older requisition', (t) => {
+  const oldId = cid('7'); const newId = cid('8');
+  const build = (extraRows = []) => createWorkTreeFixture({
+    tracker: trackerTable([
+      row(20, '2026-10-12', 'Example Oy', 'Data Engineer', 'Discarded', reportLink(31), `Canonical candidate ID: ${oldId}`),
+      row(21, '2026-11-16', 'Example Oy', 'Data Engineer', 'Evaluated', `${reportLink(30)}; ${reportLink(32)}`,
+        `Canonical candidate ID: ${newId}`),
+      ...extraRows,
+    ]),
+    reports: {
+      '030-old.md': reportMarkdown({ candidateId: oldId, summary: summary('Example Oy', 'Data Engineer') }),
+      '031-old-recheck.md': reportMarkdown({ candidateId: oldId, supersedes: 30, summary: summary('Example Oy', 'Data Engineer') }),
+      '032-new.md': reportMarkdown({ candidateId: newId, summary: summary('Example Oy', 'Data Engineer') }),
+    },
+  });
+  const now = new Date('2026-11-16T12:00:00Z');
+
+  const live = build();
+  t.after(() => live.cleanup());
+  const { openApply, dataProblems } = buildWorklist({ root: live.root, now }).sections;
+  assert.equal(openApply.length, 1);
+  assert.equal(openApply[0].report, '032-new.md');
+  assert.ok(openApply[0].flags.includes('closed_older_requisition'));
+  assert.ok(dataProblems.some((problem) => problem.tracker_rows.includes('#21')));
+
+  // A closed row carrying the current requisition's own ID still hides it.
+  const closed = build([row(22, '2026-11-16', 'Example Oy', 'Data Engineer', 'Discarded', '', `Canonical candidate ID: ${newId}`)]);
+  t.after(() => closed.cleanup());
+  const sections = buildWorklist({ root: closed.root, now }).sections;
+  assert.equal(sections.openApply.length, 0);
+  assert.equal(sections.review.length, 0);
+});
