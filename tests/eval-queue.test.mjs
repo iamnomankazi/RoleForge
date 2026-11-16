@@ -11,6 +11,7 @@ const SCRIPT = resolve(import.meta.dirname, '..', 'eval-queue.mjs');
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const cid = (char) => `cand_v1_${char.repeat(64)}`;
 const description = 'This fictional role builds useful tools with a small team. The work includes designing reliable services, writing clear documentation, and collaborating with colleagues on practical customer problems every week.';
+const variantDescription = (location) => `This synthetic opening is available in ${location}. Our engineering group develops tools that help teams understand and improve their software delivery workflows. You will design reliable services, investigate customer feedback, and work alongside colleagues who value thoughtful communication and practical solutions. We build automated testing systems, maintain clear documentation, and review changes together before releasing improvements. The product connects several data sources through well documented interfaces and provides useful insights into application performance. Engineers collaborate with designers to simplify complex tasks and make the experience accessible to a broad range of users. Daily work includes planning small experiments, measuring outcomes, and sharing findings with the wider organization. We encourage curiosity, independent problem solving, and respectful discussion of technical tradeoffs. You will have time to learn unfamiliar technologies and contribute ideas that improve our development process. The team offers flexible working hours, equipment for a comfortable workspace, and opportunities to participate in internal learning sessions. This position supports colleagues throughout ${location}.`;
 
 function put(file, value) {
   mkdirSync(dirname(file), { recursive: true });
@@ -458,6 +459,127 @@ test('duplicate queue keeps latest run, including source versus enriched IDs lin
   assert.deepEqual(result.exclude.map((entry) => entry.reason), ['duplicate_in_queue', 'duplicate_in_queue']);
   assert.equal(result.exclude[0].detail.kept_run_id, 'latest');
   assert.equal(result.exclude[1].detail.kept_candidate_id, enrichedId);
+});
+
+test('country variants keep Finland across runs and fold company, title punctuation, and country names', (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const countries = ['Germany', 'Finland', 'Denmark', 'Netherlands'];
+  const ids = ['1', '2', '3', '4'].map(cid);
+  const runs = countries.map((location, index) => putRun(f, `variant-${index}`, [candidate(ids[index], {
+    company: index === 1 ? 'SYNTHETIC Aggregator Ltd' : 'Synthetic Aggregator GmbH',
+    title: index === 1 ? ' software   engineer — AI tooling ' : 'Software Engineer - AI Tooling',
+    location, description: `${variantDescription(location)} Collaboration is remote across ${index === 1 ? 'Norway' : 'Sweden'}.`,
+  })], { created: index === 1 ? '2026-11-08T00:00:00Z' : '2026-11-12T00:00:00Z' }));
+  const result = queue(f, runs);
+  assert.deepEqual(result.include.map((entry) => entry.candidate_id), [ids[1]]);
+  assert.deepEqual(result.needs_liveness, []);
+  assert.equal(result.include[0].variant_locations.length, 4);
+  assert.deepEqual([...result.include[0].variant_locations].sort(), [...countries].sort());
+  assert.equal(result.exclude.length, 3);
+  for (const entry of result.exclude) {
+    assert.equal(entry.reason, 'duplicate_in_queue');
+    assert.deepEqual(entry.detail, { rule: 'country_variant', kept_candidate_id: ids[1],
+      kept_run_id: 'variant-1', kept_location: 'Finland', similarity: 1 });
+  }
+});
+
+test('country variants normalize own city and country tokens and use token similarity above the threshold', (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const winner = cid('5'); const other = cid('6');
+  const run = putRun(f, 'near-variants', [
+    candidate(other, { location: 'Berlin, Germany', country: 'DE', description: variantDescription('Berlin, Germany') }),
+    candidate(winner, { location: 'Helsinki, Finland', country: 'FI',
+      description: variantDescription('Helsinki, Finland').replace('practical solutions', 'practical approaches') }),
+  ]);
+  const result = queue(f, [run]);
+  assert.deepEqual(result.include.map((entry) => entry.candidate_id), [winner]);
+  assert.equal(result.exclude[0].detail.rule, 'country_variant');
+  assert.ok(result.exclude[0].detail.similarity >= 0.95);
+  assert.ok(result.exclude[0].detail.similarity < 1);
+});
+
+test('country variants without Finland use newest run, then run index, then candidate order', (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const ids = ['7', '8', '9', 'a'].map(cid);
+  const make = (id, location) => candidate(id, { location, description: variantDescription(location), liveness_status: 'unconfirmed' });
+  const old = putRun(f, 'variant-old', [make(ids[0], 'Germany')], { created: '2026-11-08T00:00:00Z' });
+  const first = putRun(f, 'variant-first', [make(ids[1], 'Denmark'), make(ids[2], 'Netherlands')]);
+  const second = putRun(f, 'variant-second', [make(ids[3], 'Sweden')]);
+  const result = queue(f, [old, first, second]);
+  assert.deepEqual(result.include, []);
+  assert.deepEqual(result.needs_liveness.map((entry) => entry.candidate_id), [ids[1]]);
+  assert.equal(result.needs_liveness[0].variant_locations.length, 4);
+  assert.equal(result.exclude.length, 3);
+  assert.ok(result.exclude.every((entry) => entry.detail.kept_run_id === 'variant-first'
+    && entry.detail.kept_candidate_id === ids[1]));
+});
+
+test('country variant evidence requires a known matching company, exact normalized title, and long similar descriptions', (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const records = [
+    { company: 'First Synthetic', title: 'Software Engineer - AI Tooling' },
+    { company: 'Second Synthetic', title: 'Software Engineer - AI Tooling' },
+    { company: 'First Synthetic', title: 'Software Engineer - AI Tooling Infrastructure' },
+    { company: '?', title: 'Unknown Engineer' }, { company: '?', title: 'Unknown Engineer' },
+    { company: '', title: 'Missing Engineer' }, { company: '', title: 'Missing Engineer' },
+    { company: 'Different Descriptions', title: 'Platform Engineer' },
+    { company: 'Different Descriptions', title: 'Platform Engineer', description:
+      'This fictional position focuses on warehouse inventory and stock management. You will organize deliveries, maintain supplier records, coordinate transport schedules, and prepare monthly purchasing forecasts. '.repeat(5) },
+    { company: 'Short Descriptions', description }, { company: 'Short Descriptions', description },
+    { company: 'Boundary Length', description: 'z'.repeat(299) }, { company: 'Boundary Length', description: 'z'.repeat(299) },
+  ].map((overrides, index) => candidate(`cand_v1_${hash(`country-negative-${index}`)}`, {
+    description: variantDescription('Finland'), ...overrides,
+  }));
+  const run = putRun(f, 'country-negatives', records);
+  const result = queue(f, [run]);
+  assert.equal(result.include.length, records.length);
+  assert.deepEqual(result.exclude, []);
+  for (const index of [7, 8, 9, 10, 11, 12]) {
+    const entry = result.include.find((item) => item.candidate_id === records[index].candidate_id);
+    assert.ok(entry.possible_duplicates.some((item) => item.reason === 'company_role_match'));
+    assert.equal('variant_locations' in entry, false);
+  }
+});
+
+test('country variant winners must pass tracked, batch, liveness, region, and prescreen filters', (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const ids = ['0', '1', '2', '3', '4', '5'].map(cid);
+  setTracker(f, trackerRow(ids[0]));
+  putBatch(f, 'variant-in-progress', [ids[1]], { states: ['form_prepared'] });
+  const run = putRun(f, 'variant-filter-order', ids.map((id, index) => candidate(id, {
+    location: index === 5 ? 'Germany' : 'Finland',
+    description: variantDescription(index === 5 ? 'Germany' : 'Finland'),
+    ...(index === 2 ? { liveness_status: 'expired' } : {}),
+    ...(index === 3 ? { location_eligibility: 'ineligible' } : {}),
+    ...(index === 4 ? { description: `German C1 is required. ${variantDescription('Finland')}` } : {}),
+  })));
+  const result = queue(f, [run]);
+  assert.deepEqual(result.include.map((entry) => entry.candidate_id), [ids[5]]);
+  assert.deepEqual(result.exclude.map((entry) => entry.reason), [
+    'already_tracked', 'in_application_batch', 'liveness_expired', 'region', 'prescreen_blocked',
+  ]);
+  assert.equal('variant_locations' in result.include[0], false);
+});
+
+test('strong-ID selection precedes country preference and retains strong duplicate details', (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const strongId = cid('b'); const variantId = cid('c');
+  const old = putRun(f, 'strong-old-finland', [candidate(strongId, {
+    location: 'Finland', description: variantDescription('Finland'),
+  })], { created: '2026-11-08T00:00:00Z' });
+  const latest = putRun(f, 'strong-new-germany', [candidate(strongId, {
+    location: 'Germany', description: variantDescription('Germany'),
+  })]);
+  const variant = putRun(f, 'strong-variant', [candidate(variantId, {
+    location: 'Denmark', description: variantDescription('Denmark'),
+  })], { created: '2026-11-09T00:00:00Z' });
+  const result = queue(f, [old, latest, variant]);
+  assert.deepEqual(result.include.map((entry) => [entry.candidate_id, entry.run_id]), [[strongId, 'strong-new-germany']]);
+  assert.deepEqual(result.include[0].variant_locations, ['Germany', 'Denmark']);
+  assert.deepEqual(result.exclude[0].detail, {
+    kept_run_id: 'strong-new-germany', kept_run_dir: latest, kept_candidate_id: strongId,
+  });
+  assert.equal(result.exclude[1].detail.rule, 'country_variant');
 });
 
 test('incomplete enriched runs fail closed while non-enriched runs need no enrichment file', (t) => {

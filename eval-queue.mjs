@@ -561,6 +561,80 @@ function applicationBatchMatch(candidateId, batches, strongIds) {
     candidate_states: entries.map(({ batch_id, state }) => ({ batch_id, state })) };
 }
 
+const variantWords = (value) => String(value ?? '').normalize('NFKC').toLowerCase()
+  .match(/[\p{L}\p{M}\p{N}]+/gu) ?? [];
+// EU/EEA countries, plus UK/US names and common aliases. Match whole names,
+// rather than removing individual words such as "united" from every posting.
+const VARIANT_COUNTRY_NAMES = [
+  'Austria', 'Belgium', 'Bulgaria', 'Croatia', 'Cyprus', 'Czechia', 'Czech Republic',
+  'Denmark', 'Estonia', 'Finland', 'France', 'Germany', 'Greece', 'Hungary', 'Ireland',
+  'Italy', 'Latvia', 'Lithuania', 'Luxembourg', 'Malta', 'Netherlands', 'Poland',
+  'Portugal', 'Romania', 'Slovakia', 'Slovenia', 'Spain', 'Sweden', 'Iceland',
+  'Liechtenstein', 'Norway', 'United Kingdom', 'Great Britain', 'Britain', 'UK', 'U.K.',
+  'United States of America', 'United States', 'USA', 'US', 'U.S.', 'remote',
+];
+const VARIANT_COUNTRY_PATTERN = new RegExp(`(^| )(?:${VARIANT_COUNTRY_NAMES
+  .map((name) => variantWords(name).join(' ')).sort((a, b) => b.length - a.length).join('|')})(?= |$)`, 'g');
+
+function countryVariantDescription(candidate) {
+  const ownLocationWords = new Set(variantWords(`${candidate.location ?? ''} ${candidate.country ?? ''}`));
+  const words = variantWords(candidate.description).join(' ').replace(VARIANT_COUNTRY_PATTERN, '$1')
+    .split(' ').filter((word) => word && !ownLocationWords.has(word));
+  const shingles = new Set();
+  for (let index = 0; index + 2 < words.length; index += 1) {
+    shingles.add(words.slice(index, index + 3).join(' '));
+  }
+  return { text: words.join(' '), shingles };
+}
+
+function countryVariantSimilarity(left, right) {
+  if (left.text && left.text === right.text) return 1;
+  if (!left.shingles.size || !right.shingles.size) return 0;
+  let intersection = 0;
+  for (const shingle of left.shingles) if (right.shingles.has(shingle)) intersection += 1;
+  return intersection / (left.shingles.size + right.shingles.size - intersection);
+}
+
+function chooseCountryVariants(strongWinners, prescreenFor) {
+  const byCompanyTitle = new Map();
+  for (const item of strongWinners) {
+    const { candidate } = item;
+    const company = companyDuplicateKey(candidate.company);
+    const title = roleDuplicateKey(candidate.title ?? candidate.role);
+    if (!company || !title || String(candidate.description ?? '').length < 300) continue;
+    const key = `${company}\0${title}`;
+    if (!byCompanyTitle.has(key)) byCompanyTitle.set(key, []);
+    byCompanyTitle.get(key).push(item);
+  }
+  const duplicates = new Map();
+  const locations = new Map();
+  for (const items of byCompanyTitle.values()) {
+    if (items.length < 2) continue;
+    const eligible = items.filter((item) => item.liveness.status !== 'expired'
+      && item.candidate.location_eligibility !== 'ineligible' && !prescreenFor(item)?.blockers?.length);
+    const inFinland = (item) => variantWords(item.candidate.location).includes('finland');
+    eligible.sort((a, b) => Number(inFinland(b)) - Number(inFinland(a))
+      || b.run.created_ms - a.run.created_ms || a.runIndex - b.runIndex || a.candidateIndex - b.candidateIndex);
+    const groups = [];
+    for (const item of eligible) {
+      // Compute shingles once; compare only with representatives sharing this key.
+      const description = countryVariantDescription(item.candidate);
+      let match;
+      for (const group of groups) {
+        const similarity = countryVariantSimilarity(description, group.description);
+        if (similarity >= 0.95) { match = { group, similarity }; break; }
+      }
+      if (match) {
+        const winner = match.group.winner;
+        duplicates.set(item, { winner, similarity: match.similarity });
+        if (!locations.has(winner)) locations.set(winner, [winner.candidate.location ?? null]);
+        locations.get(winner).push(item.candidate.location ?? null);
+      } else groups.push({ winner: item, description });
+    }
+  }
+  return { duplicates, locations };
+}
+
 function addQueuedDuplicateEvidence(queued) {
   const byUrl = new Map();
   const byCompanyRole = new Map();
@@ -673,14 +747,30 @@ export function buildEvalQueue({ runDirs = [], livenessDirs = [], root = SCRIPT_
     if (!strong.size) return `ambiguous:${item.runIndex}:${item.candidateIndex}`;
     return [...strong].sort()[0];
   };
+  const prescreens = new Map();
+  const prescreenFor = (item) => {
+    if (!prescreens.has(item)) {
+      const { candidate, run } = item;
+      try {
+        prescreens.set(item, prescreenJob({ title: candidate.title ?? candidate.role ?? '',
+          description: String(candidate.description ?? ''), location: candidate.location ?? '', country: candidate.country },
+        profile, { experiencePolicy }));
+      } catch (error) {
+        throw new Error(`Could not prescreen ${candidate.candidate_id} from ${run.dir}: ${error.message}`);
+      }
+    }
+    return prescreens.get(item);
+  };
   const winners = new Map();
   for (const item of allCandidates) {
-    if (trackedMatch(item.candidate.candidate_id)) continue;
+    if (trackedMatch(item.candidate.candidate_id)
+      || applicationBatchMatch(item.candidate.candidate_id, applicationBatches, strongIds)?.active) continue;
     const key = groupKeyFor(item);
     const current = winners.get(key);
     if (!current || item.run.created_ms > current.run.created_ms
       || item.run.created_ms === current.run.created_ms && item.runIndex < current.runIndex) winners.set(key, item);
   }
+  const variants = chooseCountryVariants(winners.values(), prescreenFor);
 
   const output = { schema: 'eval-queue/1', generated_at: now instanceof Date ? now.toISOString() : new Date(now).toISOString(),
     inputs: { runs: runs.map(({ dir, run_id, created_at, enriched, manifest_sha256 }) => ({ dir, run_id, created_at, enriched, manifest_sha256 })),
@@ -718,6 +808,15 @@ export function buildEvalQueue({ runDirs = [], livenessDirs = [], root = SCRIPT_
       });
       continue;
     }
+    const variant = variants.duplicates.get(item);
+    if (variant) {
+      excludeCandidate(candidate, run, live, 'duplicate_in_queue', {
+        rule: 'country_variant', kept_candidate_id: variant.winner.candidate.candidate_id,
+        kept_run_id: variant.winner.run.run_id, kept_location: variant.winner.candidate.location ?? null,
+        similarity: variant.similarity,
+      });
+      continue;
+    }
     if (live.status === 'expired') {
       excludeCandidate(candidate, run, live, 'liveness_expired', live);
       continue;
@@ -736,13 +835,7 @@ export function buildEvalQueue({ runDirs = [], livenessDirs = [], root = SCRIPT_
       });
       continue;
     }
-    let prescreen;
-    try {
-      prescreen = prescreenJob({ title: candidate.title ?? candidate.role ?? '', description,
-        location: candidate.location ?? '', country: candidate.country }, profile, { experiencePolicy });
-    } catch (error) {
-      throw new Error(`Could not prescreen ${candidate.candidate_id} from ${run.dir}: ${error.message}`);
-    }
+    const prescreen = prescreenFor(item);
     if (prescreen?.blockers?.length) {
       excludeCandidate(candidate, run, live, 'prescreen_blocked', { blockers: prescreen.blockers });
       continue;
@@ -754,6 +847,7 @@ export function buildEvalQueue({ runDirs = [], livenessDirs = [], root = SCRIPT_
       company: candidate.company ?? '', title: candidate.title ?? candidate.role ?? '', location: candidate.location ?? null,
       url: candidate.url ?? null, description_chars: description.length, description_sha256: sha256(Buffer.from(description, 'utf8')),
       prescreen, liveness: live, possible_duplicates: possibleDuplicates };
+    if (variants.locations.has(item)) queueRecord.variant_locations = variants.locations.get(item);
     let queuedRecord = queueRecord;
     if (live.status === 'active') output.include.push(queueRecord);
     else {
