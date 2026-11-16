@@ -628,7 +628,11 @@ function chooseCountryVariants(strongWinners, prescreenFor) {
       && item.candidate.location_eligibility !== 'ineligible' && !prescreenFor(item)?.blockers?.length);
     const countries = new Map(eligible.map((item) => [item, countryVariantCountry(item.candidate)]));
     const inFinland = (item) => countries.get(item) === 'FI';
-    eligible.sort((a, b) => Number(inFinland(b)) - Number(inFinland(a))
+    const confirmedActive = (item) => item.liveness.status === 'active';
+    // Confirmed-active evidence first, so an unconfirmed variant never suppresses a live one;
+    // Finland is preferred only among otherwise comparable variants.
+    eligible.sort((a, b) => Number(confirmedActive(b)) - Number(confirmedActive(a))
+      || Number(inFinland(b)) - Number(inFinland(a))
       || b.run.created_ms - a.run.created_ms || a.runIndex - b.runIndex || a.candidateIndex - b.candidateIndex);
     const groups = [];
     for (const item of eligible) {

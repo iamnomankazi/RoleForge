@@ -552,6 +552,32 @@ test('Finland preference recognizes country metadata and location country codes'
   }
 });
 
+test('confirmed-active country variant wins over an unconfirmed Finland variant', (t) => {
+  const f = fixture(); t.after(f.cleanup);
+  const finnish = cid('1'); const german = cid('2'); const danish = cid('3');
+  const run = putRun(f, 'liveness-preference', [
+    candidate(finnish, { location: 'Finland', liveness_status: 'unconfirmed', description: variantDescription('Finland') }),
+    candidate(danish, { location: 'Denmark', liveness_status: 'unconfirmed', description: variantDescription('Denmark') }),
+    candidate(german, { location: 'Germany', liveness_status: 'active', description: variantDescription('Germany') }),
+  ]);
+  const result = queue(f, [run]);
+  assert.deepEqual(result.include.map((entry) => entry.candidate_id), [german]);
+  assert.deepEqual(result.needs_liveness, []);
+  assert.deepEqual(result.exclude.map((entry) => [entry.candidate_id, entry.detail.rule, entry.detail.kept_candidate_id]),
+    [[finnish, 'country_variant', german], [danish, 'country_variant', german]]);
+  assert.deepEqual([...result.include[0].variant_locations].sort(), ['Denmark', 'Finland', 'Germany']);
+
+  // With equal (unconfirmed) evidence, Finland is still preferred.
+  const g = fixture(); t.after(g.cleanup);
+  const equal = putRun(g, 'liveness-equal', [
+    candidate(german, { location: 'Germany', liveness_status: 'unconfirmed', description: variantDescription('Germany') }),
+    candidate(finnish, { location: 'Finland', liveness_status: 'unconfirmed', description: variantDescription('Finland') }),
+  ]);
+  const second = queue(g, [equal]);
+  assert.deepEqual(second.needs_liveness.map((entry) => entry.candidate_id), [finnish]);
+  assert.equal(second.exclude[0].detail.kept_candidate_id, finnish);
+});
+
 test('a country variant group cannot hide a second requisition from the same country', (t) => {
   const f = fixture(); t.after(f.cleanup);
   const ids = ['5', '6', '7'].map(cid);
