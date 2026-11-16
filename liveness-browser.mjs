@@ -10,6 +10,10 @@ import { classifyLiveness } from './liveness-core.mjs';
 // Some company career sites (heavy client-side apps) take well over 15 s to reach DOMContentLoaded.
 const NAVIGATE_TIMEOUT_MS = 45_000;
 const HYDRATION_WAIT_MS = 2_000;
+const CLIENT_RENDERED_ATS_HOSTS = ['myworkdayjobs.com', 'myworkdaysite.com'];
+const RENDER_MIN_CONTENT_CHARS = 700;
+const RENDER_WAIT_STEP_MS = 500;
+const RENDER_WAIT_MAX_MS = 10_000;
 
 // The default Playwright headless UA contains "HeadlessChrome", which Cloudflare
 // and similar WAFs flag — portals like pracuj.pl then serve a 403 challenge page
@@ -126,7 +130,11 @@ export function rejectPrivateOrInvalid(url) {
   return null;
 }
 
-export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {
+export async function checkUrlLiveness(page, url, {
+  extraSettleMs = 0,
+  renderWaitStepMs = RENDER_WAIT_STEP_MS,
+  renderWaitMaxMs = RENDER_WAIT_MAX_MS,
+} = {}) {
   const guardError = rejectPrivateOrInvalid(url);
   if (guardError) {
     return { result: 'uncertain', code: guardError.code, reason: guardError.reason };
@@ -139,8 +147,28 @@ export async function checkUrlLiveness(page, url, { extraSettleMs = 0 } = {}) {
     // for the headed retry, where a JS anti-bot interstitial needs a moment to clear.
     await page.waitForTimeout(HYDRATION_WAIT_MS + extraSettleMs);
 
+    const host = normalizeHost(new URL(page.url()).hostname);
+    const isClientRenderedAts = CLIENT_RENDERED_ATS_HOSTS.some(
+      (domain) => host === domain || host.endsWith(`.${domain}`)
+    );
+    // Use accumulated Playwright waits rather than wall time so fake pages can
+    // exercise the cap without sleeping. Invalid options fall back to defaults.
+    const stepMs = Number.isFinite(renderWaitStepMs) && renderWaitStepMs > 0
+      ? renderWaitStepMs : RENDER_WAIT_STEP_MS;
+    const maxMs = Number.isFinite(renderWaitMaxMs) && renderWaitMaxMs >= 0
+      ? renderWaitMaxMs : RENDER_WAIT_MAX_MS;
+    let bodyText = await page.evaluate(() => document.body?.innerText ?? '');
+    let waitedMs = 0;
+    while (waitedMs < maxMs && (
+      /^\s*Loading\s*$/im.test(bodyText)
+      || (isClientRenderedAts && bodyText.trim().length < RENDER_MIN_CONTENT_CHARS)
+    )) {
+      const delayMs = Math.min(stepMs, maxMs - waitedMs);
+      await page.waitForTimeout(delayMs);
+      waitedMs += delayMs;
+      bodyText = await page.evaluate(() => document.body?.innerText ?? '');
+    }
     const finalUrl = page.url();
-    const bodyText = await page.evaluate(() => document.body?.innerText ?? '');
     const applyControls = await page.evaluate(() => {
       const candidates = Array.from(
         document.querySelectorAll('a, button, input[type="submit"], input[type="button"], [role="button"]')
