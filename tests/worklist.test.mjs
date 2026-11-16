@@ -280,3 +280,22 @@ test('a newer live requisition on a row is not hidden by closed rows of an older
   assert.equal(sections.openApply.length, 0);
   assert.equal(sections.review.length, 0);
 });
+
+test('a closed row carrying only a superseded report candidate ID still hides the requisition', (t) => {
+  const oldId = cid('a'); const newId = cid('b');
+  const fixture = createWorkTreeFixture({
+    tracker: trackerTable([
+      row(20, '2026-10-12', 'Example Oy', 'Data Engineer', 'Discarded', '', `Canonical candidate ID: ${oldId}`),
+      row(21, '2026-11-16', 'Example Oy', 'Data Engineer', 'Evaluated', `${reportLink(30)}; ${reportLink(32)}`,
+        `Canonical candidate ID: ${newId}`),
+    ]),
+    reports: {
+      '030-old.md': reportMarkdown({ candidateId: oldId, summary: summary('Example Oy', 'Data Engineer') }),
+      '032-new.md': reportMarkdown({ candidateId: newId, supersedes: 30, summary: summary('Example Oy', 'Data Engineer') }),
+    },
+  });
+  t.after(() => fixture.cleanup());
+  const { openApply, review } = buildWorklist({ root: fixture.root, now: new Date('2026-11-16T12:00:00Z') }).sections;
+  assert.equal(openApply.length, 0);
+  assert.equal(review.length, 0);
+});

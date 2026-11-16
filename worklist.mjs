@@ -261,6 +261,13 @@ function rowsForCurrentRequisition(group, currentReport, reportIndex, mappings) 
       }
     }
   }
+  // Candidate IDs of every report in the Supersedes component belong to the same requisition.
+  for (const number of linkedReports) {
+    const linkedId = reportIndex.get(number)?.candidateId;
+    if (!linkedId || mappings?.ambiguous?.has(linkedId)) continue;
+    sameId.add(linkedId);
+    for (const other of mappings?.equivalent?.get(linkedId) ?? []) sameId.add(other);
+  }
   const rows = group.rows.filter((row) => {
     const identity = rowIdentity(row, reportIndex, mappings);
     return identity.reports.some((number) => linkedReports.has(number))
