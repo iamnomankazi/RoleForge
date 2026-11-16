@@ -95,7 +95,14 @@ function hasApplyControl(controls = []) {
 function firstDefinitiveClosure(bodyText) {
   return HARD_EXPIRED_PATTERNS.find((pattern) => {
     for (const match of bodyText.matchAll(new RegExp(pattern.source, 'gi'))) {
-      if (!PROCESS_CLAUSE_PREFIX_PATTERN.test(bodyText.slice(0, match.index))) return true;
+      const prefix = bodyText.slice(0, match.index);
+      // Only an application-period clause ("when the application period has closed, ...") is a
+      // process description; other closures after "after/when" ("this position has been filled") stay definitive.
+      const clause = `${(prefix.match(/[^.!?;\n]*$/) ?? [''])[0]} ${match[0]}`;
+      const aboutApplicationPeriod = /haku|hakemu|application|deadline|bewerbung|ablauf/i.test(clause);
+      // "When this job is no longer available, we will ..." - a subordinate clause followed by a main clause.
+      const followedByMainClause = /^[^.!?;\n]*,/.test(bodyText.slice(match.index + match[0].length));
+      if (!(PROCESS_CLAUSE_PREFIX_PATTERN.test(prefix) && (aboutApplicationPeriod || followedByMainClause))) return true;
     }
     return false;
   });

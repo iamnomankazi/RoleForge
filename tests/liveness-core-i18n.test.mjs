@@ -176,3 +176,10 @@ test('Workday role descriptions and lookalike URLs do not make footer text autho
     assert.equal(result.code, 'apply_control_visible', finalUrl);
   }
 });
+
+test('a closure after "after/when" that is not about the application period stays definitive', () => {
+  const filled = classifyLiveness({ status: 200, bodyText: 'After a successful search this position has been filled.', applyControls: ['Apply'] });
+  assert.equal(filled.result, 'expired');
+  const process = classifyLiveness({ status: 200, bodyText: 'Haku päättyy 29.11. Kun hakuaika on päättynyt, otamme yhteyttä hakijoihin.', applyControls: ['Hae paikkaa'] });
+  assert.equal(process.result, 'active');
+});
