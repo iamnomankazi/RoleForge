@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import yaml from 'js-yaml';
 import { hashFile } from './application-integrity.mjs';
 import { APPLICATION_EVIDENCE_CLASSES } from './application-evidence.mjs';
-import { resolveAuthorizationAnswer } from './application-form-policy.mjs';
+import { resolveAuthorizationAnswer, salaryDecision } from './application-form-policy.mjs';
 
 function readRequired(path, label) {
   if (!existsSync(path)) throw new Error(`Missing canonical ${label}: ${path}`);
@@ -145,7 +145,17 @@ export function selectApprovedCv(profile, candidate, jdText) {
   };
 }
 
-export function groundedFieldValue(profile, semantic, { country = null, jobCountry = country, ...context } = {}) {
+/**
+ * Salary decision for the legacy form plan; `context.field` is the snapshot field when the caller has it. Only a
+ * verified `jobCountry` counts: the legacy `country` alias is not job evidence for salary (same as the engine).
+ */
+export function groundedSalaryDecision(profile, { field = null, question = '', country: _unused = null, ...context } = {}) {
+  return salaryDecision(profile, field || { questionText: question }, context);
+}
+
+export function groundedFieldValue(profile, semantic, rawContext = {}) {
+  if (semantic === 'salary') return groundedSalaryDecision(profile, rawContext).value;
+  const { country = null, jobCountry = country, ...context } = rawContext;
   if (['work_authorization', 'sponsorship'].includes(semantic)) {
     return resolveAuthorizationAnswer(profile, semantic, { ...context, jobCountry });
   }
@@ -167,7 +177,6 @@ export function groundedFieldValue(profile, semantic, { country = null, jobCount
     university: profile.formRules?.education?.university || profile.education.university || null,
     graduation: profile.education.expected_graduation_date || null,
     availability: profile.currentStatus.availability?.start || null,
-    salary: profile.compensation.target_range || null,
     relocation: profile.formRules?.relocation?.value || null,
   };
   return values[semantic] ?? null;

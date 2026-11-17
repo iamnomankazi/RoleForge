@@ -21,13 +21,14 @@ import {
   containsUnresolvedPlaceholder,
   generateCustomNarrativeAnswer,
   hashFormValue,
-  isTraineeRole,
   normalizeNarrativeText,
   normalizeFormQuestion,
   preferredDeclineOption,
+  salaryDecision,
   stableFieldIdentity,
   validatePlannedValueForControl,
 } from './application-form-policy.mjs';
+import { salaryManualNote } from './salary-policy.mjs';
 import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
 import { validateNarrativeProvenanceRecord } from './application-evidence.mjs';
@@ -1421,8 +1422,11 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
     // account) is theirs to review; it is not an unresolved field.
     if (!value && fieldAnswered(field)) continue;
     if (!value) {
-      const traineeSalary = semantics.semantic === 'salary' && isTraineeRole(context);
-      if (field.required || traineeSalary || ['work_authorization', 'sponsorship_employer_support'].includes(semantics.category)) {
+      // A salary question is always shown to the candidate when it is not filled: it carries the reason and any
+      // proposal from the shared salary policy, even on an optional field.
+      const salaryQuestion = semantics.category === 'salary' && semantics.semantic === 'salary';
+      const salaryNote = salaryQuestion ? salaryManualNote(salaryDecision(profile, field, context)) : null;
+      if (field.required || salaryQuestion || ['work_authorization', 'sponsorship_employer_support'].includes(semantics.category)) {
         const missing = {
           work_authorization: 'Verified job country or hiring arrangement is missing or ambiguous.',
           sponsorship_employer_support: 'Verified job country or hiring arrangement is missing or ambiguous.',
@@ -1430,9 +1434,7 @@ export function buildOperationalFormPlan(snapshot, profile, artifacts = {}, {
           skill_experience: 'Not every skill named in the question is listed in the CV skills section.',
           adult_confirmation: 'application_form.adult_confirmed is not set to Yes in config/profile.yml.',
           employment: 'application_form.current_employment is not set in config/profile.yml.',
-        }[semantics.category] || (traineeSalary
-          ? 'Trainee/internship role: the general salary target is not used; enter a role-appropriate expectation.'
-          : 'Canonical profile evidence is missing.');
+        }[semantics.category] || salaryNote || 'Canonical profile evidence is missing.';
         unresolvedFields.push(manualField(field, semantics, 'No grounded canonical answer is available.', missing));
       }
       continue;

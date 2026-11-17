@@ -105,6 +105,8 @@ export function buildCandidateFormContext(contract) {
     hiringArrangement: inline(row.hiringArrangement ?? row.hiring_arrangement ?? row.employmentArrangement) || null,
     canEmployFromFinland: row.canEmployFromFinland === true || row.can_employ_from_finland === true,
     jdText,
+    // Structured pay from the job record; the salary policy treats any amount here as advertised.
+    advertisedSalary: row.salary ?? row.compensation ?? null,
     discovery: {
       source: inline(row.source) || null,
       urls: [row.original_url, row.url, row.source_url, row.canonical_url, ...(row.url_aliases || []),

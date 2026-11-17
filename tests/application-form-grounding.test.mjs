@@ -167,8 +167,14 @@ test('standing screening declarations come only from explicit profile answers', 
 
 test('a salary question asked in dollars never receives a EUR target', () => {
   const salaryProfile = { ...profile, compensation: { target_range: 'EUR 55,000-60,000/year' } };
-  assert.equal(answer('What are your salary expectations? (in $)', salaryProfile), null);
-  assert.equal(answer('What are your salary expectations?', salaryProfile), 'EUR 55,000-60,000/year');
+  const finnishJob = (question) => {
+    const f = field(question);
+    return canonicalFieldValue(salaryProfile, classifyFieldSemantics(f), { field: f, context: { ...context, jobCountry: 'Finland' } });
+  };
+  assert.equal(finnishJob('What are your salary expectations? (in $)'), null);
+  assert.equal(finnishJob('What are your salary expectations?'), 'EUR 55,000-60,000/year');
+  // The shared context here is a German job: the Finnish reference range is never filled automatically there.
+  assert.equal(answer('What are your salary expectations?', salaryProfile), null);
 });
 
 test('different narrative questions cannot receive the same generated text in one plan', () => {

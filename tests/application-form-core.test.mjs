@@ -228,7 +228,13 @@ test('legacy classification keeps current city, preferred city, and travel expen
   ]) {
     const field = { fieldId: 'distinct', tag: 'input', type: 'text', label, required: true };
     assert.equal(classifyField(field), semantic, label);
-    const plan = buildFormPlan({ fields: [field], controls: [] }, syntheticProfile, {});
+    // Salary is filled only for a verified Finnish job; the same plan without a job country leaves it manual.
+    const plan = buildFormPlan({ fields: [field], controls: [] }, syntheticProfile, {}, { context: { jobCountry: 'Finland', jdText: 'Backend role with no stated pay.' } });
+    if (semantic === 'salary') {
+      const unverified = buildFormPlan({ fields: [field], controls: [] }, syntheticProfile, {});
+      assert.deepEqual(unverified.actions, [], label);
+      assert.match(unverified.unresolvedFields[0]?.reason, /job country is not verified/, label);
+    }
     if (value === null) {
       assert.deepEqual(plan.actions, [], label);
       assert.equal(plan.unresolvedFields[0]?.semantic, semantic, label);

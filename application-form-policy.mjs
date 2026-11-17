@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { validateClaims as validateCvClaims } from './cv-claims.mjs';
+import { salaryAnswerDecision } from './salary-policy.mjs';
 import {
   createNarrativeProvenanceRecord,
   revalidateFactualEvidence,
@@ -210,6 +211,21 @@ function programmingLanguagesAnswer(profile) {
 }
 
 const TRAINEE_ROLE = /(?<![\p{L}\p{N}])(?:trainee|intern|internship|harjoittelija|harjoittelu|kesätyö|summer (?:job|trainee|intern)|working student|werkstudent|praktikum|praktikant|thesis|apprentice(?:ship)?|graduate (?:program|programme|trainee))(?![\p{L}\p{N}])/iu;
+
+/**
+ * The shared salary rule (salary-policy.mjs) applied to one form field: the reference range only for a verified
+ * Finnish job with no advertised salary and a free-text annual question; otherwise a reason and a proposal.
+ */
+export function salaryDecision(profile, field = {}, context = {}) {
+  return salaryAnswerDecision(profile, {
+    field,
+    question: [field?.questionText, field?.groupLabel, field?.label].filter(Boolean).join(' '),
+    jobCountry: context?.jobCountry,
+    jdText: context?.jdText,
+    advertisedSalary: context?.advertisedSalary,
+    trainee: isTraineeRole(context),
+  });
+}
 
 export function isTraineeRole(context = {}) {
   return TRAINEE_ROLE.test(cleanFormText(context?.candidate?.title || context?.candidate?.role));
@@ -975,17 +991,7 @@ export function canonicalFieldValue(profile, semantics, {
   }
   if (category === 'salary') {
     if (semantic !== 'salary') return null;
-    // The general target is for professional roles; trainee/internship roles need their own approved answer.
-    if (isTraineeRole(context)) return cleanFormText(profile?.compensation?.trainee_answer) || null;
-    const target = cleanFormText(profile?.compensation?.target_range);
-    // A question asking in dollars must not get a EUR figure (and vice versa); that conversion is the candidate's call.
-    const asked = [field.questionText, field.groupLabel, field.label].filter(Boolean).join(' ');
-    const askedUsd = /\$|\busd\b|\bdollars?\b/i.test(asked);
-    const askedEur = /€|\beur\b|\beuros?\b/i.test(asked);
-    const targetUsd = /\$|\busd\b/i.test(target);
-    const targetEur = /€|\beur\b/i.test(target);
-    if ((askedUsd && targetEur) || (askedEur && targetUsd)) return null;
-    return target || null;
+    return salaryDecision(profile, field, context).value;
   }
   if (category === 'availability') {
     const start = cleanFormText(profile?.currentStatus?.availability?.start);

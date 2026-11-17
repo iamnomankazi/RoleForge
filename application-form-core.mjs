@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { groundedFieldValue } from './application-profile.mjs';
+import { groundedFieldValue, groundedSalaryDecision } from './application-profile.mjs';
+import { salaryManualNote } from './salary-policy.mjs';
 import { classifyFieldSemantics } from './application-form-policy.mjs';
 import { validateNarrativeProvenanceRecord } from './application-evidence.mjs';
 
@@ -405,10 +406,15 @@ export function buildFormPlan(snapshot, profile, artifacts, { candidateId = null
       }
     } else if (semantic === 'free_text') value = null;
     else if (['phone_country', 'country', 'sponsorship', 'work_authorization', 'relocation'].includes(semantic)) value = dropdownValue(semantic, profile, fieldContext);
-    else value = groundedFieldValue(profile, semantic, fieldContext);
+    else if (semantic === 'salary') {
+      const decision = groundedSalaryDecision(profile, { ...fieldContext, field });
+      value = decision.value;
+      unresolvedReason = salaryManualNote(decision);
+    } else value = groundedFieldValue(profile, semantic, fieldContext);
 
     if (!value) {
-      if (field.required) unresolvedFields.push({
+      // An unfilled salary question is always listed with its reason and proposal, even when optional.
+      if (field.required || semantic === 'salary') unresolvedFields.push({
         fieldId: field.fieldId,
         label: field.label,
         semantic,
