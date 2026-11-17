@@ -82,6 +82,9 @@ function reportIdMismatch(report) {
 export function loadReportIndex(reportsDir) {
   const index = new Map();
   index.warnings = [];
+  // Report numbers used by more than one file: only the last file is indexed, so a caller that needs every report of
+  // a candidate (salary-evidence.mjs) treats a collision as unreadable evidence.
+  index.duplicateNumbers = [];
   try {
     for (const entry of readdirSync(reportsDir, { withFileTypes: true })) {
       if (!entry.isFile() || !/\.md$/i.test(entry.name)) continue;
@@ -106,6 +109,7 @@ export function loadReportIndex(reportsDir) {
         if (reportIdMismatch(report)) {
           pushWarning(index.warnings, `Report ${file} has mismatched candidate IDs: header ${report.candidateId}; Machine Summary ${summary.candidate_id ?? summary.candidateId}`);
         }
+        if (index.has(number) && !index.duplicateNumbers.includes(number)) index.duplicateNumbers.push(number);
         index.set(number, report);
       } catch (error) {
         pushWarning(index.warnings, `Could not parse report ${file}: ${error.message}`);

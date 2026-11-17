@@ -222,14 +222,20 @@ test('legacy classification keeps current city, preferred city, and travel expen
     ['Which city do you currently live in?', 'city', 'Example City'],
     ['Which city would you like to work in?', 'preferred_location', null],
     ['What do you expect us to pay for travel expenses?', 'free_text', null],
-    ['Expected pay', 'salary', syntheticProfile.compensation.target_range],
-    ['Desired pay', 'salary', syntheticProfile.compensation.target_range],
-    ['Remuneration expectations', 'salary', syntheticProfile.compensation.target_range],
+    // Salary wording without a stated period or currency stays manual even for a verified Finnish job.
+    ['Expected pay', 'salary', null],
+    ['Desired pay', 'salary', null],
+    ['Remuneration expectations', 'salary', null],
+    ['Expected annual gross salary range (EUR)', 'salary', syntheticProfile.compensation.target_range],
   ]) {
     const field = { fieldId: 'distinct', tag: 'input', type: 'text', label, required: true };
     assert.equal(classifyField(field), semantic, label);
     // Salary is filled only for a verified Finnish job; the same plan without a job country leaves it manual.
-    const plan = buildFormPlan({ fields: [field], controls: [] }, syntheticProfile, {}, { context: { jobCountry: 'Finland', jdText: 'Backend role with no stated pay.' } });
+    const plan = buildFormPlan({ fields: [field], controls: [] }, syntheticProfile, {}, { context: {
+      jobCountry: 'Finland', jdText: 'Backend role with no stated pay.',
+      postingEvidence: { complete: true, text: 'Backend role with no stated pay.', basis: 'synthetic capture' },
+      reportCompensation: { status: 'none', values: [] },
+    } });
     if (semantic === 'salary') {
       const unverified = buildFormPlan({ fields: [field], controls: [] }, syntheticProfile, {});
       assert.deepEqual(unverified.actions, [], label);

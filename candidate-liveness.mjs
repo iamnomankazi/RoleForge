@@ -199,6 +199,12 @@ export async function runCandidateLiveness({
       let finalUrl = candidateUrl(candidate) || null;
       const priorDescription = cleanDescription(candidate?.description);
       let description = priorDescription;
+      // Where the stored text came from: the posting itself ('api'/'browser') or the scan's own excerpt ('prior').
+      // Salary auto-fill trusts only text taken from the posting (salary-evidence.mjs).
+      let descriptionSource = priorDescription ? 'prior' : null;
+      // Whether the text is the WHOLE posting including its structured pay fields: only some ATS APIs give that
+      // (liveness-api.mjs `complete`); a browser capture reads one page section and is never complete.
+      let postingComplete = false;
 
       try {
         safeCandidateFilename(candidateId);
@@ -211,7 +217,11 @@ export async function runCandidateLiveness({
           method = 'api';
           reason = apiResult.reason;
           finalUrl = apiResult.finalUrl || finalUrl;
-          if (apiResult.description) description = apiResult.description;
+          if (apiResult.description) {
+            description = apiResult.description;
+            descriptionSource = 'api';
+            postingComplete = apiResult.complete === true;
+          }
         } else if (noBrowser) {
           reason = resolved ? 'ATS API was inconclusive; browser fallback disabled' : 'no supported ATS API; browser fallback disabled';
         } else {
@@ -224,7 +234,7 @@ export async function runCandidateLiveness({
             method = 'browser';
             reason = browserResult.result.reason;
             finalUrl = browserResult.finalUrl || finalUrl;
-            if (browserResult.description) description = browserResult.description;
+            if (browserResult.description) { description = browserResult.description; descriptionSource = 'browser'; }
           } catch (error) {
             reason = `browser fallback failed: ${error instanceof Error ? error.message.split('\n')[0] : String(error)}`;
           }
@@ -241,6 +251,8 @@ export async function runCandidateLiveness({
         final_url: finalUrl,
         description_chars: description.length,
         description_sha256: digest(description),
+        description_source: description ? descriptionSource : null,
+        posting_complete: Boolean(description) && postingComplete,
         reason,
       };
       outputRows[candidateId] = record;

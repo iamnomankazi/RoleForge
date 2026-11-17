@@ -757,6 +757,10 @@ export async function inspectApplicationForm(page, { gateOnly = false } = {}) {
           workdayGroupLabelledBy,
           workdayGroupLabel,
           placeholder: element.getAttribute('placeholder') || '',
+          // Input constraints decide whether a free-text answer such as a salary range can be accepted.
+          inputMode: element.getAttribute('inputmode') || '',
+          pattern: element.getAttribute('pattern') || '',
+          maxLength: Number(element.getAttribute('maxlength') || 0) || null,
           required: element.required
             || element.getAttribute('aria-required') === 'true'
             || /(?:\*\s*(?:\(required\))?|\(required\)|\bmandatory\b)/i.test(fieldText),

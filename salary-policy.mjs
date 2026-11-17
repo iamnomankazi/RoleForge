@@ -5,8 +5,12 @@
  * The candidate's reference range (config/profile.yml compensation.target_range, gross annual) is filled
  * automatically only when every one of these is verified:
  *   1. the job country is Finland (from the job record, never from where the candidate lives);
- *   2. the stored posting shows no salary amount and the job record carries no structured salary;
- *   3. the question accepts a free-text annual range (not monthly, hourly, net, a single figure or fixed options);
+ *   2. a verified capture of the COMPLETE posting exists (context.postingEvidence, from salary-evidence.mjs; a scan
+ *      excerpt is never enough), and it, the stored description, the job record's structured salary and the
+ *      evaluation report of this exact candidate (context.reportCompensation) all show no pay;
+ *   3. the question explicitly asks for an annual amount in the reference currency, in a plain free-text field
+ *      (not monthly, hourly, weekly, net, a single figure, digits-only or fixed options; an unstated period or
+ *      currency is not assumed);
  *   4. the reference range is a gross annual range in the question's currency;
  *   5. the role is not a trainee/internship role (those keep their own, separately approved answer).
  * Every other case returns no value plus a reason and, where the rules allow one, a proposal for the candidate to
@@ -31,10 +35,15 @@ const OTHER_PERIOD_RE = /\b(?:week|weekly|day|daily|per diem|viiko\w*|päivä\w*
 const YEAR_RE = /\b(?:year|yr|yearly|annual|annually|annum|p\.?\s?a\.?|vuodessa|vuosi\w*|jahr\w*|jährlich|brutto(?:jahres)\w*|årslön|årsløn)\b|\/\s?(?:year|yr|y|v|a)\b/i;
 const MONTH_RE = /\b(?:month|monthly|pcm|per mensem|kuukau\w*|kuussa|kk|monat\w*|månad\w*|måned\w*|maand\w*)\b|\/\s?(?:month|mo|kk|kuukausi|monat|mån)\b/i;
 const HOUR_RE = /\b(?:hour|hourly|tunti\w*|stunde\w*|stündlich|timlön|timeløn)\b|\/\s?(?:h|hr|hour|tunti|std)\b/i;
-const NET_RE = /\b(?:net|netto|nettopalkka)\b/i;
+// Net pay, including compound words (Nettogehalt, nettopalkkatoive, nettolön, nettoløn).
+const NET_RE = /\b(?:net|netto\w*|nettopalk\w*|nettolön\w*|nettoløn\w*)\b/i;
 const SALARY_WORD = /\b(?:salar\w*|pay|paid|wages?|compensation|remuneration|palk\w*|gehalt\w*|vergütung|verdienst|lön\w*|løn\w*|salaris|jahresgehalt|bruttogehalt)\b/i;
 const AGREEMENT_WORD = /\b(?:tes|työehtosopimu\w*|collective (?:labou?r |bargaining )?agreements?|tarifvertrag\w*|tarifliche\w*|kollektivavtal\w*)\b/i;
-const SPACE_CHARS = ' \\u00a0\\u202f';
+// Explicit "no pay stated" markers an evaluation report or job record may carry instead of an amount.
+const NO_PAY_STATED = /^(?:not (?:stated|disclosed|listed|specified|advertised|mentioned|provided|given)|none(?: stated)?|n\/?a)\.?$/i;
+// Wording that asks for pay after tax, whatever the language.
+const TAKE_HOME_RE = /\b(?:take[- ]?home|in[- ]hand|after[- ]tax(?:es)?|käteen\w*|nach steuern)\b/i;
+const SPACE_CHARS =' \\u00a0\\u202f';
 const NUMBER_RE = new RegExp(`(\\d{1,3}(?:[${SPACE_CHARS}.,]\\d{3})+|\\d+(?:[.,]\\d{1,2})?)\\s*(k\\b|t€|tkr)?`, 'gi');
 
 const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
@@ -141,11 +150,23 @@ function structuredSalary(value) {
  * currency and period), or 'uncertain' (an amount, a collective-agreement reference, or structured salary data whose
  * basis cannot be established). Detection is deliberately broad: a false positive costs one manual answer.
  */
-export function detectAdvertisedSalary({ jdText = '', advertisedSalary = null } = {}) {
+export function detectAdvertisedSalary({ jdText = '', postingText = '', advertisedSalary = null, reportValues = [] } = {}) {
   const mentions = [];
   const structured = structuredSalary(advertisedSalary);
   if (structured) mentions.push({ source: 'job_record', text: formatStructured(structured), parsed: structured });
-  for (const sentence of sentenceUnits(jdText)) {
+  // A stored pay text that cannot be read ("According to collective agreement", "Salary 2000 per month" whose
+  // amount looks like a year) is still pay evidence: it makes the result uncertain, never "no pay".
+  else if (typeof advertisedSalary === 'string' && clean(advertisedSalary) && !NO_PAY_STATED.test(clean(advertisedSalary))) {
+    mentions.push({ source: 'job_record', text: clean(advertisedSalary).slice(0, 240), parsed: null });
+  }
+  // advertised_comp from the evaluation report of this exact candidate (attached by salary-evidence.mjs).
+  for (const item of reportValues) {
+    const text = clean(item?.value);
+    if (!text || NO_PAY_STATED.test(text)) continue;
+    mentions.push({ source: 'report', text: `${text.slice(0, 240)} (report ${item?.report})`, parsed: structuredSalary(text) });
+  }
+  const sentences = [...new Set([...sentenceUnits(jdText), ...sentenceUnits(postingText)])];
+  for (const sentence of sentences) {
     if (hasMoneyAmount(sentence)) {
       const parsed = parseSalaryText(sentence);
       const salaryContext = SALARY_WORD.test(sentence) || (parsed && parsed.period !== 'unknown');
@@ -157,7 +178,11 @@ export function detectAdvertisedSalary({ jdText = '', advertisedSalary = null } 
   if (!mentions.length) return { status: 'none', mentions };
   const usable = mentions.filter((item) => item.parsed && item.parsed.currency && !['MIXED'].includes(item.parsed.currency)
     && ['year', 'month'].includes(item.parsed.period) && !item.parsed.net);
-  return { status: usable.length === 1 && usable.length === mentions.length ? 'advertised' : 'uncertain', mentions, usable };
+  // The same range seen in the posting and in its report is one statement; anything else must agree exactly.
+  const same = (a, b) => a.parsed.currency === b.parsed.currency && a.parsed.period === b.parsed.period
+    && a.parsed.min === b.parsed.min && a.parsed.max === b.parsed.max;
+  const consistent = usable.length > 0 && usable.length === mentions.length && usable.every((item) => same(item, usable[0]));
+  return { status: consistent ? 'advertised' : 'uncertain', mentions, usable };
 }
 
 function formatStructured(parsed) {
@@ -192,13 +217,20 @@ function questionBasis(field = {}, question = '') {
   const role = clean(field.role).toLowerCase();
   if (tag === 'select' || /select/i.test(clean(field.widget)) || ['radio', 'checkbox'].includes(type) || ['combobox', 'listbox'].includes(role)
       || field.autocomplete === 'list' || (Array.isArray(field.options) && field.options.length)) return 'options';
-  if (NET_RE.test(text)) return 'net';
+  if (NET_RE.test(text) || TAKE_HOME_RE.test(text)) return 'net';
   if (OTHER_PERIOD_RE.test(text)) return 'other_period';
   if (HOUR_RE.test(text)) return 'hourly';
   if (MONTH_RE.test(text)) return 'monthly';
-  if (type === 'number' || /\b(?:single|one|exact|specific)\s+(?:figure|number|amount|value)\b|\bnumbers? only\b|\bin numbers\b|\bwithout (?:a )?range\b/i.test(text)) {
+  if (type === 'number' || /\b(?:single|one|exact|specific|whole)\s+(?:figure|number|amount|value)\b|\b(?:numbers?|digits?|numeric|numerals?|integers?)\s+only\b|\bonly\s+(?:numbers?|digits?|numerals?)\b|\bin (?:numbers|digits)\b|\bwithout (?:a )?range\b|\bno ranges?\b|\binteger\b/i.test(text)) {
     return 'single';
   }
+  // An annual answer needs the question itself to say annual; silence about the period is not permission.
+  if (!YEAR_RE.test(text)) return 'period_unverified';
+  // A range answer needs a plain free-text control: a text input or textarea with no input pattern (any pattern
+  // constrains the format) and no numeric keypad.
+  const freeText = tag === 'textarea' || (tag === 'input' && type === 'text');
+  const constrained = /numeric|decimal|tel/i.test(clean(field.inputMode)) || Boolean(clean(field.pattern));
+  if (!freeText || constrained) return 'field_unverified';
   return 'annual_range';
 }
 
@@ -210,6 +242,7 @@ const FINLAND = /^(?:finland|suomi|fi|fin)$/i;
  */
 export function salaryAnswerDecision(profile, {
   field = {}, question = '', jobCountry = null, jdText = '', advertisedSalary = null, trainee = false,
+  postingEvidence = null, reportCompensation = null,
 } = {}) {
   const manual = (reasonCode, reason, proposal = null) => ({ value: null, reasonCode, reason, proposal });
   if (trainee) {
@@ -240,10 +273,18 @@ export function salaryAnswerDecision(profile, {
   // Annual basis for any proposal: the reference range, or what the advertised range implies under the owner's rules.
   let basis = { min: reference.min, max: reference.max };
   let assumption = '';
-  const advertised = detectAdvertisedSalary({ jdText, advertisedSalary });
+  const postingComplete = postingEvidence?.complete === true && Boolean(clean(postingEvidence.text));
+  const advertised = detectAdvertisedSalary({
+    jdText, postingText: postingComplete ? postingEvidence.text : '', advertisedSalary,
+    reportValues: Array.isArray(reportCompensation?.values) ? reportCompensation.values : [],
+  });
   let blocking = null;
-  if (advertised.status === 'none' && !clean(jdText)) {
+  if (!['matched', 'none'].includes(reportCompensation?.status)) {
+    blocking = ['report_evidence_unverified', `The evaluation-report pay for this exact candidate could not be established (${clean(reportCompensation?.reason) || 'not checked'}); check the advertised pay yourself.`];
+  } else if (advertised.status === 'none' && !clean(jdText) && !postingComplete) {
     blocking = ['jd_unavailable', 'The stored job description is unavailable, so the absence of an advertised salary cannot be verified.'];
+  } else if (advertised.status === 'none' && !postingComplete) {
+    blocking = ['posting_unverified', `No salary appears in the stored text, but there is no verified capture of the complete posting (${clean(postingEvidence?.reason) || 'no capture recorded'}); the full posting may state pay.`];
   } else if (advertised.status === 'uncertain') {
     const quoted = advertised.mentions.map((item) => `"${item.text}"`).join('; ');
     blocking = ['advertised_uncertain', `The posting or job record mentions pay that could not be read reliably (${quoted}). Check it; if it states no salary, the reference range applies.`];
@@ -258,10 +299,10 @@ export function salaryAnswerDecision(profile, {
       const adMin = ad.min * factor;
       const adMax = ad.max * factor;
       const adText = `"${advertised.usable[0].text}" (the employer's budget, not an offer)`;
-      if (adMin > reference.max) {
+      if (adMin >= reference.max) {
         basis = { min: adMin, max: adMax };
         blocking = ['advertised_higher', `The posting advertises more than the reference range: ${adText}. Your rules use the employer's range rather than underbidding.${assumption}`];
-      } else if (adMax < reference.min) {
+      } else if (adMax <= reference.min) {
         basis = null;
         blocking = ['advertised_lower', `The posting advertises less than the reference range: ${adText}. This needs your decision.${assumption}`];
       } else {
@@ -285,6 +326,8 @@ export function salaryAnswerDecision(profile, {
       basis ? `${monthly(12)} gross (÷12), or ${monthly(12.5)} (÷12.5)` : null],
     single: ['single_figure_requested', 'The question asks for one figure. The top of the range is not automatically your demand.',
       single ? `${single}/year gross` : null],
+    period_unverified: ['period_unverified', 'The question does not say whether it means annual, monthly or another period.', annualProposal],
+    field_unverified: ['field_not_range_compatible', 'The field is not a plain free-text box (or expects digits only), so a range may not be accepted.', annualProposal],
   }[kind];
   if (blocking) {
     let proposal = annualProposal;
@@ -295,11 +338,15 @@ export function salaryAnswerDecision(profile, {
     return manual(blocking[0], `${blocking[1]}${extra}`, proposal);
   }
   if (questionReason) return manual(questionReason[0], questionReason[1], questionReason[2]);
+  // The currency must be stated by the question itself; the answer's own "EUR" does not make an unstated one safe.
+  if (askedCurrency !== reference.currency) {
+    return manual('currency_unverified', `The question does not state the currency; the reference range is in ${reference.currency}.`, annualProposal);
+  }
   const maxLength = Number(field.maxLength || 0);
   if (maxLength && reference.raw.length > maxLength) {
     return manual('answer_too_long', `The field allows ${maxLength} characters; the reference range text is longer.`, referenceText);
   }
-  return { value: reference.raw, reasonCode: 'reference_range', reason: 'Finnish role, no advertised salary, free-text annual range question.', proposal: null };
+  return { value: reference.raw, reasonCode: 'reference_range', reason: `Finnish role; complete posting checked (${clean(postingEvidence.basis) || 'verified capture'}) with no advertised salary; free-text annual ${reference.currency} question.`, proposal: null };
 }
 
 /** One line for an unresolved-field record: the reason plus any proposal awaiting approval. */

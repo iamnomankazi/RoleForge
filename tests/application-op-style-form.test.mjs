@@ -205,7 +205,9 @@ test('"How did you hear" uses discovery provenance and salary respects trainee r
   assert.equal(canonicalFieldValue(profile, salary, { context }), null);
   assert.equal(canonicalFieldValue({ ...profile, compensation: { ...profile.compensation, trainee_answer: 'Per the trainee programme salary' } }, salary, { context }),
     'Per the trainee programme salary');
-  assert.equal(canonicalFieldValue(profile, salary, { context: { candidate: { title: 'Data Engineer' }, jobCountry: 'Finland', jdText: 'Data engineer role.' } }), 'EUR 55,000-60,000/year');
+  const annualEur = { field: { label: 'Expected annual salary (EUR)', tag: 'input', type: 'text' } };
+  assert.equal(canonicalFieldValue(profile, salary, { ...annualEur, context: { candidate: { title: 'Data Engineer' }, jobCountry: 'Finland', jdText: 'Data engineer role.',
+    postingEvidence: { complete: true, text: 'Data engineer role.', basis: 'synthetic capture' }, reportCompensation: { status: 'none', values: [] } } }), 'EUR 55,000-60,000/year');
   assert.equal(canonicalFieldValue(profile, salary, { context: { candidate: { title: 'Data Engineer' } } }), null,
     'without a verified job country the reference range stays manual');
 });

@@ -31,6 +31,7 @@ import {
   rejectPrivateOrInvalid,
 } from './liveness-browser.mjs';
 import { loadApplicationProfile } from './application-profile.mjs';
+import { reportCompensationFor, verifiedPostingCapture } from './salary-evidence.mjs';
 import {
   attachOperationalArtifacts,
   inspectOperationalApplicationForm,
@@ -87,6 +88,19 @@ export function jobCountryFromLocationText(text) {
   return found.includes('Finland') ? '' : found[0];
 }
 
+function salaryEvidenceFor(contract) {
+  const candidateId = contract?.candidate?.identityStatus === 'legacy_derived' ? null : contract?.candidate?.candidate_id;
+  if (!candidateId) {
+    const reason = 'the candidate has no exact candidate ID';
+    return { postingEvidence: { complete: false, text: '', basis: null, reason }, reportCompensation: { status: 'unverified', values: [], reason } };
+  }
+  const root = contract?.root || dirname(fileURLToPath(import.meta.url));
+  return {
+    postingEvidence: verifiedPostingCapture({ candidatesPath: contract?.sourceCandidatesPath, candidateId }),
+    reportCompensation: reportCompensationFor(candidateId, { reportsDir: join(root, 'reports') }),
+  };
+}
+
 export function buildCandidateFormContext(contract) {
   const row = contract?.sourceCandidate?.sourceRow || {};
   const location = row.location && typeof row.location === 'object' ? row.location : {};
@@ -107,6 +121,9 @@ export function buildCandidateFormContext(contract) {
     jdText,
     // Structured pay from the job record; the salary policy treats any amount here as advertised.
     advertisedSalary: row.salary ?? row.compensation ?? null,
+    // Complete-posting capture and exact-candidate report pay (salary-evidence.mjs). A legacy-derived identity has
+    // no exact candidate ID, so neither can be established and salary stays manual.
+    ...salaryEvidenceFor(contract),
     discovery: {
       source: inline(row.source) || null,
       urls: [row.original_url, row.url, row.source_url, row.canonical_url, ...(row.url_aliases || []),

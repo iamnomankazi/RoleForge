@@ -223,6 +223,8 @@ export function salaryDecision(profile, field = {}, context = {}) {
     jobCountry: context?.jobCountry,
     jdText: context?.jdText,
     advertisedSalary: context?.advertisedSalary,
+    postingEvidence: context?.postingEvidence,
+    reportCompensation: context?.reportCompensation,
     trainee: isTraineeRole(context),
   });
 }

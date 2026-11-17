@@ -304,7 +304,13 @@ export async function fetchAtsPosting(url, { fetchImpl = fetch } = {}) {
   if (ats === 'greenhouse') {
     const withContent = new URL(requestUrl);
     withContent.searchParams.set('content', 'true');
+    // Pay-transparency ranges live outside the content HTML; ask for them so the capture holds the whole posting.
+    withContent.searchParams.set('pay_transparency', 'true');
     requestUrl = withContent.href;
+  } else if (ats === 'ashby') {
+    const withPay = new URL(requestUrl);
+    withPay.searchParams.set('includeCompensation', 'true');
+    requestUrl = withPay.href;
   }
 
   const controller = new AbortController();
@@ -339,12 +345,25 @@ export async function fetchAtsPosting(url, { fetchImpl = fetch } = {}) {
 
     let classification;
     let description = '';
+    // True only where the provider response carries every posting section, including its structured pay fields,
+    // and all of them were captured. Salary auto-fill (salary-evidence.mjs) trusts nothing else as "the whole posting".
+    let complete = false;
     if (ats === 'ashby') {
       classification = classifyAshbyBoard(json, parts.jobId);
       const job = Array.isArray(json?.jobs)
         ? json.jobs.find((item) => String(item?.id || '').toLowerCase() === parts.jobId.toLowerCase())
         : null;
-      description = firstText(job?.descriptionPlain, job?.descriptionHtml, job?.description);
+      const body = firstText(job?.descriptionPlain, job?.descriptionHtml, job?.description);
+      const pay = job?.compensation && typeof job.compensation === 'object'
+        ? [job.compensation.compensationTierSummary, job.compensation.scrapeableCompensationSalarySummary]
+          .filter((part) => typeof part === 'string' && part.trim()).map((part) => `Compensation: ${part.trim()}`)
+        : [];
+      description = [body, ...pay].filter(Boolean).join('\n');
+      // Structured pay beyond the summaries (tiers, components) that no captured summary text represents means the
+      // text does not hold the whole posting.
+      const structuredPay = [job?.compensation?.compensationTiers, job?.compensation?.summaryComponents]
+        .some((list) => Array.isArray(list) && list.length);
+      complete = Boolean(body) && Object.hasOwn(job, 'compensation') && !(structuredPay && !pay.length);
     } else if (ats === 'workday') {
       classification = classifyWorkdayPosting(json);
       description = firstText(json?.jobPostingInfo?.jobDescription);
@@ -364,20 +383,39 @@ export async function fetchAtsPosting(url, { fetchImpl = fetch } = {}) {
       // Greenhouse and Lever use per-job endpoints: a 200 response is the
       // provider's definitive evidence that the requested posting exists.
       classification = { result: 'active', code: `${ats}_api_ok`, reason: 'ATS API returns the posting (live)' };
-      if (ats === 'greenhouse') description = firstText(json?.content, json?.job?.content);
+      if (ats === 'greenhouse') {
+        const body = firstText(json?.content, json?.job?.content);
+        const ranges = Array.isArray(json?.pay_input_ranges) ? json.pay_input_ranges : null;
+        const amount = (cents) => (cents !== null && cents !== undefined && Number.isFinite(Number(cents)) ? String(Number(cents) / 100) : '');
+        const pay = (ranges || []).map((range) => ['Pay range:', firstText(range?.title),
+          `${amount(range?.min_cents)}-${amount(range?.max_cents)}`, firstText(range?.currency_type), firstText(range?.blurb)]
+          .filter(Boolean).join(' '));
+        description = [body, ...pay].filter(Boolean).join('\n');
+        complete = Boolean(body) && ranges !== null;
+      }
       if (ats === 'lever') {
         const lists = Array.isArray(json?.lists) ? json.lists.map((item) => {
           const title = firstText(item?.text);
           const content = firstText(item?.content, item?.description);
           return [title, content].filter(Boolean).join('\n');
         }).filter(Boolean).join('\n\n') : '';
-        description = firstText(json?.descriptionPlain, json?.description, lists);
+        const range = json?.salaryRange && typeof json.salaryRange === 'object'
+          ? ['Salary range:', firstText(json.salaryRange.currency), `${json.salaryRange.min ?? ''}-${json.salaryRange.max ?? ''}`,
+            firstText(json.salaryRange.interval)].filter(Boolean).join(' ')
+          : '';
+        const main = firstText(json?.descriptionPlain, json?.description);
+        // Every section of the posting: opening, description, lists, closing text and the salary fields.
+        description = [firstText(json?.openingPlain, json?.opening), main || lists, main ? lists : '',
+          firstText(json?.additionalPlain, json?.additional),
+          firstText(json?.salaryDescriptionPlain, json?.salaryDescription), range].filter(Boolean).join('\n\n');
+        complete = Boolean(main);
       }
     }
     if (!classification) return null;
     return {
       ...classification,
       description: toPlainText(description),
+      complete: complete && classification.result === 'active',
       finalUrl: url,
     };
   } catch {

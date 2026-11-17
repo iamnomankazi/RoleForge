@@ -99,6 +99,38 @@ test('ATS JSON fixtures classify and extract complete posting descriptions', asy
   assert.equal(calls[0].options.redirect, 'error');
 });
 
+test('only API responses that carry every posting section and their pay fields are recorded as complete', async () => {
+  const lever = await fetchAtsPosting('https://jobs.eu.lever.co/acme/abc-123', { fetchImpl: fetchFixture(200, {
+    text: 'Engineer', openingPlain: 'Welcome.', descriptionPlain: 'Build pipelines.',
+    lists: [{ text: 'Benefits', content: '<li>Lunch</li>' }], additionalPlain: 'Closing words.',
+    salaryRange: { currency: 'EUR', min: 1000, max: 2000, interval: 'per-month-salary' },
+  }) });
+  assert.equal(lever.complete, true);
+  for (const part of ['Welcome.', 'Build pipelines.', 'Benefits', 'Lunch', 'Closing words.', 'Salary range: EUR 1000-2000 per-month-salary']) {
+    assert.ok(lever.description.includes(part), part);
+  }
+  const ghCalls = [];
+  const greenhouse = await fetchAtsPosting('https://boards.greenhouse.io/acme/jobs/123', { fetchImpl: fetchFixture(200, {
+    content: '<p>Body</p>', pay_input_ranges: [{ title: 'Finland', min_cents: 100000, max_cents: 200000, currency_type: 'EUR', blurb: 'Monthly' }],
+  }, 'json', ghCalls) });
+  assert.equal(new URL(ghCalls[0].url).searchParams.get('pay_transparency'), 'true');
+  assert.equal(greenhouse.complete, true);
+  assert.match(greenhouse.description, /Pay range: Finland 1000-2000 EUR Monthly/);
+  const ghNoPayField = await fetchAtsPosting('https://boards.greenhouse.io/acme/jobs/123', { fetchImpl: fetchFixture(200, { content: '<p>Body</p>' }) });
+  assert.equal(ghNoPayField.complete, false, 'no pay_input_ranges field: pay sections were not returned');
+  const ashbyCalls = [];
+  const ashby = await fetchAtsPosting('https://jobs.ashbyhq.com/acme/ashby-123', { fetchImpl: fetchFixture(200, { jobs: [{
+    id: 'ashby-123', isListed: true, descriptionPlain: 'Body', compensation: { compensationTierSummary: 'EUR 1K - 2K' },
+  }] }, 'json', ashbyCalls) });
+  assert.equal(new URL(ashbyCalls[0].url).searchParams.get('includeCompensation'), 'true');
+  assert.equal(ashby.complete, true);
+  assert.match(ashby.description, /Compensation: EUR 1K - 2K/);
+  const workday = await fetchAtsPosting('https://acme.wd3.myworkdayjobs.com/Careers/job/Helsinki/Backend_R123', {
+    fetchImpl: fetchFixture(200, { jobPostingInfo: { title: 'Engineer', jobDescription: '<p>Body</p>' } }),
+  });
+  assert.equal(workday.complete, false, 'providers without a structured pay field are never complete');
+});
+
 test('API gone responses expire; ambiguous or missing API evidence stays unconfirmed', async () => {
   const url = 'https://boards.greenhouse.io/acme/jobs/123';
   assert.equal((await fetchAtsPosting(url, { fetchImpl: fetchFixture(404, {}) }))?.result, 'expired');
@@ -174,14 +206,15 @@ test('batch writes candidate-keyed liveness records and plain-text descriptions'
     assert.deepEqual(manifest.cand_active, {
       status: 'active', method: 'api', checked_at: '2026-10-09T10:00:00.000Z',
       final_url: candidates[0].url, description_chars: 'Actual full job description.'.length,
-      description_sha256: manifest.cand_active.description_sha256,
-      reason: 'ATS API returns the posting (live)',
+      description_sha256: manifest.cand_active.description_sha256, description_source: 'api',
+      // No pay_transparency field in the fixture response: not recorded as the whole posting.
+      posting_complete: false, reason: 'ATS API returns the posting (live)',
     });
     assert.match(manifest.cand_active.description_sha256, /^[a-f0-9]{64}$/);
     assert.deepEqual(manifest.cand_unknown, {
       status: 'unconfirmed', method: 'none', checked_at: '2026-10-09T10:00:00.000Z',
-      final_url: candidates[1].url, description_chars: 0, description_sha256: null,
-      reason: 'no supported ATS API; browser fallback disabled',
+      final_url: candidates[1].url, description_chars: 0, description_sha256: null, description_source: null,
+      posting_complete: false, reason: 'no supported ATS API; browser fallback disabled',
     });
     assert.equal(await readFile(join(outDir, 'descriptions', 'cand_active.txt'), 'utf8'), 'Actual full job description.\n');
     await assert.rejects(readFile(join(outDir, 'descriptions', 'cand_unknown.txt'), 'utf8'), { code: 'ENOENT' });
@@ -190,4 +223,17 @@ test('batch writes candidate-keyed liveness records and plain-text descriptions'
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('fourth review: Ashby pay held only in tiers or components is not a complete capture', async () => {
+  const body = (compensation) => ({ jobs: [{ id: 'ashby-123', isListed: true, descriptionPlain: 'Build stuff.', compensation }] });
+  const tiersOnly = await fetchAtsPosting('https://jobs.ashbyhq.com/acme/ashby-123', { fetchImpl: fetchFixture(200, body({
+    compensationTierSummary: null, scrapeableCompensationSalarySummary: null,
+    compensationTiers: [{ title: 'Base' }], summaryComponents: [{ compensationType: 'Salary', currencyCode: 'EUR', minValue: 1, maxValue: 2 }],
+  })) });
+  assert.equal(tiersOnly.complete, false);
+  const none = await fetchAtsPosting('https://jobs.ashbyhq.com/acme/ashby-123', { fetchImpl: fetchFixture(200, body({
+    compensationTierSummary: null, scrapeableCompensationSalarySummary: null, compensationTiers: [], summaryComponents: [],
+  })) });
+  assert.equal(none.complete, true, 'an empty compensation block means the posting states no pay');
 });

@@ -231,6 +231,7 @@ const SYSTEM_PATHS = [
   'process-quality.test.mjs',
   'salary-gap.mjs',
   'salary-policy.mjs',
+  'salary-evidence.mjs',
   'followup-cadence.mjs',
   'followup-cadence.test.mjs',
   'invite-match.mjs',

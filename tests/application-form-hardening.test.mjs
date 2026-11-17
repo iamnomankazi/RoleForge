@@ -143,16 +143,18 @@ test('1–2. current location is canonical Example City while preferred location
 });
 
 test('factually distinct salary, location, and availability labels use only matching profile facts', () => {
+  // Salary labels without a stated period and currency (and here without a verified complete posting) stay manual;
+  // filling the reference range is covered by tests/salary-policy.test.mjs.
   const cases = [
-    ['Expected salary', 'salary', profile.compensation.target_range],
-    ['Desired salary', 'salary', profile.compensation.target_range],
-    ['Compensation expectations', 'salary', profile.compensation.target_range],
-    ['What salary do you expect?', 'salary', profile.compensation.target_range],
-    ['Pay expectation', 'salary', profile.compensation.target_range],
-    ['Pay expectations', 'salary', profile.compensation.target_range],
-    ['Expected pay', 'salary', profile.compensation.target_range],
-    ['Desired pay', 'salary', profile.compensation.target_range],
-    ['Remuneration expectations', 'salary', profile.compensation.target_range],
+    ['Expected salary', 'salary', null],
+    ['Desired salary', 'salary', null],
+    ['Compensation expectations', 'salary', null],
+    ['What salary do you expect?', 'salary', null],
+    ['Pay expectation', 'salary', null],
+    ['Pay expectations', 'salary', null],
+    ['Expected pay', 'salary', null],
+    ['Desired pay', 'salary', null],
+    ['Remuneration expectations', 'salary', null],
     ['What do you expect us to pay for travel expenses?', 'unknown', null],
     ['What relocation costs should we pay?', 'relocation', null],
     ['What reimbursement do you expect us to pay?', 'unknown', null],

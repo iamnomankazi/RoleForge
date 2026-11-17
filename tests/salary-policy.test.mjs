@@ -17,8 +17,16 @@ const profile = {
   compensation: { target_range: 'EUR 50,000-56,000/year', currency: 'EUR', basis: 'Gross annual salary' },
 };
 const textField = (label, overrides = {}) => ({ fieldId: 'pay', id: 'pay', label, questionText: label, tag: 'input', type: 'text', required: true, ...overrides });
+const JD = 'Build data pipelines in Python.';
+// Verified evidence: a complete posting capture with no pay and no report compensation for this exact candidate.
+const verified = {
+  jobCountry: 'Finland', jdText: JD,
+  postingEvidence: { complete: true, text: JD, basis: 'synthetic api capture' },
+  reportCompensation: { status: 'none', values: [] },
+};
+const ANNUAL = 'Expected annual gross salary range (EUR)';
 const decide = (label, context = {}, fieldOverrides = {}) => salaryAnswerDecision(profile, {
-  field: textField(label, fieldOverrides), question: label, jobCountry: 'Finland', jdText: 'Build data pipelines in Python.', ...context,
+  field: textField(label, fieldOverrides), question: label, ...verified, ...context,
 });
 
 test('parser reads the profile format, ranges, periods and currencies without guessing', () => {
@@ -36,11 +44,11 @@ test('parser reads the profile format, ranges, periods and currencies without gu
 });
 
 test('no advertised salary in a Finnish job: the reference range is filled verbatim', () => {
-  const decision = decide('What are your salary expectations?');
+  const decision = decide(ANNUAL);
   assert.equal(decision.value, 'EUR 50,000-56,000/year');
   assert.equal(decision.reasonCode, 'reference_range');
   assert.equal(salaryManualNote(decision), null);
-  assert.equal(decide('Expected annual salary (gross)').value, 'EUR 50,000-56,000/year');
+  assert.equal(decide('Vuosipalkkatoive (EUR, brutto)').value, 'EUR 50,000-56,000/year');
 });
 
 test('an advertised range above the reference proposes the employer range and stays manual', () => {
@@ -73,7 +81,7 @@ test('unreadable or structured pay is treated as advertised and left manual', ()
   assert.equal(noPeriod.reasonCode, 'advertised_uncertain');
   const structured = decide('Salary expectation', { jdText: '', advertisedSalary: { min: 85, max: 85, currency: 'USD' } });
   assert.equal(structured.reasonCode, 'advertised_uncertain');
-  assert.equal(decide('Salary expectation', { advertisedSalary: { min: 0, max: 0 } }).value, 'EUR 50,000-56,000/year',
+  assert.equal(decide(ANNUAL, { advertisedSalary: { min: 0, max: 0 } }).value, 'EUR 50,000-56,000/year',
     'an empty structured salary is not an advertised salary');
   assert.equal(detectAdvertisedSalary({ jdText: 'A competitive salary and great benefits.' }).status, 'none');
 });
@@ -112,14 +120,20 @@ test('outside Finland or an unverified country stays manual; residence never sta
 });
 
 test('both form paths give the same salary answer for the same job', () => {
-  const field = textField('What are your salary expectations?');
+  const field = textField(ANNUAL);
+  const ok = { postingEvidence: { complete: true, text: 'Python role.', basis: 'synthetic' }, reportCompensation: { status: 'none', values: [] } };
   const cases = [
+    { jobCountry: 'Finland', jdText: 'Python role.', ...ok },
     { jobCountry: 'Finland', jdText: 'Python role.' },
-    { jobCountry: 'Finland', jdText: 'Salary EUR 60,000-70,000 per year.' },
+    { jobCountry: 'Finland', jdText: 'Python role.', ...ok, postingEvidence: { complete: false, reason: 'excerpt' } },
+    { jobCountry: 'Finland', jdText: 'Python role.', ...ok, reportCompensation: { status: 'matched', values: [{ report: 7, value: 'EUR 60,000-70,000 per year' }] } },
+    { jobCountry: 'Finland', jdText: 'Salary EUR 60,000-70,000 per year.', ...ok },
     { jobCountry: 'Germany', jdText: 'Python role.' },
     { jobCountry: null, jdText: 'Python role.' },
     { jobCountry: 'Finland', jdText: 'Python role.', candidate: { title: 'Data Engineering Intern' } },
   ];
+  const filled = cases.map((context) => canonicalFieldValue(profile, classifyFieldSemantics(field), { field, context }));
+  assert.deepEqual(filled.map(Boolean), [true, false, false, false, false, false, false, false], 'only the fully verified case fills');
   for (const context of cases) {
     const modern = canonicalFieldValue(profile, classifyFieldSemantics(field), { field, context });
     const legacy = groundedFieldValue(profile, 'salary', { ...context, question: field.label, field });
@@ -151,11 +165,11 @@ test('review regressions: unverified bases, missing JD, string and net pay, smal
   assert.equal(decide('Expected weekly salary range (EUR)').value, null, 'weekly');
   assert.equal(decide('Expected daily rate').reasonCode, 'period_not_annual');
   assert.equal(decide('Expected annual salary range (CAD)').reasonCode, 'question_currency_mismatch');
-  const noJd = salaryAnswerDecision(profile, { field: textField('Salary expectation'), question: 'Salary expectation', jobCountry: 'Finland' });
+  const noJd = salaryAnswerDecision(profile, { field: textField(ANNUAL), question: ANNUAL, jobCountry: 'Finland', reportCompensation: { status: 'none', values: [] } });
   assert.equal(noJd.reasonCode, 'jd_unavailable');
   assert.equal(noJd.value, null);
   assert.equal(decide('Salary expectation', { advertisedSalary: 'EUR 60,000-70,000/year' }).value, null, 'string salary in job record');
-  assert.equal(decide('Salary expectation', { advertisedSalary: 'not stated' }).value, 'EUR 50,000-56,000/year', 'text without amounts is not pay');
+  assert.equal(decide(ANNUAL, { advertisedSalary: 'not stated' }).value, 'EUR 50,000-56,000/year', 'text without amounts is not pay');
   for (const compensation of [{ ...profile.compensation, basis: 'Net annual salary' }, { target_range: 'EUR 50,000/year', currency: 'EUR' }]) {
     assert.equal(referenceRange({ compensation }).ok, false, JSON.stringify(compensation));
   }
@@ -178,4 +192,112 @@ test('review regression: the legacy country alias is not job-country evidence fo
 test('second review: "pcm" questions and non-EUR advertised codes stay manual', () => {
   assert.equal(decide('Expected salary (EUR pcm)').reasonCode, 'monthly_requested');
   assert.equal(decide('Salary expectation', { jdText: 'CAD 90,000-110,000 per annum.' }).value, null);
+});
+
+test('question wording: only an explicit annual EUR range question in a free-text box is filled', () => {
+  for (const label of [ANNUAL, 'Annual salary expectation in EUR', 'Palkkatoive vuodessa (€)', 'Gewünschtes Jahresgehalt (EUR)']) {
+    assert.equal(decide(label).value, 'EUR 50,000-56,000/year', label);
+  }
+  for (const [label, code] of [
+    ['Salary expectations (EUR)', 'period_unverified'],
+    ['What are your salary expectations?', 'period_unverified'],
+    ['Expected pay', 'period_unverified'],
+    ['Expected annual salary', 'currency_unverified'],
+    ['Expected annual salary range', 'currency_unverified'],
+    ['Expected salary gross / month', 'monthly_requested'],
+    ['Expected annual salary (USD)', 'question_currency_mismatch'],
+    ['Expected annual net salary (EUR)', 'net_requested'],
+    ['Expected annual salary in EUR (numbers only)', 'single_figure_requested'],
+  ]) {
+    const decision = decide(label);
+    assert.equal(decision.value, null, label);
+    assert.equal(decision.reasonCode, code, label);
+  }
+  assert.equal(decide('Salary expectations (EUR)').proposal, 'EUR 50,000-56,000/year', 'ambiguous wording still gets a proposal');
+});
+
+test('field constraints: a range needs a plain text input or textarea', () => {
+  assert.equal(decide(ANNUAL, {}, { tag: 'textarea', type: 'textarea' }).value, 'EUR 50,000-56,000/year');
+  for (const overrides of [{ type: 'number' }, { inputMode: 'numeric' }, { pattern: '[0-9]*' }, { pattern: String.raw`\d+` }, { type: '' }, { tag: '', type: '' }]) {
+    assert.equal(decide(ANNUAL, {}, overrides).value, null, JSON.stringify(overrides));
+  }
+  assert.equal(decide(ANNUAL, {}, { maxLength: 6 }).reasonCode, 'answer_too_long');
+});
+
+test('posting completeness: a stored excerpt is not proof that the posting has no salary', () => {
+  for (const postingEvidence of [null, { complete: false, text: '', reason: 'excerpt' }, { complete: true, text: '' }]) {
+    const decision = decide(ANNUAL, { postingEvidence, jdText: 'Short teaser text for a data role in Helsinki.' });
+    assert.equal(decision.value, null, JSON.stringify(postingEvidence));
+    assert.equal(decision.reasonCode, 'posting_unverified');
+  }
+  const captured = decide(ANNUAL, { jdText: 'Short teaser.', postingEvidence: { complete: true, text: 'Full posting. Salary 4 200 - 4 600 EUR per month.', basis: 'api' } });
+  assert.equal(captured.reasonCode, 'advertised_overlap', 'pay found only in the full capture still counts');
+});
+
+test('report compensation: exact-candidate evidence is required and used', () => {
+  assert.equal(decide(ANNUAL, { reportCompensation: null }).reasonCode, 'report_evidence_unverified');
+  assert.equal(decide(ANNUAL, { reportCompensation: { status: 'conflict', values: [], reason: 'report 9 unreadable' } }).reasonCode, 'report_evidence_unverified');
+  const higher = decide(ANNUAL, { reportCompensation: { status: 'matched', values: [{ report: 9, value: 'EUR 60,000-70,000 per year' }] } });
+  assert.equal(higher.reasonCode, 'advertised_higher');
+  assert.equal(higher.proposal, 'EUR 60,000-70,000/year');
+  const twoReports = decide(ANNUAL, { reportCompensation: { status: 'matched', values: [
+    { report: 9, value: 'EUR 60,000-70,000 per year' }, { report: 12, value: 'EUR 52,000-58,000 per year' }] } });
+  assert.equal(twoReports.reasonCode, 'advertised_uncertain', 'disagreeing reports are never merged');
+  const same = decide(ANNUAL, { jdText: 'Salary EUR 60,000-70,000 per year.', reportCompensation: { status: 'matched', values: [{ report: 9, value: 'EUR 60,000-70,000 per year' }] } });
+  assert.equal(same.reasonCode, 'advertised_higher', 'the same range in posting and report is one statement');
+});
+
+test('a range that only touches the reference at one end is higher or lower, never a one-point overlap', () => {
+  assert.equal(decide(ANNUAL, { jdText: 'Salary EUR 56,000-62,000 per year.' }).reasonCode, 'advertised_higher');
+  assert.equal(decide(ANNUAL, { jdText: 'Salary EUR 44,000-50,000 per year.' }).reasonCode, 'advertised_lower');
+});
+
+test('third review: digits-only, take-home and patterned fields never receive the gross range (both paths)', () => {
+  const cases = [
+    ['Expected annual salary (EUR, digits only)', {}, 'single_figure_requested'],
+    ['Expected annual salary in EUR (numbers only)', {}, 'single_figure_requested'],
+    ['Expected annual take-home salary (EUR)', {}, 'net_requested'],
+    ['Expected annual salary after tax (EUR)', {}, 'net_requested'],
+    [ANNUAL, { pattern: '[0123456789]+' }, 'field_not_range_compatible'],
+    [ANNUAL, { pattern: '.{1,40}' }, 'field_not_range_compatible'],
+  ];
+  for (const [label, overrides, code] of cases) {
+    const decision = decide(label, {}, overrides);
+    assert.equal(decision.value, null, label);
+    assert.equal(decision.reasonCode, code, label);
+    const field = textField(label, overrides);
+    const context = { ...verified };
+    assert.equal(canonicalFieldValue(profile, classifyFieldSemantics(field), { field, context }) ?? null, null, `engine: ${label}`);
+    assert.equal(groundedFieldValue(profile, 'salary', { ...context, question: field.label, field }) ?? null, null, `legacy: ${label}`);
+    const plan = buildFormPlan({ fields: [field], controls: [] }, profile, {}, { context });
+    assert.equal(plan.actions.length, 0, `legacy plan: ${label}`);
+    assert.match(plan.unresolvedFields[0]?.reason || '', /./, `legacy plan lists it: ${label}`);
+  }
+  assert.equal(decide(ANNUAL).value, 'EUR 50,000-56,000/year', 'the plain annual question still fills');
+});
+
+test('third review: pay evidence that cannot be parsed is uncertain, never "no pay"', () => {
+  const report = (value) => ({ reportCompensation: { status: 'matched', values: [{ report: 1, value }] } });
+  for (const value of ['According to collective agreement', 'Salary Competitive', 'EUR 1/year depending on equity mix k']) {
+    const decision = decide(ANNUAL, report(value));
+    assert.equal(decision.value, null, value);
+    assert.match(decision.reasonCode, /^advertised_/, value);
+  }
+  for (const value of ['not stated', 'Not disclosed', 'N/A']) {
+    assert.equal(decide(ANNUAL, report(value)).value, 'EUR 50,000-56,000/year', `explicit no-pay marker: ${value}`);
+  }
+  const record = decide(ANNUAL, { advertisedSalary: 'Salary 2000 per month' });
+  assert.equal(record.value, null);
+  assert.equal(record.reasonCode, 'advertised_uncertain', 'a year-shaped job-record amount is still pay evidence');
+  assert.equal(decide(ANNUAL, { advertisedSalary: 'TES' }).reasonCode, 'advertised_uncertain');
+  assert.equal(detectAdvertisedSalary({ advertisedSalary: 'not stated' }).status, 'none');
+});
+
+test('fourth review: compound net-pay words stay manual', () => {
+  for (const label of ['Nettogehalt pro Jahr in EUR', 'Nettopalkkatoive (EUR / vuosi)', 'Käteenjäävä palkka vuodessa (EUR)', 'Önskad nettolön per år (EUR)']) {
+    const decision = decide(label);
+    assert.equal(decision.value, null, label);
+    assert.equal(decision.reasonCode, 'net_requested', label);
+  }
+  assert.equal(decide('Expected annual gross salary range for this network role (EUR)').value, 'EUR 50,000-56,000/year', '"network" is not net');
 });
