@@ -45,16 +45,27 @@ const TRUST = {
 };
 
 // --- Amount parsing ---
+// Annual markers that may trail an amount ("/year", "per annum", "p.a."). Amounts are annual by convention here.
+const ANNUAL_SUFFIX = /\s*(?:\/\s*(?:year|yr|y|a)|per\s+(?:year|annum)|a\s+year|annual(?:ly)?|yearly|p\.?\s?a\.?)\s*$/i;
+// Any other period: refused (null, reported as unparseable) rather than compared as if it were annual.
+const NON_ANNUAL_PERIOD = /\/\s*(?:month|mo|kk|week|wk|day|hour|hr|h)\b|\bper\s+(?:month|week|day|hour)\b|\b(?:monthly|weekly|daily|hourly)\b|\b(?:a|an)\s+(?:month|week|day|hour)\b|\b(?:pcm|pw|ph|kk|kuukaudessa|tunnissa)\b/i;
+
 export function parseAmount(raw) {
   let s = String(raw ?? '').trim();
   if (!s || s === '?' || s === '-' || /^(n\/?a|null)$/i.test(s)) return null;
-  // Strip a leading currency symbol and a trailing 3-letter ISO-4217-style alpha
-  // token (any case — "450k SEK", "80-90k eur"). Exactly three letters, so the
-  // lone "k" magnitude suffix ("80k") is never eaten, and prose ("competitive")
-  // still fails the numeric match below even after losing its last three letters.
-  s = s.replace(/^[€$£¥]\s*/, '').replace(/\s*[A-Za-z]{3}\s*$/, '').trim();
+  if (NON_ANNUAL_PERIOD.test(s)) return null;
+  // Strip a leading currency symbol or ISO-4217-style code ("EUR 40,000"), an annual
+  // marker ("/year"), and a trailing 3-letter alpha token (any case — "450k SEK",
+  // "80-90k eur"). Exactly three letters, so the lone "k" magnitude suffix ("80k") is
+  // never eaten, and prose ("competitive") still fails the numeric match below even
+  // after losing its last three letters.
+  s = s.replace(/^[€$£¥]\s*/, '').replace(/^[A-Za-z]{3}\s*(?=[\d€$£¥])/, '').replace(/^[€$£¥]\s*/, '');
+  s = s.replace(ANNUAL_SUFFIX, '').replace(/\s*[A-Za-z]{3}\s*$/, '').replace(ANNUAL_SUFFIX, '').trim();
+  s = s.replace(/\s*[€$£¥]$/, '').trim();
   const toNum = (numStr, kFlag) => {
-    const n = parseFloat(numStr.replace(/,/g, ''));
+    // "60.000" is European thousands notation; "82.5" stays a decimal.
+    const grouped = !kFlag && /^\d{1,3}(?:\.\d{3})+$/.test(numStr) ? numStr.replace(/\./g, '') : numStr;
+    const n = parseFloat(grouped.replace(/,/g, ''));
     return Number.isNaN(n) ? null : (kFlag ? n * 1000 : n);
   };
   const range = s.match(/^([\d.,]+)\s*(k)?\s*[-–—]\s*([\d.,]+)\s*(k)?$/i);
@@ -351,6 +362,17 @@ function selfTest() {
   assert(parseAmount('9ok') === null, 'typo -> null');
   assert(parseAmount('450k SEK')?.mid === 450000, 'generic trailing ISO token stripped (450k SEK)');
   assert(parseAmount('80-90k eur')?.mid === 85000, 'lowercase trailing ISO token stripped');
+  // config/profile.yml target_range format: leading ISO code, thousands separators, annual suffix
+  assert(parseAmount('EUR 61,000-67,000/year')?.min === 61000 && parseAmount('EUR 61,000-67,000/year')?.max === 67000,
+    'profile format "EUR 61,000-67,000/year" parsed');
+  assert(parseAmount('USD 70k per year')?.mid === 70000, 'leading ISO code + "per year"');
+  assert(parseAmount('64,000 EUR p.a.')?.mid === 64000, 'trailing ISO code + p.a.');
+  assert(parseAmount('€ 4,000 to € 5,000 euros per month') === null, 'monthly amount refused, never read as annual');
+  assert(parseAmount('EUR 3,900-4,300/month') === null, 'monthly suffix refused');
+  assert(parseAmount('USD 40/hour') === null, 'hourly amount refused');
+  assert(parseAmount('EUR 4,000 pcm') === null, '"pcm" is monthly, not a currency code');
+  assert(parseAmount('60.000 - 85.000 €')?.max === 85000, 'European dot thousands + trailing symbol');
+  assert(parseAmount('82.5k')?.mid === 82500, 'decimal k still decimal');
 
   // parseObservations
   const obs = parseObservations(OBS_FIXTURE);
@@ -438,6 +460,14 @@ function selfTest() {
   const badProfile = fold([], {}, { amount: 'competitive', currency: 'EUR' });
   assert(badProfile.quality.unparseable.some(u => u.num === '*' && u.type === 'desired' && u.raw === 'competitive' && u.source === 'profile'),
     'unparseable profile target reported');
+  // The real profile layout ("EUR 61,000-67,000/year") becomes the desired default instead of an unparseable entry.
+  const profileFormat = fold(
+    parseObservations('009\t2026-07-01\tactual\t66k\tEUR\toffer-letter\tsynthetic'),
+    { '009': { company: 'Example Oy', role: 'Data Engineer' } },
+    { amount: 'EUR 61,000-67,000/year', currency: 'EUR' });
+  const a9 = profileFormat.applications.find(a => a.num === '009');
+  assert(!profileFormat.quality.unparseable.some(u => u.source === 'profile'), 'profile-format target is not unparseable');
+  assert(a9?.desired?.source === 'profile' && a9.desired.value === 64000, `profile desired default used (64000), got ${a9?.desired?.value}`);
   const mm = result.quality.currencyMismatches;
   assert(mm.length === 4, `4 currency mismatches reported, got ${mm.length}`);
   assert(mm.some(m => m.num === '004' && m.comparison === 'advertised-vs-actual' && m.currencies[0] === 'USD' && m.currencies[1] === 'GBP'),
