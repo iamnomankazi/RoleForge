@@ -9,6 +9,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { PDFDocument } from 'pdf-lib';
+import { load as loadYaml, JSON_SCHEMA } from 'js-yaml';
 import { hasFactUnits, splitClaimSentences } from './cv-claims.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -33,6 +34,16 @@ const STOPWORDS = Object.freeze({
   fi: new Set(('aiemmin aika aina aivan alkaa alkaa alkoi alle alueella eri et että hän he hei heitä heidän heille heillä hänelle hänellä hänestä ja jo jos jossa jonka jotta joko kanssa kautta kun kuin kuka kaikki kaksi kuitenkaan koska myös niitä ne näin oli olla ovat on ollut mutta niin sekä tai tai tätä tämä nämä niiden niiden nyt olla olen olet olemme olette ovat voi voivat voi').split(' ')),
   de: new Set(('aber alle allem allen aller alles als also am an andere auch auf aus bei bin bis bist da dadurch daher darum das dass dein deine dem den der des die dies diese dieser doch dort du durch ein eine einem einen einer eines er es etwas für gegen gewesen hat hatte haben hier hin ich im in ist ja jede jedem jeden jeder jedes kann kein keine können könnte man mehr mich mir mit muss nach nicht nichts noch nun nur ob oder ohne sehr sein seine selbst sich sie sind so solche und unser unsere unter vom von vor war waren was weg weil weiter welche wenn werde werden wie wieder wir wird wo zu zum zur über').split(' ')),
 });
+
+/** config/profile.yml as data (only the keys cv-claims accepts as letter evidence are ever read), or null. */
+function loadProfile(root = ROOT) {
+  try {
+    return loadYaml(readFileSync(join(root, 'config', 'profile.yml'), 'utf8'), { schema: JSON_SCHEMA }) || null;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
@@ -106,7 +117,135 @@ function flattenClaims(draft) {
 
 function phrasePattern(phrase) {
   const escaped = String(phrase).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+  // A punctuation-only entry (the em dash) has no word boundaries to respect.
+  if (!/[\p{L}\p{N}]/u.test(String(phrase))) return new RegExp(escaped, 'u');
   return new RegExp(`(?:^|[^\\p{L}\\p{N}])${escaped}(?=$|[^\\p{L}\\p{N}])`, 'iu');
+}
+
+// The company and role names are the employer's words, not the candidate's prose: they are masked before the
+// banned-phrase and excluded-topic checks (an employer called "Visa" or a "Dynamic Data Engineer" title). Matching is
+// case-sensitive, so the name "Visa" is masked but the candidate's "work visa" is still checked.
+function maskNames(text, names) {
+  let masked = String(text ?? '');
+  for (const name of names.filter(value => typeof value === 'string' && value.trim())) {
+    masked = masked.replace(new RegExp(phrasePattern(name).source, 'gu'), match => match.replace(/[\p{L}\p{N}]/gu, ' '));
+  }
+  return masked;
+}
+
+/** Letter prose only: greeting, paragraphs and closing (never the company/role header or the signature). */
+function letterFields(draft) {
+  return [
+    ['greeting', draft?.greeting],
+    ...(Array.isArray(draft?.paragraphs) ? draft.paragraphs : []).map((paragraph, index) => [`paragraph-${index + 1}`, paragraph?.text]),
+    ['closing', draft?.closing],
+  ].filter(([, text]) => typeof text === 'string' && text.trim());
+}
+
+// Banned words that are also plain technical terms. One may stay when the same two-word term (it and the word after
+// it) appears in the CV or the stored job description, and that next word is not a filler noun.
+const TECHNICAL_DUAL_USE = new Set(['integrated', 'scalable', 'predictive', 'adaptive', 'optimize']);
+const FILLER_NOUNS = new Set(('solution solutions team teams environment environments world way ways manner approach '
+  + 'culture experience experiences products product people mindset opportunity opportunities future company').split(' '));
+
+function technicalUseAllowed(phrase, text, sources) {
+  const word = normalizeSpace(phrase);
+  if (!TECHNICAL_DUAL_USE.has(word)) return false;
+  const haystack = sources.map(source => ` ${normalizeSpace(source).replace(/[^\p{L}\p{N}]+/gu, ' ')} `);
+  const occurrences = [...normalizeSpace(text).replace(/[^\p{L}\p{N}]+/gu, ' ').matchAll(new RegExp(`(?:^| )${word} ([\\p{L}\\p{N}]+)`, 'gu'))];
+  const total = (normalizeSpace(text).match(new RegExp(phrasePattern(phrase).source, 'giu')) || []).length;
+  return occurrences.length === total && occurrences.every(([, next]) => !FILLER_NOUNS.has(next)
+    && haystack.some(source => source.includes(` ${word} ${next} `)));
+}
+
+// Cover letters omit permit/visa, work authorisation/sponsorship, and graduation timing (owner rule; letters only).
+const MONTHS = 'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
+const TIMING = `\\b(?:${MONTHS})\\b|\\b(?:19|20)\\d{2}\\b|\\bexpect\\w*|\\bsoon\\b|\\b(?:next|this|coming|upcoming)\\s+(?:year|spring|summer|autumn|fall|winter|semester|term)\\b|\\b(?:in|by)\\s+(?:the\\s+)?(?:spring|summer|autumn|fall|winter|end of)\\b|\\bwithin\\b|\\bon track\\b|\\bdue\\b`;
+const COMPLETION = `\\b(?:finish|finishing|finished|complete|completing|completion of|end|ending)\\s+(?:of\\s+)?(?:my\\s+|the\\s+)?(?:degree|studies|master['’]?s|master|msc|m\\.sc|bsc|bachelor['’]?s|phd|programme|program|thesis)\\b`;
+export const EXCLUDED_TOPICS = Object.freeze({
+  permit: [
+    /\b(?:residence|residency|work|working|student|study|employment)[\s-]+permits?\b/i,
+    /\bvisas?\b/i,
+    /\bpermit\b(?!\s+(?:me|us|you|him|her|them)\b)/i,
+    /\b(?:oleskelulup\w*|työlup\w*|aufenthalts\w*|arbeitserlaubnis\w*)\b/i,
+  ],
+  authorization: [
+    /\bsponsor(?:s|ed|ing|ship)?\b/i,
+    /\bwork(?:ing)?[\s-]+authori[sz]ations?\b/i,
+    /\b(?:authori[sz]ed|eligible|entitled|permitted|allowed|free|cleared|legally able)\s+to\s+work\b/i,
+    /\bright\s+to\s+work\b|\bwork\s+rights?\b|\bimmigration\b|\bcitizenship\b/i,
+  ],
+  graduation: [
+    new RegExp(`(?:\\bgraduat(?:ing|ion|es|ed)\\b|\\b(?:i|will|to|shall|should)\\s+graduate\\b)(?=[^.!?]*(?:${TIMING}))`, 'i'),
+    new RegExp(`(?:${TIMING})(?=[^.!?]*(?:\\bgraduat(?:ing|ion|es|ed)\\b|\\b(?:i|will|to|shall|should)\\s+graduate\\b))`, 'i'),
+    /\bexpected\s+(?:date\s+of\s+)?graduation\b|\bgraduation\s+date\b/i,
+    new RegExp(`${COMPLETION}(?=[^.!?]*(?:${TIMING}))`, 'i'),
+    new RegExp(`(?:${TIMING})(?=[^.!?]*${COMPLETION})`, 'i'),
+    new RegExp(`\\b(?:degree|studies|programme|program)\\s+(?:will\\s+)?(?:ends?|finish(?:es)?|concludes?|is\\s+due)\\b`, 'i'),
+    /\b(?:final|last)[\s-]+(?:year|semester|term)\b/i,
+  ],
+});
+
+function excludedTopicMatches(draft, names) {
+  const matches = [];
+  for (const [field, text] of letterFields(draft)) {
+    // Sentences come from the original text (an exception quotes what the letter says); only detection is masked.
+    for (const sentence of sentenceList(text)) {
+      const masked = maskNames(sentence, names);
+      for (const [topic, patterns] of Object.entries(EXCLUDED_TOPICS)) {
+        const hit = patterns.map(pattern => pattern.exec(masked)).find(Boolean);
+        if (hit) matches.push({ topic, field, matched: hit[0].trim(), sentence: sentence.trim() });
+      }
+    }
+  }
+  return matches;
+}
+
+/**
+ * Per-draft exceptions: `exclusionOverrides: [{ topic, text, reason }]`, where `text` is the exact letter sentence(s)
+ * the owner approved for this posting. Only matches inside that text are excused; an override that excuses nothing,
+ * names an unknown topic or quotes text the letter does not contain fails the check. Approval of a letter that used
+ * an override additionally needs the topics confirmed on the approval command (see approveCoverLetterV2).
+ */
+function excludedTopicsCheck(draft, names) {
+  const matches = excludedTopicMatches(draft, names);
+  const overrides = draft?.exclusionOverrides;
+  const invalid = [];
+  const list = overrides === undefined ? [] : Array.isArray(overrides) ? overrides : (invalid.push('not_an_array'), []);
+  const letter = normalizeSpace(letterFields(draft).map(([, text]) => text).join(' '));
+  for (const [index, item] of list.entries()) {
+    if (!item || typeof item !== 'object' || !Object.hasOwn(EXCLUDED_TOPICS, item.topic)) invalid.push(`override-${index + 1}:topic`);
+    else if (typeof item.text !== 'string' || !normalizeSpace(item.text) || !letter.includes(normalizeSpace(item.text))) invalid.push(`override-${index + 1}:text`);
+    else if (typeof item.reason !== 'string' || !item.reason.trim()) invalid.push(`override-${index + 1}:reason`);
+  }
+  const usable = invalid.length ? [] : list;
+  const excused = match => usable.some(item => item.topic === match.topic && normalizeSpace(item.text).includes(normalizeSpace(match.sentence)));
+  const unexcused = matches.filter(match => !excused(match));
+  const unused = usable.filter(item => !matches.some(match => match.topic === item.topic && normalizeSpace(item.text).includes(normalizeSpace(match.sentence))));
+  const status = invalid.length || unexcused.length || unused.length ? 'fail' : 'pass';
+  return check('excluded_topics', status, {
+    reasonCode: invalid.length ? 'invalid_exclusion_override' : unexcused.length ? 'excluded_topic'
+      : unused.length ? 'unused_exclusion_override' : undefined,
+    matches: unexcused,
+    ...(invalid.length ? { invalidOverrides: invalid } : {}),
+    ...(unused.length ? { unusedOverrides: unused.map(item => item.topic) } : {}),
+    overrides: usable.map(item => ({ topic: item.topic, text: item.text, reason: item.reason })),
+  });
+}
+
+// A posting that asks for salary, permit or graduation details inside the letter: surfaced for the owner's decision.
+// Informational only (the check always passes); the drafting procedure in modes/cover.md says to stop and ask.
+const LETTER_WORDS = /\b(?:cover(?:ing)?\s+letter|motivation(?:al)?\s+letter|application\s+letter|letter\s+of\s+(?:motivation|application)|personal\s+letter|hakemu\w*|saatekirje\w*|anschreiben|motivationsschreiben|ansøgning\w*|personligt\s+brev)\b/i;
+const LETTER_REQUEST_TOPICS = [
+  ['salary', /\b(?:salary|pay|wage)\s+(?:expectations?|requests?|requirements?|wish(?:es)?)\b|\bdesired\s+(?:salary|pay)\b|\bpalkkatoive\w*|\bpalkka(?:pyynt|vaatimu)\w*|\bgehaltsvorstellung\w*|\blønforventning\w*|\bløn(?:krav|ønske)\w*/i],
+  ['permit', /\b(?:work|residence)\s+permits?\b|\bvisas?\b|\bwork\s+authori[sz]ation\b|\bright\s+to\s+work\b|\boleskelulup\w*|\btyölup\w*|\barbeitserlaubnis\w*/i],
+  ['graduation', /\bgraduation\b|\bvalmistumi\w*|\babschlussdatum\b|\bexpected\s+(?:date\s+of\s+)?(?:graduation|completion)\b/i],
+];
+
+export function jdLetterRequests(jdText) {
+  return sentenceList(jdText).filter(sentence => LETTER_WORDS.test(sentence))
+    .flatMap(sentence => LETTER_REQUEST_TOPICS.filter(([, pattern]) => pattern.test(sentence))
+      .map(([topic]) => ({ topic, sentence: sentence.trim().slice(0, 300) })));
 }
 
 function parseVoiceDna(text) {
@@ -170,7 +309,9 @@ export async function loadBannedPhrases({ root = ROOT, userLayerDir = root } = {
       if (error?.code !== 'ENOENT') throw error;
     }
   }
-  return [...new Map(phrases.map(phrase => [normalizeSpace(phrase), String(phrase).trim()])).values()]
+  // An "em dash(es)" entry names a character, not a phrase: enforce the character itself.
+  const enforced = phrases.map(phrase => (/^em[\s-]?dash(?:es)?$/i.test(String(phrase).trim()) ? '—' : phrase));
+  return [...new Map(enforced.map(phrase => [normalizeSpace(phrase), String(phrase).trim()])).values()]
     .filter(Boolean);
 }
 
@@ -280,6 +421,7 @@ export async function checkCoverLetterDraft(draft, {
   cv,
   validatorError,
   bannedPhrases = SYSTEM_BANNED_PHRASES,
+  profile = null,
 } = {}) {
   const checks = [];
   const validDraft = draft && typeof draft === 'object' && !Array.isArray(draft);
@@ -312,11 +454,19 @@ export async function checkCoverLetterDraft(draft, {
   checks.push(check('company_matches_jd', companyMatches ? 'pass' : 'fail', { reasonCode: 'company_mismatch' }));
   checks.push(check('role_matches_jd', roleMatches ? 'pass' : 'fail', { reasonCode: 'role_mismatch' }));
 
-  const phraseMatches = [...new Set(bannedPhrases.filter(phrase => phrase && phrasePattern(phrase).test(candidateText)))];
+  const names = [company, role, jdCompany, jdRole];
+  const proseText = validDraft ? maskNames(textParts(draft).join('\n\n'), names) : '';
+  const phraseHits = [...new Set(bannedPhrases.filter(phrase => phrase && phrasePattern(phrase).test(proseText)))];
+  const technicalUses = phraseHits.filter(phrase => technicalUseAllowed(phrase, proseText, [jdText, cv || '']));
+  const phraseMatches = phraseHits.filter(phrase => !technicalUses.includes(phrase));
   checks.push(check('banned_phrases', phraseMatches.length ? 'fail' : 'pass', {
     reasonCode: phraseMatches.length ? 'banned_phrase' : undefined,
     matches: phraseMatches,
+    ...(technicalUses.length ? { technicalUses } : {}),
   }));
+
+  checks.push(excludedTopicsCheck(normalizedDraft, names));
+  checks.push(check('jd_letter_requests', 'pass', { requests: jdLetterRequests(jdText) }));
 
   checks.push(check('body_word_count', count >= 180 && count <= 260 ? 'pass' : 'fail', {
     wordCount: count, minimum: 180, maximum: 260, reasonCode: 'body_length_out_of_range',
@@ -373,7 +523,7 @@ export async function checkCoverLetterDraft(draft, {
     }));
   } else {
     try {
-      const result = await validateClaims({ claims, manifest, cv, jdText });
+      const result = await validateClaims({ claims, manifest, cv, jdText, profile });
       const results = Array.isArray(result?.results) ? result.results : [];
       const byId = new Map(results.map(item => [item?.claimId, item]));
       const duplicateResults = results.filter((item, index) => results.findIndex(other => other?.claimId === item?.claimId) !== index)
@@ -448,13 +598,14 @@ export async function runCoverLetterV2(draft, {
   cv,
   validatorError,
   bannedPhrases,
+  profile,
   outputDirectory = DEFAULT_OUTPUT_DIR,
   renderHtmlToPdf,
 } = {}) {
   const phrases = bannedPhrases || await loadBannedPhrases();
   const checked = await checkCoverLetterDraft(draft, {
     jdText, jdCompany, jdRole, listingCompany, listingTitle, profileName, validateClaims, manifest, cv, validatorError,
-    bannedPhrases: phrases,
+    bannedPhrases: phrases, profile: profile === undefined ? loadProfile() : profile,
   });
   if (!checked.ok) return checked;
 
@@ -527,7 +678,7 @@ export async function runCoverLetterV2(draft, {
   }
 }
 
-export async function approveCoverLetterV2(checkPath, { now = new Date(), expected = null } = {}) {
+export async function approveCoverLetterV2(checkPath, { now = new Date(), expected = null, confirmExclusionOverrides = [] } = {}) {
   const sidecarPath = resolve(checkPath);
   if (!sidecarPath.endsWith('.check.json')) throw new Error('Approval requires a .check.json sidecar');
   const sidecar = JSON.parse((await readFile(sidecarPath, 'utf8')).replace(/^\uFEFF/, ''));
@@ -557,12 +708,23 @@ export async function approveCoverLetterV2(checkPath, { now = new Date(), expect
       throw new Error(`Cover-letter v2 ${key} differs from the reviewed letter; refusing approval`);
     }
   }
+  // A letter that uses an excluded-topic exception is approved only when the approval names exactly those topics,
+  // so an exception can never ride along unnoticed (wave approvals pass none and are refused).
+  const overrides = sidecar.checks.find(item => item?.id === 'excluded_topics')?.overrides || [];
+  const overrideTopics = [...new Set(overrides.map(item => item?.topic))].sort();
+  const confirmed = [...new Set(confirmExclusionOverrides || [])].sort();
+  if (overrideTopics.join(',') !== confirmed.join(',')) {
+    throw new Error(overrideTopics.length
+      ? `This letter includes owner-approved excluded content (${overrideTopics.join(', ')}); confirm exactly those topics to approve it`
+      : 'No excluded-topic exception is recorded for this letter; nothing to confirm');
+  }
   const approvedPath = join(dirname(sidecarPath), `${stem}.approved.json`);
   const approval = {
     approvedAt: now.toISOString(),
     draftHash: sidecar.draftHash,
     textHash: sidecar.textHash,
     pdfHash: sidecar.pdfHash,
+    ...(overrides.length ? { exclusionOverrides: overrides } : {}),
   };
   const handle = await open(approvedPath, 'wx');
   try { await handle.writeFile(`${JSON.stringify(approval, null, 2)}\n`, 'utf8'); }
@@ -590,6 +752,7 @@ async function main() {
   const { values, positionals } = parseArgs({
     options: {
       approve: { type: 'string' },
+      'confirm-exclusion-override': { type: 'string', multiple: true },
       draft: { type: 'string' },
       'claims-validator': { type: 'string' },
       manifest: { type: 'string' },
@@ -601,13 +764,15 @@ async function main() {
     allowPositionals: true,
     strict: true,
   });
-  const usage = 'Usage: node cover-letter-v2.mjs --draft <draft.json> --company <canonical-company> --role <canonical-role> [--claims-validator <module>] [--manifest <manifest.json> --cv <cv.md>]\n       node cover-letter-v2.mjs --approve <check.json>';
+  const usage = 'Usage: node cover-letter-v2.mjs --draft <draft.json> --company <canonical-company> --role <canonical-role> [--claims-validator <module>] [--manifest <manifest.json> --cv <cv.md>]\n       node cover-letter-v2.mjs --approve <check.json> [--confirm-exclusion-override <topic> ...]';
   if (values.help) {
     console.log(usage);
     return;
   }
   if (values.approve) {
-    const approved = await approveCoverLetterV2(values.approve);
+    const approved = await approveCoverLetterV2(values.approve, {
+      confirmExclusionOverrides: values['confirm-exclusion-override'] || [],
+    });
     console.log(JSON.stringify(approved, null, 2));
     return;
   }

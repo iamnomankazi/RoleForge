@@ -460,7 +460,7 @@ const RISK_WORDS = new Set(('lead led leading leader manager managed managing se
 const APOSTROPHES = /[’‘`´]/g;
 // Connecting vocabulary a cited paraphrase may add without evidence. None of these words names a responsibility,
 // domain, audience or outcome; every other content word must come from the cited evidence.
-const PARAPHRASE_WORDS = new Set(('m s ve d ll re t also both especially earlier then during into together reliably '
+const PARAPHRASE_WORDS = new Set(('am m s ve d ll re t also both especially earlier then during into together reliably '
   + 'strongest example part putting making went completing studying skills code practical challenge software '
   + 'engineering familiar own projects project interface features feature application platform tool including').split(' '));
 // STOP_WORDS entries that assert a contribution or outcome; a cited paraphrase needs them in the evidence.
@@ -544,11 +544,75 @@ function creationObjectIsBareTechnology(text) {
  * PARAPHRASE_WORDS. Cross-item evidence, unknown or stale
  * evidence, and candidate-experience statements backed only by the job description all fail.
  */
-function validateCitedClaim(claim, claimId, evidence, allowed, jdText) {
+// Profile facts a letter may cite. Only the relocation preference is listed: it is a user-confirmed fact recorded
+// in config/profile.yml, not in cv.md. Work authorisation and graduation are deliberately absent (letters exclude them).
+export const PROFILE_EVIDENCE = Object.freeze({ 'profile:location.relocation': ['location', 'relocation'] });
+// Plain words a relocation sentence may add to the recorded wording ("relocate to the Tampere area").
+const RELOCATION_WORDS = new Set('live living currently move moving relocating area region city there'.split(' '));
+const AUTHORISATION_WORDS = /\b(?:permit|permits|visa|visas|sponsor\w*|authori[sz]\w*|eligib\w*|citizen\w*|immigration|right to work)\b/i;
+
+function profileStrings(value) {
+  if (typeof value === 'string') return [value];
+  if (value && typeof value === 'object' && !Array.isArray(value)) return Object.values(value).flatMap(profileStrings);
+  return [];
+}
+
+function validateProfileClaim(claim, claimId, key, profile, jdText) {
+  const fail = (reasonCode) => ({ claimId, status: 'fail', reasonCode, anchorIds: [] });
+  let value = profile;
+  for (const part of PROFILE_EVIDENCE[key]) value = value && typeof value === 'object' ? value[part] : undefined;
+  const sourceText = profileStrings(value).join(' \n ');
+  if (!sourceText.trim()) return fail('profile_evidence_missing');
+  const text = claim.text;
+  const evidenceText = comparableEntity(sourceText);
+  if (AUTHORISATION_WORDS.test(text)) return fail('relocation_with_authorization');
+  // The record states a willingness to relocate; a sentence citing it must be about relocating and must not turn the
+  // record's conditional wording into a fact ("I have a job offer").
+  if (!/\breloca\w*|\bmov(?:e|ing)\b/i.test(text)) return fail('not_a_relocation_statement');
+  // Shared vocabulary cannot establish willingness: a negated record or claim never validates.
+  const NEGATION = /\b(?:not|no|never|cannot|can['’]?t|unable|unwilling|won['’]?t|neither|nor)\b/i;
+  if (NEGATION.test(sourceText)) return fail('profile_evidence_negated');
+  if (NEGATION.test(text)) return fail('unsupported_wording');
+  if (/\b(?:have|has|had|got|received|hold|holding|accepted)\b/i.test(text)) return fail('unsupported_wording');
+  if (claimedUnits(text).some((unit) => unit.kind !== 'word' && !evidenceText.includes(comparableEntity(unit.value)))) return fail('unsupported_profile_fact');
+  if (actionLemmas(text).size || creationRelationships(text).length) return fail('unsupported_action');
+  // A destination named by the posting ("relocate to Tampere") is the job's place, not a candidate fact: a JD-only name
+  // must follow "to"/"near" ("to the Tampere area"), so "I am based in Tampere" cannot borrow it.
+  const jd = comparableEntity(jdText || '');
+  const destination = (name) => new RegExp(`\\b(?:to|near)\\s+(?:the\\s+)?${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
+    .test(comparableEntity(text));
+  if (properNounTokens(text).some((name) => !tokenInEvidence(name, evidenceText)
+      && !(jd && tokenInEvidence(name, jd) && destination(name)))) return fail('unknown_named_entity');
+  const evidenceWords = new Set(evidenceText.match(/[a-z]+/g) || []);
+  if (riskWords(text).some((word) => !evidenceWords.has(word))) return fail('unsupported_risk_word');
+  const extra = unsupportedWords(text, evidenceText).filter((word) => !RELOCATION_WORDS.has(word)
+    && !(jd && properNounTokens(text).includes(word) && tokenInEvidence(word, jd)));
+  if (extra.length) return fail('unsupported_wording');
+  return { claimId, status: 'pass', anchorIds: [key], sourceHash: sha256(sourceText) };
+}
+
+// "I also know Java." / "I know Java and SQL as well." A plain statement of knowing skills listed in the CV skills
+// section: the listed names must be exactly the cited skills, and nothing about use, depth or experience is added.
+const SKILL_MENTION_RE = /^I\s+(?:also\s+)?know\s+(.+?)(?:,?\s+(?:too|as\s+well))?\s*[.!]?$/i;
+
+function plainSkillMention(text, cited) {
+  if (!cited.length || !cited.every((entry) => entry.type === 'technology' && entry.sectionType === 'technology')) return false;
+  const match = SKILL_MENTION_RE.exec(String(text).trim());
+  if (!match) return false;
+  const items = match[1].split(/\s*,\s*(?:and\s+)?|\s+and\s+/i).map((item) => normalizeText(item)).filter(Boolean);
+  const skills = new Set(cited.map((entry) => normalizeText(entry.text)));
+  return items.length === skills.size && items.every((item) => skills.has(item));
+}
+
+function validateCitedClaim(claim, claimId, evidence, allowed, jdText, profile) {
   const fail = (reasonCode, anchorIds = []) => ({ claimId, status: 'fail', reasonCode, anchorIds });
   const text = claim.text;
   const units = claimedUnits(text).filter((unit) => unit.kind !== 'word');
   const names = properNounTokens(text);
+  if (evidence.some((id) => typeof id === 'string' && id.startsWith('profile:'))) {
+    if (evidence.length !== 1 || !Object.hasOwn(PROFILE_EVIDENCE, evidence[0])) return fail('evidence_invalid');
+    return validateProfileClaim(claim, claimId, evidence[0], profile, jdText);
+  }
   if (evidence.length === 1 && evidence[0] === 'jd') {
     const jd = comparableEntity(jdText || '');
     if (!jd) return fail('jd_context_missing');
@@ -567,6 +631,7 @@ function validateCitedClaim(claim, claimId, evidence, allowed, jdText) {
   if (cited.some((entry) => !entry)) return fail('evidence_not_allowed');
   const ids = cited.map((entry) => entry.id);
   if (new Set(cited.map((entry) => entry.section)).size !== 1) return fail('evidence_spans_items', ids);
+  if (plainSkillMention(text, cited)) return { claimId, status: 'pass', anchorIds: ids };
   const itemHeading = String(cited[0].section || '').split(' / ').at(-1);
   const evidenceText = comparableEntity([...cited.map((entry) => entry.text), itemHeading].join(' \n '));
   const missing = units.filter((unit) => unitCovered(unit, cited).length === 0);
@@ -588,7 +653,7 @@ function validateCitedClaim(claim, claimId, evidence, allowed, jdText) {
   return { claimId, status: 'pass', anchorIds: ids };
 }
 
-export function validateClaims({ claims, manifest, cv, jdText = '' } = {}) {
+export function validateClaims({ claims, manifest, cv, jdText = '', profile = null } = {}) {
   try {
     if (validateManifest(manifest).length) throw new Error('manifest_invalid');
     if (typeof cv !== 'string') throw new Error('cv_missing');
@@ -606,7 +671,7 @@ export function validateClaims({ claims, manifest, cv, jdText = '' } = {}) {
         if (!Array.isArray(claim.evidence) || claim.evidence.length === 0) {
           return { claimId, status: 'fail', reasonCode: 'evidence_invalid', anchorIds: [] };
         }
-        return validateCitedClaim(claim, claimId, claim.evidence, allowed, jdText);
+        return validateCitedClaim(claim, claimId, claim.evidence, allowed, jdText, profile);
       }
       const units = claimedUnits(claim.text);
       if (units.length === 0) return { claimId, status: 'fail', reasonCode: 'no_anchorable_facts', anchorIds: [] };
