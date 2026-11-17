@@ -32,6 +32,7 @@ import {
 } from './liveness-browser.mjs';
 import { loadApplicationProfile } from './application-profile.mjs';
 import { reportCompensationFor, verifiedPostingCapture } from './salary-evidence.mjs';
+import { jobRecordSalary } from './salary-policy.mjs';
 import {
   attachOperationalArtifacts,
   inspectOperationalApplicationForm,
@@ -120,7 +121,7 @@ export function buildCandidateFormContext(contract) {
     canEmployFromFinland: row.canEmployFromFinland === true || row.can_employ_from_finland === true,
     jdText,
     // Structured pay from the job record; the salary policy treats any amount here as advertised.
-    advertisedSalary: row.salary ?? row.compensation ?? null,
+    advertisedSalary: jobRecordSalary(row),
     // Complete-posting capture and exact-candidate report pay (salary-evidence.mjs). A legacy-derived identity has
     // no exact candidate ID, so neither can be established and salary stays manual.
     ...salaryEvidenceFor(contract),

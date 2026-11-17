@@ -145,6 +145,56 @@ function structuredSalary(value) {
   };
 }
 
+// The structured job-record keys structuredSalary reads; an object with any other key is an unfamiliar schema.
+const KNOWN_SALARY_KEYS = new Set(['min', 'max', 'minimum', 'maximum', 'from', 'to', 'currency', 'period', 'interval', 'unit', 'net', 'basis', 'type']);
+const AMOUNT_KEYS = ['min', 'max', 'minimum', 'maximum', 'from', 'to'];
+
+function safeJson(value) {
+  try { return JSON.stringify(value) ?? String(value); } catch { return String(value); }
+}
+
+/**
+ * Recognised "no pay" job-record values: nothing stored, an explicit marker ("not stated", "N/A"), an empty list, or
+ * a scanner placeholder in the known schema whose amounts are all absent or zero (e.g. {min: 0, max: 0, currency}).
+ * Everything else (unknown keys, non-empty lists, bare numbers, unreadable text) is not recognised as "no pay".
+ */
+function recordSalaryIsNoPay(value) {
+  if (value === null || value === undefined) return true;
+  if (typeof value === 'string') return !clean(value) || NO_PAY_STATED.test(clean(value));
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value !== 'object') return false;
+  const keys = Object.keys(value);
+  if (!keys.every((key) => KNOWN_SALARY_KEYS.has(key))) return false;
+  const empty = (item) => item === null || item === undefined || item === '';
+  // Placeholder form only: the descriptive keys may hold a currency code, a period word, a boolean or a short word,
+  // never text that could itself state pay ("EUR 80,000 per year", "According to collective agreement").
+  const word = (pattern) => (item) => empty(item) || (typeof item === 'string' && pattern.test(item.trim()));
+  const placeholderValue = {
+    currency: word(/^[A-Z]{3}$/i),
+    period: word(/^(?:year|yearly|annual|month|monthly|week|weekly|day|daily|hour|hourly)$/i),
+    net: (item) => empty(item) || typeof item === 'boolean',
+    basis: word(/^(?:gross|net|brutto|netto|salary|base|base salary|fixed|range|annual|yearly|monthly|hourly)$/i),
+  };
+  placeholderValue.interval = placeholderValue.period;
+  placeholderValue.unit = placeholderValue.period;
+  placeholderValue.type = placeholderValue.basis;
+  if (!keys.every((key) => AMOUNT_KEYS.includes(key) || placeholderValue[key](value[key]))) return false;
+  return AMOUNT_KEYS.every((key) => empty(value[key]) || value[key] === 0);
+}
+
+/**
+ * The job record's salary evidence. A record may carry `salary` and `compensation`; when both hold something other
+ * than a recognised "no pay" value they are passed together in a shape the policy does not recognise, so the answer
+ * stays manual rather than silently ignoring one of them.
+ */
+export function jobRecordSalary(row = {}) {
+  const salary = row?.salary;
+  const compensation = row?.compensation;
+  if (recordSalaryIsNoPay(salary)) return recordSalaryIsNoPay(compensation) ? (salary ?? null) : compensation;
+  if (recordSalaryIsNoPay(compensation)) return salary;
+  return { salary, compensation };
+}
+
 /**
  * What the posting says about pay. status: 'none' (nothing found), 'advertised' (a salary statement with a known
  * currency and period), or 'uncertain' (an amount, a collective-agreement reference, or structured salary data whose
@@ -154,10 +204,12 @@ export function detectAdvertisedSalary({ jdText = '', postingText = '', advertis
   const mentions = [];
   const structured = structuredSalary(advertisedSalary);
   if (structured) mentions.push({ source: 'job_record', text: formatStructured(structured), parsed: structured });
-  // A stored pay text that cannot be read ("According to collective agreement", "Salary 2000 per month" whose
-  // amount looks like a year) is still pay evidence: it makes the result uncertain, never "no pay".
-  else if (typeof advertisedSalary === 'string' && clean(advertisedSalary) && !NO_PAY_STATED.test(clean(advertisedSalary))) {
-    mentions.push({ source: 'job_record', text: clean(advertisedSalary).slice(0, 240), parsed: null });
+  // Any job-record salary that is not a recognised "no pay" value is pay evidence even when it cannot be read: a
+  // text such as "According to collective agreement", an amount that looks like a year, or an object in an unfamiliar
+  // schema ({range: {...}}, {min_salary, ...}, {amount: "..."}). It makes the result uncertain, never "no pay".
+  else if (!recordSalaryIsNoPay(advertisedSalary)) {
+    const text = typeof advertisedSalary === 'string' ? clean(advertisedSalary) : clean(safeJson(advertisedSalary));
+    mentions.push({ source: 'job_record', text: text.slice(0, 240), parsed: null });
   }
   // advertised_comp from the evaluation report of this exact candidate (attached by salary-evidence.mjs).
   for (const item of reportValues) {

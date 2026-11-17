@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { reportCompensationFor, verifiedPostingCapture } from '../salary-evidence.mjs';
+import { captureFreshnessProblem, POSTING_CAPTURE_MAX_AGE_DAYS, reportCompensationFor, verifiedPostingCapture } from '../salary-evidence.mjs';
 import { buildCandidateFormContext } from '../application-browser-executor.mjs';
 
 const sha = (value) => createHash('sha256').update(value).digest('hex');
@@ -22,7 +22,7 @@ function fixture({ record = {}, entry = {}, tool = 'enrich-run', text = POSTING,
   mkdirSync(join(live, 'descriptions'), { recursive: true });
   writeFileSync(join(live, 'descriptions', `${ID}.txt`), `${text}\n`);
   const rows = { [ID]: {
-    status: 'active', method: 'api', checked_at: '2031-01-01T00:00:00.000Z', final_url: URL_1,
+    status: 'active', method: 'api', checked_at: new Date(Date.now() - 86_400_000).toISOString(), final_url: URL_1,
     description_chars: POSTING.length, description_sha256: sha(Buffer.from(POSTING, 'utf8')), description_source: 'api', posting_complete: true,
     reason: 'live', ...record,
   } };
@@ -114,11 +114,11 @@ test('a report naming the candidate only in its Machine Summary, or unreadable r
   try {
     report(dir, 1, OTHER, { advertised_comp: 'EUR 80,000-90,000 per year', candidate_id: ID });
     assert.equal(reportCompensationFor(ID, { reportsDir: dir }).status, 'conflict', 'header B, summary A is contradictory for A');
-    assert.equal(reportCompensationFor(ID, { reportsDir: join(dir, 'missing') }).status, 'none', 'no reports directory at all: nothing to read');
+    assert.equal(reportCompensationFor(ID, { reportsDir: join(dir, 'missing') }).status, 'unverified', 'no reports directory: nothing was inspected');
     const notDir = join(dir, '001-example-oy-2031-01-01.md');
     const unreadable = reportCompensationFor(ID, { reportsDir: notDir });
     assert.equal(unreadable.status, 'unverified', 'a reports path that cannot be listed');
-    assert.match(unreadable.reason, /could not be read/);
+    assert.match(unreadable.reason, /could not be read|not available/);
     assert.equal(reportCompensationFor(null, { reportsDir: dir }).status, 'unverified');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -147,4 +147,42 @@ test('fourth review: two report files with the same number make report pay unver
       JSON.stringify({ advertised_comp: null }), '```', ''].join('\n'));
     assert.equal(reportCompensationFor(ID, { reportsDir: dir }).status, 'unverified');
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('final pass: an unavailable reports directory is unverified; none needs an inspected directory', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'salary-reports-'));
+  try {
+    assert.equal(reportCompensationFor(ID, { reportsDir: dir }).status, 'none', 'inspected, empty directory');
+    for (const reportsDir of [join(dir, 'missing'), undefined, '']) {
+      const result = reportCompensationFor(ID, { reportsDir });
+      assert.equal(result.status, 'unverified', String(reportsDir));
+      assert.match(result.reason, /not available/);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('final pass: posting captures must be recent; missing, malformed, future and expired times never count', () => {
+  const now = new Date('2031-06-15T12:00:00.000Z');
+  const at = (days) => new Date(now.getTime() - days * 86_400_000).toISOString();
+  assert.equal(captureFreshnessProblem(at(1), { now }), null);
+  assert.equal(captureFreshnessProblem(at(POSTING_CAPTURE_MAX_AGE_DAYS), { now }), null, 'exactly at the limit');
+  assert.equal(captureFreshnessProblem(new Date(now.getTime() + 60_000).toISOString(), { now }), null, 'small clock skew');
+  const cases = [
+    [undefined, /missing or malformed/], ['', /missing or malformed/], ['yesterday', /missing or malformed/],
+    ['2031-06-15', /missing or malformed/], ['2031-02-30T00:00:00Z', /missing or malformed/], ['2031-04-31T00:00:00Z', /missing or malformed/], ['2031-06-10T24:00:00Z', /missing or malformed/],
+    [new Date(now.getTime() + 3_600_000).toISOString(), /in the future/],
+    [at(POSTING_CAPTURE_MAX_AGE_DAYS + 1), /days old/],
+  ];
+  for (const [checkedAt, reason] of cases) assert.match(captureFreshnessProblem(checkedAt, { now }) || '', reason, String(checkedAt));
+  for (const [checkedAt, reason] of [[at(30), /days old/], [undefined, /malformed/], [new Date(now.getTime() + 86_400_000).toISOString(), /future/]]) {
+    const { root, candidatesPath } = fixture({ record: { checked_at: checkedAt } });
+    try {
+      const result = verifiedPostingCapture({ candidatesPath, candidateId: ID, now });
+      assert.equal(result.complete, false, String(checkedAt));
+      assert.match(result.reason, reason);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+  const { root, candidatesPath } = fixture({ record: { checked_at: at(2) } });
+  try { assert.equal(verifiedPostingCapture({ candidatesPath, candidateId: ID, now }).complete, true); }
+  finally { rmSync(root, { recursive: true, force: true }); }
 });

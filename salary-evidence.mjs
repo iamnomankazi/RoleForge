@@ -6,16 +6,17 @@
  *     are intact, the capture is of this exact candidate's own posting URL, active, not re-sourced, and recorded by
  *     candidate-liveness.mjs as the WHOLE posting including its structured pay fields (`posting_complete`, set only
  *     for ATS APIs that return every section; scan excerpts, browser captures of one page section and older
- *     captures never count).
+ *     captures never count), and taken within POSTING_CAPTURE_MAX_AGE_DAYS (missing, malformed, future or older
+ *     capture times never count).
  *   reportCompensation: advertised_comp from evaluation reports that name this exact candidate (no company/title
- *     matching). Unreadable report files, or a report whose header and Machine Summary name different candidates,
+ *     matching). A missing reports directory, unreadable report files, or a report whose header and Machine Summary name different candidates,
  *     make the evidence unverified or a conflict.
  *
  * Both are inputs to salary-policy.mjs, which leaves the salary answer manual whenever either is not established.
  */
 
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { loadReportIndex } from './tracker-identity.mjs';
 
@@ -40,7 +41,39 @@ function samePostingUrl(a, b) {
   }
 }
 
-export function verifiedPostingCapture({ candidatesPath, candidateId } = {}) {
+/**
+ * How old a posting capture may be when salary is answered automatically. Employers edit postings (pay is often
+ * added or changed after publication); the application-time liveness check only proves the posting is still open,
+ * not that its text is unchanged, so it does not renew the capture. An older capture leaves salary manual; a new
+ * liveness run plus enrich-run renews it.
+ */
+export const POSTING_CAPTURE_MAX_AGE_DAYS = 14;
+// Allowed clock difference for a capture timestamp slightly ahead of this machine's clock.
+const FUTURE_SKEW_MS = 5 * 60 * 1000;
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/** Why a capture timestamp is not fresh enough, or null when it is. */
+export function captureFreshnessProblem(checkedAt, { now = new Date(), maxAgeDays = POSTING_CAPTURE_MAX_AGE_DAYS } = {}) {
+  if (typeof checkedAt !== 'string' || !ISO_TIMESTAMP.test(checkedAt)) return 'the capture time is missing or malformed';
+  // Reject impossible calendar values (Feb 30, Nov 31, hour 24) that Date.parse would roll over to a real date.
+  const [, year, month, day, hour, minute, second] = checkedAt.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/).map(Number);
+  const probe = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day
+      || probe.getUTCHours() !== hour || probe.getUTCMinutes() !== minute || probe.getUTCSeconds() !== second) {
+    return 'the capture time is missing or malformed';
+  }
+  const at = Date.parse(checkedAt);
+  const nowMs = now instanceof Date ? now.getTime() : Number(now);
+  if (!Number.isFinite(at) || !Number.isFinite(nowMs)) return 'the capture time is missing or malformed';
+  if (at - nowMs > FUTURE_SKEW_MS) return 'the capture time is in the future';
+  const ageDays = (nowMs - at) / 86_400_000;
+  if (ageDays > maxAgeDays) {
+    return `the capture is ${Math.floor(ageDays)} days old (limit ${maxAgeDays}); the posting may have changed since, so run a new liveness check and enrich-run`;
+  }
+  return null;
+}
+
+export function verifiedPostingCapture({ candidatesPath, candidateId, now = new Date(), maxAgeDays = POSTING_CAPTURE_MAX_AGE_DAYS } = {}) {
   if (typeof candidateId !== 'string' || !SAFE_ID.test(candidateId)) return unverified('no exact candidate ID');
   if (typeof candidatesPath !== 'string' || !candidatesPath) return unverified('the source run is unknown');
   const runDir = dirname(candidatesPath);
@@ -73,6 +106,8 @@ export function verifiedPostingCapture({ candidatesPath, candidateId } = {}) {
   let record;
   try { record = JSON.parse(bytes.toString('utf8'))?.[sourceId]; } catch { return unverified('the linked liveness capture cannot be read'); }
   if (record?.status !== 'active') return unverified('the capture is not of an active posting');
+  const stale = captureFreshnessProblem(record.checked_at, { now, maxAgeDays });
+  if (stale) return unverified(stale);
   if (!['api', 'browser'].includes(record.method) || record.description_source !== record.method) {
     return unverified('the capture does not record that its text came from the posting itself (captures made before this field existed)');
   }
@@ -99,6 +134,11 @@ const UNREADABLE_REPORTS = /^(?:Could not read reports directory|Could not parse
 
 export function reportCompensationFor(candidateId, { reportsDir } = {}) {
   if (typeof candidateId !== 'string' || !candidateId) return { status: 'unverified', values: [], reason: 'no exact candidate ID' };
+  // 'none' means a reports directory was read and holds no report of this candidate; an absent or unreadable
+  // directory proves nothing.
+  let isDirectory = false;
+  try { isDirectory = typeof reportsDir === 'string' && reportsDir !== '' && statSync(reportsDir).isDirectory(); } catch { /* below */ }
+  if (!isDirectory) return { status: 'unverified', values: [], reason: 'the evaluation reports directory is not available' };
   const index = loadReportIndex(reportsDir);
   if ((index.warnings || []).some((warning) => UNREADABLE_REPORTS.test(String(warning))) || (index.duplicateNumbers || []).length) {
     return { status: 'unverified', values: [], reason: 'some evaluation reports could not be read' };

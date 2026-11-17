@@ -301,3 +301,46 @@ test('fourth review: compound net-pay words stay manual', () => {
   }
   assert.equal(decide('Expected annual gross salary range for this network role (EUR)').value, 'EUR 50,000-56,000/year', '"network" is not net');
 });
+
+test('final pass: unfamiliar job-record salary schemas are uncertain; recognised no-pay values still fill (both paths)', () => {
+  const field = textField(ANNUAL);
+  const unknown = [
+    { range: { min: 80000, max: 90000 } }, { min_salary: 80000, max_salary: 90000 }, { amount: 'EUR 80,000/year' },
+    { min: 0, max: 0, note: 'EUR 80,000' }, ['EUR 80,000'], 80000, { min: '0', max: '0' },
+  ];
+  for (const advertisedSalary of unknown) {
+    const decision = decide(ANNUAL, { advertisedSalary });
+    assert.equal(decision.value, null, JSON.stringify(advertisedSalary));
+    assert.equal(decision.reasonCode, 'advertised_uncertain', JSON.stringify(advertisedSalary));
+    assert.ok(decision.proposal, 'a proposal is still offered');
+    const context = { ...verified, advertisedSalary };
+    assert.equal(canonicalFieldValue(profile, classifyFieldSemantics(field), { field, context }) ?? null, null, `engine ${JSON.stringify(advertisedSalary)}`);
+    assert.equal(groundedFieldValue(profile, 'salary', { ...context, question: field.label, field }) ?? null, null, `legacy ${JSON.stringify(advertisedSalary)}`);
+  }
+  for (const advertisedSalary of [null, undefined, '', 'not stated', [], {}, { min: 0, max: 0 }, { min: 0, max: 0, currency: 'USD' }, { min: null, max: null }]) {
+    assert.equal(decide(ANNUAL, { advertisedSalary }).value, 'EUR 50,000-56,000/year', `recognised no pay: ${JSON.stringify(advertisedSalary)}`);
+    const context = { ...verified, advertisedSalary };
+    assert.equal(canonicalFieldValue(profile, classifyFieldSemantics(field), { field, context }), 'EUR 50,000-56,000/year');
+    assert.equal(groundedFieldValue(profile, 'salary', { ...context, question: field.label, field }), 'EUR 50,000-56,000/year');
+  }
+});
+
+test('final pass review: pay text in descriptive keys is not a placeholder; salary and compensation are both read', async () => {
+  for (const advertisedSalary of [
+    { currency: 'EUR', basis: 'EUR 80,000-90,000 per year' }, { min: 0, max: 0, type: 'Salary 4000 per month' },
+    { period: 'According to collective agreement' }, { min: 0, max: 0, currency: 'EUR', net: 'EUR 3,500 net/month' },
+    { min: 0, max: 0, currency: 'EUR 80000' },
+  ]) {
+    assert.equal(detectAdvertisedSalary({ advertisedSalary }).status, 'uncertain', JSON.stringify(advertisedSalary));
+  }
+  for (const advertisedSalary of [{ min: 0, max: 0, currency: 'EUR', period: 'year', net: false, basis: 'gross' }]) {
+    assert.equal(detectAdvertisedSalary({ advertisedSalary }).status, 'none', JSON.stringify(advertisedSalary));
+  }
+  const { jobRecordSalary } = await import('../salary-policy.mjs');
+  const status = (row) => detectAdvertisedSalary({ advertisedSalary: jobRecordSalary(row) }).status;
+  assert.equal(status({ salary: { min: 0, max: 0 }, compensation: 'EUR 80,000 per year' }), 'advertised', 'placeholder salary does not hide compensation');
+  assert.equal(status({ salary: '', compensation: { range: { min: 1, max: 2 } } }), 'uncertain');
+  assert.equal(status({ salary: { min: 80000, max: 90000, currency: 'EUR', period: 'year' }, compensation: 'TES' }), 'uncertain', 'both present: manual');
+  assert.equal(status({ salary: null, compensation: null }), 'none');
+  assert.equal(status({ salary: { min: 0, max: 0 }, compensation: 'not stated' }), 'none');
+});
